@@ -30,3 +30,12 @@
 *.exe
 *.out
 *.app
+
+# stuff
+*.pdb
+*.ilk
+*.vb
+*.idb
+include/SDL2
+*.sublime-workspace
+*.sublime-project
