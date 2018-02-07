@@ -12,6 +12,7 @@ typedef uint8_t u8;
 typedef uint32_t u32;
 typedef uint64_t u64;
 
+// @logging
 void die(const char *fmt, ...) {
   va_list args;
   va_start(args, fmt);
@@ -31,8 +32,32 @@ void sdl_die(const char *fmt, ...) {
 
 #define sdl_try(stmt) ((stmt) && (die("%s\n", SDL_GetError()),0))
 
+#define gl_ok_or_die _gl_ok_or_die(__FILE__, __LINE__)
+static void _gl_ok_or_die(const char* file, int line) {
+  GLenum error_code;
+  const char* error;
+
+  error_code = glGetError();
+
+  if (error_code == GL_NO_ERROR) return;
+
+  switch (error_code) {
+    case GL_INVALID_ENUM:                  error = "INVALID_ENUM"; break;
+    case GL_INVALID_VALUE:                 error = "INVALID_VALUE"; break;
+    case GL_INVALID_OPERATION:             error = "INVALID_OPERATION"; break;
+    case GL_STACK_OVERFLOW:                error = "STACK_OVERFLOW"; break;
+    case GL_STACK_UNDERFLOW:               error = "STACK_UNDERFLOW"; break;
+    case GL_OUT_OF_MEMORY:                 error = "OUT_OF_MEMORY"; break;
+    case GL_INVALID_FRAMEBUFFER_OPERATION: error = "INVALID_FRAMEBUFFER_OPERATION"; break;
+    default: error = "unknown error";
+  };
+  die("GL error at %s:%u: (%u) %s\n", file, line, error_code, error);
+}
+
 // @math
 
+// @perlin
+// good explanation of perlin noise: http://flafla2.github.io/2014/08/09/perlinnoise.html
 static float perlin__grad(int hash, float x, float y, float z) {
   switch (hash&0xF) {
     case 0x0: return  x + y;
@@ -113,8 +138,8 @@ static float perlin(float x, float y, float z) {
                                  perlin__grad(p[BB+1], x-1, y-1, z-1 ))));
 }
 
-#define ARRAYLEN(a) (sizeof(a)/sizeof(*a))
-#define ARRAY_LAST(a) ((a)[ARRAYLEN(a)-1])
+#define ARRAY_LEN(a) (sizeof(a)/sizeof(*a))
+#define ARRAY_LAST(a) ((a)[ARRAY_LEN(a)-1])
 
 template<class T>
 T clamp(T x, T a, T b) {
@@ -213,6 +238,45 @@ static m4 operator*(m4 a, m4 b) {
   };
 }
 
+static m4 m4_transpose(m4 m) {
+  m4 r;
+  r.d[0] = m.d[0];
+  r.d[1] = m.d[4];
+  r.d[2] = m.d[8];
+  r.d[3] = m.d[12];
+  r.d[4] = m.d[1];
+  r.d[5] = m.d[5];
+  r.d[6] = m.d[9];
+  r.d[7] = m.d[13];
+  r.d[8] = m.d[2];
+  r.d[9] = m.d[6];
+  r.d[10] = m.d[10];
+  r.d[11] = m.d[14];
+  r.d[12] = m.d[3];
+  r.d[13] = m.d[7];
+  r.d[14] = m.d[11];
+  r.d[15] = m.d[15];
+  return r;
+}
+
+static v3 operator*(m4 m, v3 v) {
+  v3 r;
+  r.x = m.d[0]*v.x + m.d[1]*v.y + m.d[2]*v.z;
+  r.y = m.d[4]*v.x + m.d[5]*v.y + m.d[6]*v.z;
+  r.z = m.d[8]*v.x + m.d[9]*v.y + m.d[10]*v.z;
+  return r;
+}
+
+static float len(v3 v) {
+  return sqrtf(v.x*v.x + v.y*v.y + v.z*v.z);
+}
+
+static float lensq(v3 v) {
+  return v.x*v.x + v.y*v.y + v.z*v.z;
+}
+
+
+// camera
 struct Camera {
   v3 pos;
   v2 look;
@@ -251,43 +315,6 @@ static void camera_strafe_right(Camera *camera, float speed) {
 
 static void camera_strafe_left(Camera *camera, float speed) {
   return camera_strafe_right(camera, -speed);
-}
-
-static m4 m4_transpose(m4 m) {
-  m4 r;
-  r.d[0] = m.d[0];
-  r.d[1] = m.d[4];
-  r.d[2] = m.d[8];
-  r.d[3] = m.d[12];
-  r.d[4] = m.d[1];
-  r.d[5] = m.d[5];
-  r.d[6] = m.d[9];
-  r.d[7] = m.d[13];
-  r.d[8] = m.d[2];
-  r.d[9] = m.d[6];
-  r.d[10] = m.d[10];
-  r.d[11] = m.d[14];
-  r.d[12] = m.d[3];
-  r.d[13] = m.d[7];
-  r.d[14] = m.d[11];
-  r.d[15] = m.d[15];
-  return r;
-}
-
-static v3 operator*(m4 m, v3 v) {
-  v3 r;
-  r.x = m.d[0]*v.x + m.d[1]*v.y + m.d[2]*v.z;
-  r.y = m.d[4]*v.x + m.d[5]*v.y + m.d[6]*v.z;
-  r.z = m.d[8]*v.x + m.d[9]*v.y + m.d[10]*v.z;
-  return r;
-}
-
-static float len(v3 v) {
-  return sqrtf(v.x*v.x + v.y*v.y + v.z*v.z);
-}
-
-static float lensq(v3 v) {
-  return v.x*v.x + v.y*v.y + v.z*v.z;
 }
 
 static m4 camera_get_projection_matrix(Camera *camera, float fov, float nearz, float farz, float screen_ratio) {
@@ -355,28 +382,7 @@ static m4 camera_get_projection_matrix(Camera *camera, float fov, float nearz, f
 }
 
 
-#define gl_ok_or_die _gl_ok_or_die(__FILE__, __LINE__)
-static void _gl_ok_or_die(const char* file, int line) {
-  GLenum error_code;
-  const char* error;
-
-  error_code = glGetError();
-
-  if (error_code == GL_NO_ERROR) return;
-
-  switch (error_code) {
-    case GL_INVALID_ENUM:                  error = "INVALID_ENUM"; break;
-    case GL_INVALID_VALUE:                 error = "INVALID_VALUE"; break;
-    case GL_INVALID_OPERATION:             error = "INVALID_OPERATION"; break;
-    case GL_STACK_OVERFLOW:                error = "STACK_OVERFLOW"; break;
-    case GL_STACK_UNDERFLOW:               error = "STACK_UNDERFLOW"; break;
-    case GL_OUT_OF_MEMORY:                 error = "OUT_OF_MEMORY"; break;
-    case GL_INVALID_FRAMEBUFFER_OPERATION: error = "INVALID_FRAMEBUFFER_OPERATION"; break;
-    default: error = "unknown error";
-  };
-  die("GL error at %s:%u: (%u) %s\n", file, line, error_code, error);
-}
-
+// openglstuff
 GLuint array_element_buffer_create() {
   GLuint vao, ebo, vbo;
   glGenVertexArrays(1, &vao);
@@ -423,36 +429,33 @@ GLuint texture_load(const char *filename) {
 
 // @vertex_shader
 const char *vertex_shader = R"VSHADER(
-#version 330 core
+  #version 330 core
 
-layout(location = 0) in vec3 pos;
-layout(location = 1) in vec2 tpos;
-out vec2 ftpos;
-uniform mat4 ucamera;
+  layout(location = 0) in vec3 pos;
+  layout(location = 1) in vec2 tpos;
+  out vec2 ftpos;
+  uniform mat4 ucamera;
 
-void main() {
-  vec4 p = ucamera * vec4(pos, 1.0f);
-  gl_Position = p;
-  ftpos = tpos;
-}
-)VSHADER";
+  void main() {
+    vec4 p = ucamera * vec4(pos, 1.0f);
+    gl_Position = p;
+    ftpos = tpos;
+  }
+  )VSHADER";
 
 // @fragment_shader
 const char *fragment_shader = R"FSHADER(
-#version 330 core
+  #version 330 core
 
-in vec2 ftpos;
-out vec4 fcolor;
+  in vec2 ftpos;
+  out vec4 fcolor;
 
-uniform sampler2D utexture;
+  uniform sampler2D utexture;
 
-void main() {
-  fcolor = vec4(texture(utexture, ftpos).xyz, 1.0f);
-}
-
-)FSHADER";
-
-typedef GLuint Shader;
+  void main() {
+    fcolor = vec4(texture(utexture, ftpos).xyz, 1.0f);
+  }
+  )FSHADER";
 
 GLuint shader_create(const char *vertex_shader_source, const char *fragment_shader_source) {
   GLint success;
@@ -490,6 +493,8 @@ GLuint shader_create(const char *vertex_shader_source, const char *fragment_shad
   return p;
 }
 
+
+// game
 enum BlockType: u8 {
   BLOCKTYPE_AIR,
   BLOCKTYPE_DIRT,
@@ -544,7 +549,7 @@ static void push_block_face(v3 p, BlockType type, Direction dir) {
   const float size = 1.0f;
   const float tsize = 1.0f/3.0f;
 
-  if (state.num_vertices + 4 >= ARRAYLEN(state.vertices) || state.num_elements + 6 > ARRAYLEN(state.elements))
+  if (state.num_vertices + 4 >= ARRAY_LEN(state.vertices) || state.num_elements + 6 > ARRAY_LEN(state.elements))
     return;
 
 
@@ -570,10 +575,10 @@ static void push_block_face(v3 p, BlockType type, Direction dir) {
     } break;
 
     case DIRECTION_Z: {
-      state.vertices[state.num_vertices++] = {p.x, p.y, p.z+size, tside.x1, tside.y0};
       state.vertices[state.num_vertices++] = {p.x+size, p.y, p.z+size, tside.x0, tside.y0};
-      state.vertices[state.num_vertices++] = {p.x+size, p.y+size, p.z+size, tside.x0, tside.y1};
+      state.vertices[state.num_vertices++] = {p.x, p.y, p.z+size, tside.x1, tside.y0};
       state.vertices[state.num_vertices++] = {p.x, p.y+size, p.z+size, tside.x1, tside.y1};
+      state.vertices[state.num_vertices++] = {p.x+size, p.y+size, p.z+size, tside.x0, tside.y1};
     } break;
 
     case DIRECTION_X: {
@@ -610,7 +615,7 @@ static void push_block_face(v3 p, BlockType type, Direction dir) {
 
 static void push_cube(v3 p) {
   const float size = 1.0f;
-  if (state.num_vertices + 16 >= ARRAYLEN(state.vertices) || state.num_elements + 12 > ARRAYLEN(state.elements))
+  if (state.num_vertices + 16 >= ARRAY_LEN(state.vertices) || state.num_elements + 12 > ARRAY_LEN(state.elements))
     return;
 
   const float tsize = 1.0f/3.0f;
@@ -769,7 +774,7 @@ static void build_chunks() {
       off.x += offx, off.y += offy;
 
       int groundlevel = default_groundlevel + (int)((perlin(off.x, off.y, 0)+1.0f)/2.0f*amp);
-      groundlevel = clamp(groundlevel, 0, (int)ARRAYLEN(**chunk->blocktypes));
+      groundlevel = clamp(groundlevel, 0, (int)ARRAY_LEN(**chunk->blocktypes));
 
       int y = 0;
       for (; y < groundlevel; ++y)
@@ -807,19 +812,21 @@ static void gamestate_init() {
 // int WINAPI wWinMain(HINSTANCE /*hInstance*/, HINSTANCE /*hPrevInstance*/, PWSTR /*pCmdLine*/, int /*nCmdShow*/) {
 int wmain(int, wchar_t *[], wchar_t *[] ) {
 
-  printf("%lu %lu %lu %lu\n", sizeof(Vertex), sizeof(state.vertices), sizeof(state.chunks), sizeof(BlockFace));
-
+  // init sdl
   sdl_try(SDL_Init(SDL_INIT_EVERYTHING));
   atexit(SDL_Quit);
 
   SDL_LogSetAllPriority(SDL_LOG_PRIORITY_WARN); 
 
+  // set some gl atrributes
   sdl_try(SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE));
   sdl_try(SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3));
   sdl_try(SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3));
 
+  // hide mouse
   sdl_try(SDL_SetRelativeMouseMode(SDL_TRUE));
 
+  // create window
   SDL_Window *window = SDL_CreateWindow("mineclone", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 800, 600, SDL_WINDOW_OPENGL | SDL_WINDOW_FULLSCREEN);
   if (!window) sdl_die("Couldn't create window");
   int screenW, screenH;
@@ -827,18 +834,24 @@ int wmain(int, wchar_t *[], wchar_t *[] ) {
   if (!screenW || !screenH) sdl_die("Invalid screen dimensions: %i,%i", screenW, screenH);
   const float screen_ratio = (float)screenH / (float)screenW;
 
+  // create glcontext
   SDL_GLContext glcontext = SDL_GL_CreateContext(window);
   if (!glcontext) die("Failed to create context");
+
+  // get gl3w to fetch gl function pointers
   gl3wInit();
 
-  glViewport(0, 0, screenW, screenH);
-
+  // gl buffers, shaders, and uniform locations
   state.gl_buffer  = array_element_buffer_create();
   state.gl_shader  = shader_create(vertex_shader, fragment_shader);
   state.gl_camera  = glGetUniformLocation(state.gl_shader, "ucamera");
   state.gl_texture_loc = glGetUniformLocation(state.gl_shader, "utexture");
   if (state.gl_texture_loc == -1) die("Failed to find uniform location of 'utexture'");
 
+  // some gl settings
+  glEnable(GL_DEPTH_TEST);
+
+  // load block textures
   state.gl_texture = texture_load("textures.bmp");
   if (!state.gl_texture) die("Failed to load texture");
   glBindTexture(GL_TEXTURE_2D, state.gl_texture);
@@ -847,12 +860,14 @@ int wmain(int, wchar_t *[], wchar_t *[] ) {
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 
+  // initialize game state
   gamestate_init();
 
   for (;;) {
-    for (int i = 0; i < ARRAYLEN(state.keypressed); ++i)
+    for (int i = 0; i < ARRAY_LEN(state.keypressed); ++i)
       state.keypressed[i] = false;
 
+    // poll events
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
       switch (event.type) {
@@ -904,7 +919,6 @@ int wmain(int, wchar_t *[], wchar_t *[] ) {
     if (state.keyisdown[5]) camera_down(&state.camera, SPEED);
 
     glClearColor(0.0f, 0.8f, 0.6f, 1.0f);
-    glEnable(GL_DEPTH_TEST);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     glUseProgram(state.gl_shader);
@@ -925,8 +939,8 @@ int wmain(int, wchar_t *[], wchar_t *[] ) {
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, state.gl_texture);
 
-    render_clear();
-    build_chunks();
+    // render_clear();
+    // build_chunks();
 
     if (state.chunk_dirty) {
       glBindVertexArray(state.gl_buffer);

@@ -34,7 +34,7 @@
 # stuff
 *.pdb
 *.ilk
-*.vb
+*.vs
 *.idb
 include/SDL2
 *.sublime-workspace
