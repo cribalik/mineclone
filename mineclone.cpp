@@ -850,6 +850,8 @@ int wmain(int, wchar_t *[], wchar_t *[] ) {
 
   // some gl settings
   glEnable(GL_DEPTH_TEST);
+  glEnable(GL_CULL_FACE);
+  glCullFace(GL_CCW);
 
   // load block textures
   state.gl_texture = texture_load("textures.bmp");
