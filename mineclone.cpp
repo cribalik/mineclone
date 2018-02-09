@@ -849,9 +849,12 @@ static bool collision_plane(v3 x0, v3 x1, v3 p0, v3 p1, v3 p2, float *t_out, v3 
 }
 
 static v3 collision(v3 p0, v3 *vel, float dt, v3 size) {
+  const int MAX_ITERATIONS = 20;
   int iterations;
   v3 p1 = p0 + *vel*dt;
-  for(iterations = 0; iterations < 20; ++iterations) {
+
+  // because we glide along a wall when we hit it, we do multiple iterations to check if the gliding hits another wall
+  for(iterations = 0; iterations < MAX_ITERATIONS; ++iterations) {
 
     // get blocks we can collide with
     int x0 = (int)floor(min(p0.x, p1.x)-size.x);
@@ -860,6 +863,8 @@ static v3 collision(v3 p0, v3 *vel, float dt, v3 size) {
     int x1 = (int)ceil(max(p0.x, p1.x)+size.x);
     int y1 = (int)ceil(max(p0.y, p1.y)+size.y);
     int z1 = (int)ceil(max(p0.z, p1.z)+size.z);
+
+    printf("%i %i %i\n", (x1-x0),(y1-y0),(z1-z0));
 
     Block which_block_was_hit = invalid_block();
     bool did_hit = false;
@@ -886,8 +891,9 @@ static v3 collision(v3 p0, v3 *vel, float dt, v3 size) {
 
       // if we hit something, t must have been set to [0,1]
       if (t == 2.0f) continue;
+      // if previous blocks were closer, collide with them first
       if (t > time) continue;
-      // remember which block we hit, to check for lava, teleports etc
+      // remember which block we hit, if we want to check for lava, teleports etc
       which_block_was_hit = {x,y,z};
       did_hit = true;
       time = t;
@@ -923,6 +929,10 @@ static v3 collision(v3 p0, v3 *vel, float dt, v3 size) {
 
     p1 = p1 + b;
   }
+
+  // if we reach full number of iterations, something is weird. Don't move anywhere
+  if (iterations == MAX_ITERATIONS)
+    p1 = p0;
   printf("%i\n", iterations);
 
   return p1;
