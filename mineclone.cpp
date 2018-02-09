@@ -150,17 +150,69 @@ T clamp(T x, T a, T b) {
 
 const float PI = 3.141592651f;
 
+struct v3i {
+  int x,y,z;
+};
+
+typedef v3i Block;
+static Block invalid_block() {
+  return {INT_MIN};
+}
+
+static bool is_invalid(Block b) {
+  return b.x == INT_MIN;
+}
+
 struct v3 {
   float x,y,z;
 };
+
+static float operator*(v3 a, v3 b) {
+  return a.x*b.x + a.y*b.y + a.z*b.z;
+}
+
+static v3 cross(v3 a, v3 b) {
+  v3 r = {
+    a.y*b.z - a.z*b.y,
+    a.z*b.x - a.x*b.z,
+    a.x*b.y - a.y*b.x
+  };
+  return r;
+}
+
+static v3 operator/(v3 v, float f) {
+  return {v.x/f, v.y/f, v.z/f};
+}
 
 static v3 operator*(v3 v, float f) {
   return {v.x*f, v.y*f, v.z*f};
 }
 
+static v3 operator*(float x, v3 v) {
+  return v*x;
+}
+
+static v3 operator+(v3 a, v3 b) {
+  return {a.x+b.x, a.y+b.y, a.z+b.z};
+}
+
+static v3 operator-(v3 a, v3 b) {
+  return {a.x-b.x, a.y-b.y, a.z-b.z};
+}
+
 static void operator+=(v3& v, v3 x) {
   v = {v.x+x.x, v.y+x.y, v.z+x.z};
 }
+
+static v3 normalize(v3 v) {
+  float len = sqrtf(v.x*v.x + v.y*v.y + v.z*v.z);
+  if (len == 0.0f) return v;
+  return v/len;
+}
+
+struct v2i {
+  int x,y;
+};
 
 struct v2 {
   float x,y;
@@ -283,6 +335,39 @@ struct Camera {
   float up; // how much up we are looking, in radians
 };
 
+// the camera_get* functions transforms from camera movement to (x,y,z) coordinates
+static v3 camera_getmove(const Camera *camera, float forward, float right, float up) {
+  return v3{
+    camera->look.x*forward + camera->look.y*right,
+    camera->look.y*forward + -camera->look.x*right,
+    up
+  };
+};
+
+static v3 camera_getforward(const Camera *camera, float speed) {
+  return {camera->look.x*speed, camera->look.y*speed, 0.0f};
+}
+
+static v3 camera_getbackward(const Camera *camera, float speed) {
+  return camera_getforward(camera, -speed);
+}
+
+static v3 camera_getup(const Camera *camera, float speed) {
+  return v3{0.0f, 0.0f, speed};
+}
+
+static v3 camera_getdown(const Camera *camera, float speed) {
+  return v3{0.0f, 0.0f, -speed};
+}
+
+static v3 camera_getstrafe_right(const Camera *camera, float speed) {
+  return {camera->look.y*speed, -camera->look.x*speed, 0.0f};
+}
+
+static v3 camera_getstrafe_left(const Camera *camera, float speed) {
+  return camera_getstrafe_right(camera, -speed);
+}
+
 static void camera_turn(Camera *camera, float angle) {
   float a = atan2f(camera->look.y, camera->look.x);
   a -= angle;
@@ -294,7 +379,7 @@ static void camera_pitch(Camera *camera, float angle) {
 }
 
 static void camera_forward(Camera *camera, float speed) {
-  camera->pos += v3{camera->look.x*speed, 0.0f, camera->look.y*speed};
+  camera->pos += v3{camera->look.x*speed, camera->look.y*speed, 0.0f};
 }
 
 static void camera_backward(Camera *camera, float speed) {
@@ -302,15 +387,15 @@ static void camera_backward(Camera *camera, float speed) {
 }
 
 static void camera_up(Camera *camera, float speed) {
-  camera->pos.y += speed;
+  camera->pos.z += speed;
 }
 
 static void camera_down(Camera *camera, float speed) {
-  camera->pos.y -= speed;
+  camera->pos.z -= speed;
 }
 
 static void camera_strafe_right(Camera *camera, float speed) {
-  camera->pos += v3{camera->look.y*speed, 0.0f, -camera->look.x*speed};
+  camera->pos += v3{camera->look.y*speed, -camera->look.x*speed, 0.0f};
 }
 
 static void camera_strafe_left(Camera *camera, float speed) {
@@ -330,32 +415,21 @@ static m4 camera_get_projection_matrix(Camera *camera, float fov, float nearz, f
 
   // rotation
   m4 r = {};
-  #if 1
-  // x (left) = -look * up = (look.x, 0, look.y) * (0,1,0)
+  // x is right = look * (0,0,1)
   r.d[0] = camera->look.y;
-  r.d[1] = 0.0f;
-  r.d[2] = -camera->look.x;
-  // y (up)
-  r.d[4] = -camera->look.x*su;
-  r.d[5] = cu;
-  r.d[6] = -camera->look.y*su;
-  // z (look)
-  r.d[8] = -camera->look.x*cu;
-  r.d[9] = -su;
-  r.d[10] = -camera->look.y*cu;
-  #else
-  r.d[0] = 1.0f;
-  r.d[1] = 0.0f;
+  r.d[1] = -camera->look.x;
   r.d[2] = 0.0f;
-  // y (up)
-  r.d[4] = 0.0f;
-  r.d[5] = 1.0f;
-  r.d[6] = 0.0f;
-  // z (look)
-  r.d[8] = 0.0f;
-  r.d[9] = 0.0f;
-  r.d[10] = -1.0f;
-  #endif
+
+  // y is up
+  r.d[4] = -camera->look.x*su;
+  r.d[5] = -camera->look.y*su;
+  r.d[6] = cu;
+
+  // z is out of screen
+  r.d[8] = -camera->look.x*cu;
+  r.d[9] = -camera->look.y*cu;
+  r.d[10] = -su;
+
   r.d[15] = 1.0f;
 
   // projection (http://www.songho.ca/opengl/gl_projectionmatrix.html)
@@ -502,30 +576,22 @@ enum BlockType: u8 {
 };
 
 enum Direction: u8 {
-  DIRECTION_UP, DIRECTION_DOWN, DIRECTION_Z, DIRECTION_X, DIRECTION_MINUS_Z, DIRECTION_MINUS_X
+  DIRECTION_UP, DIRECTION_DOWN, DIRECTION_X, DIRECTION_Y, DIRECTION_MINUS_X, DIRECTION_MINUS_Y
 };
 
-struct BlockFace {
-  Direction dir;
-  BlockType type;
-  u8  z;
-  u32 x;
-  u32 y;
-};
-
-static const int NUM_CHUNKS_Z = 8, NUM_CHUNKS_X = 8;
-static const int NUM_BLOCKS_X = 16, NUM_BLOCKS_Z = 16, NUM_BLOCKS_Y = 256;
+static const int NUM_CHUNKS_X = 8, NUM_CHUNKS_Y = 8;
+static const int NUM_BLOCKS_X = 16, NUM_BLOCKS_Y = 16, NUM_BLOCKS_Z = 256;
 struct Chunk {
-  BlockType blocktypes[NUM_BLOCKS_Z][NUM_BLOCKS_X][NUM_BLOCKS_Y];
-  static char mesh_buffer[NUM_BLOCKS_Z][NUM_BLOCKS_X][NUM_BLOCKS_Y];
+  BlockType blocktypes[NUM_BLOCKS_X][NUM_BLOCKS_Y][NUM_BLOCKS_Z];
+  static char mesh_buffer[NUM_BLOCKS_X][NUM_BLOCKS_Y][NUM_BLOCKS_Z];
 };
 
 static struct GameState {
   // input
   bool keyisdown[6];
-  bool keypressed[4];
+  bool keypressed[5];
 
-  // graphics
+  // graphics data
   Camera camera;
   // vertices
   #define MAX_VERTICES 1024*1024
@@ -541,8 +607,12 @@ static struct GameState {
   GLuint gl_texture;
 
   // world data
-  Chunk chunks[NUM_CHUNKS_Z][NUM_CHUNKS_X]; // z,x
+  Chunk chunks[NUM_CHUNKS_X][NUM_CHUNKS_Y];
   bool chunk_dirty;
+
+  // player data
+  v3 player_vel;
+  v3 player_pos;
 } state;
 
 static void push_block_face(v3 p, BlockType type, Direction dir) {
@@ -552,7 +622,6 @@ static void push_block_face(v3 p, BlockType type, Direction dir) {
   if (state.num_vertices + 4 >= ARRAY_LEN(state.vertices) || state.num_elements + 6 > ARRAY_LEN(state.elements))
     return;
 
-
   const r2 ttop = {0.0f, 0.0f, tsize, 1.0f};
   const r2 tside = {tsize, 0.0f, 2*tsize, 1.0f};
   const r2 tbot = {2*tsize, 0.0f, 3*tsize, 1.0f};
@@ -561,45 +630,45 @@ static void push_block_face(v3 p, BlockType type, Direction dir) {
 
   switch (dir) {
     case DIRECTION_UP: {
-      state.vertices[state.num_vertices++] = {p.x, p.y+size, p.z, ttop.x0, ttop.y0};
-      state.vertices[state.num_vertices++] = {p.x+size, p.y+size, p.z, ttop.x1, ttop.y0};
+      state.vertices[state.num_vertices++] = {p.x,      p.y,      p.z+size, ttop.x0, ttop.y0};
+      state.vertices[state.num_vertices++] = {p.x+size, p.y,      p.z+size, ttop.x1, ttop.y0};
       state.vertices[state.num_vertices++] = {p.x+size, p.y+size, p.z+size, ttop.x1, ttop.y1};
-      state.vertices[state.num_vertices++] = {p.x, p.y+size, p.z+size, ttop.x0, ttop.y1};
+      state.vertices[state.num_vertices++] = {p.x,      p.y+size, p.z+size, ttop.x0, ttop.y1};
     } break;
 
     case DIRECTION_DOWN: {
-      state.vertices[state.num_vertices++] = {p.x, p.y, p.z, tbot.x0, tbot.y0};
-      state.vertices[state.num_vertices++] = {p.x, p.y, p.z+size, tbot.x1, tbot.y0};
-      state.vertices[state.num_vertices++] = {p.x+size, p.y, p.z+size, tbot.x1, tbot.y1};
-      state.vertices[state.num_vertices++] = {p.x+size, p.y, p.z, tbot.x0, tbot.x1};
-    } break;
-
-    case DIRECTION_Z: {
-      state.vertices[state.num_vertices++] = {p.x+size, p.y, p.z+size, tside.x0, tside.y0};
-      state.vertices[state.num_vertices++] = {p.x, p.y, p.z+size, tside.x1, tside.y0};
-      state.vertices[state.num_vertices++] = {p.x, p.y+size, p.z+size, tside.x1, tside.y1};
-      state.vertices[state.num_vertices++] = {p.x+size, p.y+size, p.z+size, tside.x0, tside.y1};
+      state.vertices[state.num_vertices++] = {p.x+size, p.y,      p.z, tbot.x0, tbot.y0};
+      state.vertices[state.num_vertices++] = {p.x,      p.y,      p.z, tbot.x1, tbot.y0};
+      state.vertices[state.num_vertices++] = {p.x,      p.y+size, p.z, tbot.x1, tbot.y1};
+      state.vertices[state.num_vertices++] = {p.x+size, p.y+size, p.z, tbot.x0, tbot.y1};
     } break;
 
     case DIRECTION_X: {
-      state.vertices[state.num_vertices++] = {p.x+size, p.y, p.z, tside.x1, tside.y0};
-      state.vertices[state.num_vertices++] = {p.x+size, p.y, p.z+size, tside.x0, tside.y0};
-      state.vertices[state.num_vertices++] = {p.x+size, p.y+size, p.z+size, tside.x0, tside.y1};
-      state.vertices[state.num_vertices++] = {p.x+size, p.y+size, p.z, tside.x1, tside.y1};
+      state.vertices[state.num_vertices++] = {p.x+size, p.y,      p.z,      tside.x0, tside.y0};
+      state.vertices[state.num_vertices++] = {p.x+size, p.y+size, p.z,      tside.x1, tside.y0};
+      state.vertices[state.num_vertices++] = {p.x+size, p.y+size, p.z+size, tside.x1, tside.y1};
+      state.vertices[state.num_vertices++] = {p.x+size, p.y,      p.z+size, tside.x0, tside.y1};
     } break;
 
-    case DIRECTION_MINUS_Z: {
-      state.vertices[state.num_vertices++] = {p.x, p.y, p.z, tside.x0, tside.y0};
-      state.vertices[state.num_vertices++] = {p.x+size, p.y, p.z, tside.x1, tside.y0};
-      state.vertices[state.num_vertices++] = {p.x+size, p.y+size, p.z, tside.x1, tside.y1};
-      state.vertices[state.num_vertices++] = {p.x, p.y+size, p.z, tside.x0, tside.y1};
+    case DIRECTION_Y: {
+      state.vertices[state.num_vertices++] = {p.x+size, p.y+size, p.z,      tside.x0, tside.y0};
+      state.vertices[state.num_vertices++] = {p.x,      p.y+size, p.z,      tside.x1, tside.y0};
+      state.vertices[state.num_vertices++] = {p.x,      p.y+size, p.z+size, tside.x1, tside.y1};
+      state.vertices[state.num_vertices++] = {p.x+size, p.y+size, p.z+size, tside.x0, tside.y1};
     } break;
 
     case DIRECTION_MINUS_X: {
-      state.vertices[state.num_vertices++] = {p.x, p.y, p.z, tside.x0, tside.y0};
-      state.vertices[state.num_vertices++] = {p.x, p.y+size, p.z, tside.x0, tside.y1};
-      state.vertices[state.num_vertices++] = {p.x, p.y+size, p.z+size, tside.x1, tside.y1};
-      state.vertices[state.num_vertices++] = {p.x, p.y, p.z+size, tside.x1, tside.y0};
+      state.vertices[state.num_vertices++] = {p.x, p.y+size, p.z,      tside.x0, tside.y0};
+      state.vertices[state.num_vertices++] = {p.x, p.y,      p.z,      tside.x1, tside.y0};
+      state.vertices[state.num_vertices++] = {p.x, p.y,      p.z+size, tside.x1, tside.y1};
+      state.vertices[state.num_vertices++] = {p.x, p.y+size, p.z+size, tside.x0, tside.y1};
+    } break;
+
+    case DIRECTION_MINUS_Y: {
+      state.vertices[state.num_vertices++] = {p.x,      p.y, p.z,      tside.x0, tside.y0};
+      state.vertices[state.num_vertices++] = {p.x+size, p.y, p.z,      tside.x1, tside.y0};
+      state.vertices[state.num_vertices++] = {p.x+size, p.y, p.z+size, tside.x1, tside.y1};
+      state.vertices[state.num_vertices++] = {p.x,      p.y, p.z+size, tside.x0, tside.y1};
     } break;
 
     default: return;
@@ -613,199 +682,255 @@ static void push_block_face(v3 p, BlockType type, Direction dir) {
   state.elements[state.num_elements++] = e+3;
 }
 
-static void push_cube(v3 p) {
-  const float size = 1.0f;
-  if (state.num_vertices + 16 >= ARRAY_LEN(state.vertices) || state.num_elements + 12 > ARRAY_LEN(state.elements))
-    return;
-
-  const float tsize = 1.0f/3.0f;
-  const r2 ttop = {0.0f, 0.0f, tsize, 1.0f};
-  const r2 tside = {tsize, 0.0f, 2*tsize, 1.0f};
-  const r2 tbot = {2*tsize, 0.0f, 3*tsize, 1.0f};
-
-  // top
-  const int t = state.num_vertices;
-  state.vertices[state.num_vertices++] = {p.x, p.y+size, p.z, ttop.x0, ttop.y0};
-  state.vertices[state.num_vertices++] = {p.x+size, p.y+size, p.z, ttop.x1, ttop.y0};
-  state.vertices[state.num_vertices++] = {p.x+size, p.y+size, p.z+size, ttop.x1, ttop.y1};
-  state.vertices[state.num_vertices++] = {p.x, p.y+size, p.z+size, ttop.x0, ttop.y1};
-
-  // sides
-  const int s = state.num_vertices;
-  state.vertices[state.num_vertices++] = {p.x, p.y, p.z, tside.x0, tside.y0};
-  state.vertices[state.num_vertices++] = {p.x+size, p.y, p.z, tside.x1, tside.y0};
-  state.vertices[state.num_vertices++] = {p.x+size, p.y+size, p.z, tside.x1, tside.y1};
-  state.vertices[state.num_vertices++] = {p.x, p.y+size, p.z, tside.x0, tside.y1};
-  state.vertices[state.num_vertices++] = {p.x, p.y, p.z+size, tside.x1, tside.y0};
-  state.vertices[state.num_vertices++] = {p.x+size, p.y, p.z+size, tside.x0, tside.y0};
-  state.vertices[state.num_vertices++] = {p.x+size, p.y+size, p.z+size, tside.x0, tside.y1};
-  state.vertices[state.num_vertices++] = {p.x, p.y+size, p.z+size, tside.x1, tside.y1};
-
-  // bottom
-  const int b = state.num_vertices;
-  state.vertices[state.num_vertices++] = {p.x, p.y, p.z, tbot.x0, tbot.y0};
-  state.vertices[state.num_vertices++] = {p.x, p.y, p.z+size, tbot.x1, tbot.y0};
-  state.vertices[state.num_vertices++] = {p.x+size, p.y, p.z+size, tbot.x1, tbot.y1};
-  state.vertices[state.num_vertices++] = {p.x+size, p.y, p.z, tbot.x0, tbot.x1};
-
-  // near
-  state.elements[state.num_elements++] = s;
-  state.elements[state.num_elements++] = s+1;
-  state.elements[state.num_elements++] = s+2;
-  state.elements[state.num_elements++] = s;
-  state.elements[state.num_elements++] = s+2;
-  state.elements[state.num_elements++] = s+3;
-
-  // far
-  state.elements[state.num_elements++] = s+4;
-  state.elements[state.num_elements++] = s+5;
-  state.elements[state.num_elements++] = s+6;
-  state.elements[state.num_elements++] = s+4;
-  state.elements[state.num_elements++] = s+6;
-  state.elements[state.num_elements++] = s+7;
-
-  // left
-  state.elements[state.num_elements++] = s;
-  state.elements[state.num_elements++] = s+3;
-  state.elements[state.num_elements++] = s+7;
-  state.elements[state.num_elements++] = s;
-  state.elements[state.num_elements++] = s+7;
-  state.elements[state.num_elements++] = s+4;
-
-  // right
-  state.elements[state.num_elements++] = s+1;
-  state.elements[state.num_elements++] = s+5;
-  state.elements[state.num_elements++] = s+6;
-  state.elements[state.num_elements++] = s+6;
-  state.elements[state.num_elements++] = s+1;
-  state.elements[state.num_elements++] = s+2;
-
-  // bottom
-  state.elements[state.num_elements++] = b;
-  state.elements[state.num_elements++] = b+1;
-  state.elements[state.num_elements++] = b+2;
-  state.elements[state.num_elements++] = b;
-  state.elements[state.num_elements++] = b+2;
-  state.elements[state.num_elements++] = b+3;
-
-  // top
-  state.elements[state.num_elements++] = t;
-  state.elements[state.num_elements++] = t+1;
-  state.elements[state.num_elements++] = t+2;
-  state.elements[state.num_elements++] = t;
-  state.elements[state.num_elements++] = t+2;
-  state.elements[state.num_elements++] = t+3;
-}
-
 static void render_clear() {
   state.num_vertices = state.num_elements = 0;
 }
 
-static BlockType get_blocktype(int chunk_z, int chunk_x, int z, int x, int y, Direction dir) {
+static v2i getchunk(v3 p) {
+  return {
+    (int)p.x/NUM_BLOCKS_X,
+    (int)p.y/NUM_BLOCKS_Y
+  };
+}
+
+static v2i getchunk(int x, int y) {
+  return {
+    x/NUM_BLOCKS_X,
+    y/NUM_BLOCKS_Y
+  };
+}
+
+static BlockType get_blocktype(int x, int y, int z) {
+  if (x < 0 || x >= NUM_CHUNKS_X*NUM_BLOCKS_X || y < 0 || y >= NUM_CHUNKS_Y*NUM_BLOCKS_Y || z < 0 || z > NUM_BLOCKS_Z)
+    return BLOCKTYPE_AIR;
+  return state.chunks[x/NUM_BLOCKS_X][y/NUM_BLOCKS_Y].blocktypes[x&(NUM_BLOCKS_X-1)][y&(NUM_BLOCKS_Y-1)][z];
+}
+
+static BlockType get_adjacent_blocktype(int chunk_x, int chunk_y, int x, int y, int z, Direction dir) {
   switch (dir) {
     case DIRECTION_UP:
-      if (y+1 >= NUM_BLOCKS_Y) return BLOCKTYPE_AIR;
-      return state.chunks[chunk_z][chunk_x].blocktypes[z][x][y+1];
+      if (z+1 >= NUM_BLOCKS_Z) return BLOCKTYPE_AIR;
+      return state.chunks[chunk_x][chunk_y].blocktypes[x][y][z+1];
 
     case DIRECTION_DOWN:
-      if (y-1 < 0) return BLOCKTYPE_AIR;
-      return state.chunks[chunk_z][chunk_x].blocktypes[z][x][y-1];
-
-    case DIRECTION_Z:
-      if (z+1 >= NUM_BLOCKS_Z) {
-        if (chunk_z+1 >= NUM_CHUNKS_Z)
-          return BLOCKTYPE_AIR;
-        else
-          return state.chunks[chunk_z+1][chunk_x].blocktypes[0][x][y];
-      }
-      return state.chunks[chunk_z][chunk_x].blocktypes[z+1][x][y];
+      if (z-1 < 0) return BLOCKTYPE_AIR;
+      return state.chunks[chunk_x][chunk_y].blocktypes[x][y][z-1];
 
     case DIRECTION_X:
       if (x+1 >= NUM_BLOCKS_X) {
         if (chunk_x+1 >= NUM_CHUNKS_X)
           return BLOCKTYPE_AIR;
         else
-          return state.chunks[chunk_z][chunk_x+1].blocktypes[z][0][y];
+          return state.chunks[chunk_x+1][chunk_y].blocktypes[0][y][z];
       }
-      return state.chunks[chunk_z][chunk_x].blocktypes[z][x+1][y];
+      return state.chunks[chunk_x][chunk_y].blocktypes[x+1][y][z];
 
-    case DIRECTION_MINUS_Z:
-      if (z-1 < 0) {
-        if (chunk_z-1 < 0)
+    case DIRECTION_Y:
+      if (y+1 >= NUM_BLOCKS_Y) {
+        if (chunk_y+1 >= NUM_CHUNKS_Y)
           return BLOCKTYPE_AIR;
         else
-          return state.chunks[chunk_z-1][chunk_x].blocktypes[NUM_BLOCKS_Z-1][x][y];
+          return state.chunks[chunk_x][chunk_y+1].blocktypes[x][0][z];
       }
-      return state.chunks[chunk_z][chunk_x].blocktypes[z-1][x][y];
+      return state.chunks[chunk_x][chunk_y].blocktypes[x][y+1][z];
 
     case DIRECTION_MINUS_X:
       if (x-1 < 0) {
         if (chunk_x-1 < 0)
           return BLOCKTYPE_AIR;
         else
-          return state.chunks[chunk_z][chunk_x-1].blocktypes[z][NUM_BLOCKS_X-1][y];
+          return state.chunks[chunk_x-1][chunk_y].blocktypes[NUM_BLOCKS_X-1][y][z];
       }
-      return state.chunks[chunk_z][chunk_x].blocktypes[z][x-1][y];
+      return state.chunks[chunk_x][chunk_y].blocktypes[x-1][y][z];
+
+    case DIRECTION_MINUS_Y:
+      if (y-1 < 0) {
+        if (chunk_y-1 < 0)
+          return BLOCKTYPE_AIR;
+        else
+          return state.chunks[chunk_x][chunk_y-1].blocktypes[x][NUM_BLOCKS_Y-1][z];
+      }
+      return state.chunks[chunk_x][chunk_y].blocktypes[x][y-1][z];
     }
   return BLOCKTYPE_AIR;
 }
 
 static void build_chunks() {
-  static float offx = 0, offy = 0;
+  static v2 base_offset = {};
   const int default_groundlevel = 1;
 
-  offx += 0.05f, offy += 0.05f;
+  base_offset += v2{0.05f, 0.05f};
 
   memset(state.chunks, 0, sizeof(state.chunks));
 
-  // build chunks
-  for(int chunk_z = 0; chunk_z < NUM_CHUNKS_Z; ++chunk_z)
-  for(int chunk_x = 0; chunk_x < NUM_CHUNKS_X; ++chunk_x) {
-    Chunk *chunk = &state.chunks[chunk_z][chunk_x];
+  // create terrain
+  for(int chunk_x = 0; chunk_x < NUM_CHUNKS_X; ++chunk_x)
+  for(int chunk_y = 0; chunk_y < NUM_CHUNKS_Y; ++chunk_y) {
+    Chunk *chunk = &state.chunks[chunk_x][chunk_y];
     static float freq = 0.05f;
-    static float amp = 30.0f;
+    static float amp = 50.0f;
 
-    for (int z = 0; z < NUM_BLOCKS_Z; ++z)
-    for (int x = 0; x < NUM_BLOCKS_X; ++x) {
+    for (int x = 0; x < NUM_BLOCKS_X; ++x)
+    for (int y = 0; y < NUM_BLOCKS_Y; ++y) {
       v2 off = {
         (chunk_x*NUM_BLOCKS_X + x)*freq,
-        (chunk_z*NUM_BLOCKS_Z + z)*freq,
+        (chunk_y*NUM_BLOCKS_Y + y)*freq,
       };
-      off.x += offx, off.y += offy;
+      off += base_offset;
 
       int groundlevel = default_groundlevel + (int)((perlin(off.x, off.y, 0)+1.0f)/2.0f*amp);
       groundlevel = clamp(groundlevel, 0, (int)ARRAY_LEN(**chunk->blocktypes));
 
-      int y = 0;
-      for (; y < groundlevel; ++y)
-        chunk->blocktypes[z][x][y] = BLOCKTYPE_DIRT;
+      int z = 0;
+      for (; z < groundlevel; ++z)
+        chunk->blocktypes[x][y][z] = BLOCKTYPE_DIRT;
     }
   }
 
   // render only block faces that face transparent blocks
-  for(int chunk_z = 0; chunk_z < NUM_CHUNKS_Z; ++chunk_z)
-  for(int chunk_x = 0; chunk_x < NUM_CHUNKS_X; ++chunk_x) {
-    const Chunk &chunk = state.chunks[chunk_z][chunk_x];
-    for(int z = 0; z < NUM_BLOCKS_Z; ++z)
+  for(int chunk_x = 0; chunk_x < NUM_CHUNKS_X; ++chunk_x)
+  for(int chunk_y = 0; chunk_y < NUM_CHUNKS_Y; ++chunk_y) {
+    const Chunk &chunk = state.chunks[chunk_x][chunk_y];
     for(int x = 0; x < NUM_BLOCKS_X; ++x)
-    for(int y = 0; y < NUM_BLOCKS_Y; ++y) {
-      if (chunk.blocktypes[z][x][y] == BLOCKTYPE_AIR) continue;
+    for(int y = 0; y < NUM_BLOCKS_Y; ++y)
+    for(int z = 0; z < NUM_BLOCKS_Z; ++z) {
+      if (chunk.blocktypes[x][y][z] == BLOCKTYPE_AIR) continue;
       v3 p = {
         (float)(chunk_x*NUM_BLOCKS_X + x),
-        (float)(y),
-        (float)(chunk_z*NUM_BLOCKS_Z + z)
+        (float)(chunk_y*NUM_BLOCKS_Y + y),
+        (float)(z),
       };
       for (int d = 0; d < 6; ++d)
-        if (get_blocktype(chunk_z, chunk_x, z, x, y, (Direction)d) == BLOCKTYPE_AIR)
-          push_block_face(p, state.chunks[chunk_z][chunk_x].blocktypes[z][x][y], (Direction)d);
+        if (get_adjacent_blocktype(chunk_x, chunk_y, x, y, z, (Direction)d) == BLOCKTYPE_AIR)
+          push_block_face(p, state.chunks[chunk_x][chunk_y].blocktypes[x][y][z], (Direction)d);
     }
   }
 
   state.chunk_dirty = true;
 }
 
+/* in: line, plane, plane origin */
+static bool collision_plane(v3 x0, v3 x1, v3 p0, v3 p1, v3 p2, float *t_out, v3 *n_out) {
+  float d, t,u,v;
+  v3 n, dx;
+
+  dx = x1-x0;
+
+  p1 = p1 - p0;
+  p2 = p2 - p0;
+
+  n = cross(p1, p2);
+
+  d = dx*n;
+
+  if (fabs(d) < 0.0001f)
+    return false;
+
+  t = (p0 - x0)*n / d;
+
+  if (t < 0.0f || t > 1.0f)
+    return false;
+
+
+  v3 xt = x0 + t*dx;
+
+  u = (xt - p0)*p1/lensq(p1);
+  v = (xt - p0)*p2/lensq(p2);
+
+  if (u < 0.0f || u > 1.0f || v < 0.0f || v > 1.0f)
+    return false;
+
+  if (t >= *t_out)
+    return false;
+
+  *t_out = t;
+  *n_out = n;
+  return true;
+}
+
+static v3 collision(v3 p0, v3 *vel, float dt, v3 size) {
+  int iterations;
+  v3 p1 = p0 + *vel*dt;
+  for(iterations = 0; iterations < 20; ++iterations) {
+
+    // get blocks we can collide with
+    int x0 = (int)floor(min(p0.x, p1.x)-size.x);
+    int y0 = (int)floor(min(p0.y, p1.y)-size.y);
+    int z0 = (int)floor(min(p0.z, p1.z)-size.z);
+    int x1 = (int)ceil(max(p0.x, p1.x)+size.x);
+    int y1 = (int)ceil(max(p0.y, p1.y)+size.y);
+    int z1 = (int)ceil(max(p0.z, p1.z)+size.z);
+
+    Block which_block_was_hit = invalid_block();
+    bool did_hit = false;
+
+    float time = 1.0f;
+    v3 normal;
+    for (int x = x0; x <= x1; ++x)
+    for (int y = y0; y <= y1; ++y)
+    for (int z = z0; z <= z1; ++z) {
+      if (get_blocktype(x,y,z) == BLOCKTYPE_AIR) continue;
+
+      float t = 2.0f;
+      v3 n;
+      const v3 block = v3{(float)x, (float)y, (float)z};
+      const v3 w0 = block - (size/2.0f);
+      const v3 w1 = block + v3{1.0f, 1.0f, 1.0f} + (size/2.0f);
+
+      collision_plane(p0, p1, {w0.x, w0.y, w0.z}, {w0.x, w0.y, w1.z}, {w0.x, w1.y, w0.z}, &t, &n);
+      collision_plane(p0, p1, {w1.x, w0.y, w0.z}, {w1.x, w1.y, w0.z}, {w1.x, w0.y, w1.z}, &t, &n);
+      collision_plane(p0, p1, {w0.x, w0.y, w0.z}, {w1.x, w0.y, w0.z}, {w0.x, w0.y, w1.z}, &t, &n);
+      collision_plane(p0, p1, {w0.x, w1.y, w0.z}, {w0.x, w1.y, w1.z}, {w1.x, w1.y, w0.z}, &t, &n);
+      collision_plane(p0, p1, {w0.x, w0.y, w0.z}, {w0.x, w1.y, w0.z}, {w1.x, w0.y, w0.z}, &t, &n);
+      collision_plane(p0, p1, {w0.x, w0.y, w1.z}, {w1.x, w0.y, w1.z}, {w0.x, w1.y, w1.z}, &t, &n);
+
+      // if we hit something, t must have been set to [0,1]
+      if (t == 2.0f) continue;
+      if (t > time) continue;
+      // remember which block we hit, to check for lava, teleports etc
+      which_block_was_hit = {x,y,z};
+      did_hit = true;
+      time = t;
+      normal = n;
+      // TODO: we might want to be able to pass through some kinds of blocks
+    }
+
+
+    if (!did_hit) break;
+
+    /**
+     * Glide along the wall
+     *
+     * v is the movement vector
+     * a is the part that goes up to the wall
+     * b is the part that goes beyond the wall
+     */
+    normal = normalize(normal);
+    printf("%f %f %f\n", normal.x, normal.y, normal.z);
+
+    v3 dp = p1 - p0;
+    float dot = dp*normal;
+
+    // go up against the wall
+    v3 a = (normal * dot) * time;
+    // back off a bit
+    a = a + normal * 0.0001f;
+    p1 = p0 + a;
+
+    /* remove the part that goes into the wall, and glide the rest */
+    v3 b = dp - dot * normal;
+    *vel = b/dt;
+
+    p1 = p1 + b;
+  }
+  printf("%i\n", iterations);
+
+  return p1;
+}
+
 static void gamestate_init() {
   state.camera.look = {0.0f, 1.0f};
+  state.player_pos = {25.0f, 25.0f, 50.0f};
   build_chunks();
 }
 
@@ -827,7 +952,7 @@ int wmain(int, wchar_t *[], wchar_t *[] ) {
   sdl_try(SDL_SetRelativeMouseMode(SDL_TRUE));
 
   // create window
-  SDL_Window *window = SDL_CreateWindow("mineclone", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 800, 600, SDL_WINDOW_OPENGL | SDL_WINDOW_FULLSCREEN);
+  SDL_Window *window = SDL_CreateWindow("mineclone", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 800, 600, SDL_WINDOW_OPENGL /*| SDL_WINDOW_FULLSCREEN*/);
   if (!window) sdl_die("Couldn't create window");
   int screenW, screenH;
   SDL_GetWindowSize(window, &screenW, &screenH);
@@ -838,7 +963,7 @@ int wmain(int, wchar_t *[], wchar_t *[] ) {
   SDL_GLContext glcontext = SDL_GL_CreateContext(window);
   if (!glcontext) die("Failed to create context");
 
-  // get gl3w to fetch gl function pointers
+  // get gl3w to fetch opengl function pointers
   gl3wInit();
 
   // gl buffers, shaders, and uniform locations
@@ -865,13 +990,19 @@ int wmain(int, wchar_t *[], wchar_t *[] ) {
   // initialize game state
   gamestate_init();
 
-  for (;;) {
-    for (int i = 0; i < ARRAY_LEN(state.keypressed); ++i)
-      state.keypressed[i] = false;
+  // @mainloop
+  int time = SDL_GetTicks()-16;
+  for (int loopindex = 0;; ++loopindex) {
+    // update time
+    const float dt = clamp((SDL_GetTicks() - time)/(1000.0f/60.0f), 0.2f, 5.0f);
+    time = SDL_GetTicks();
+    if (!(loopindex%100))
+      printf("fps: %f\n", dt*60.0f);
 
     // poll events
-    SDL_Event event;
-    while (SDL_PollEvent(&event)) {
+    for (int i = 0; i < ARRAY_LEN(state.keypressed); ++i)
+      state.keypressed[i] = false;
+    for (SDL_Event event; SDL_PollEvent(&event);) {
       switch (event.type) {
 
         case SDL_WINDOWEVENT: {
@@ -884,12 +1015,13 @@ int wmain(int, wchar_t *[], wchar_t *[] ) {
           if (event.key.keysym.sym == SDLK_DOWN) state.keyisdown[1] = true;
           if (event.key.keysym.sym == SDLK_LEFT) state.keyisdown[2] = true;
           if (event.key.keysym.sym == SDLK_RIGHT) state.keyisdown[3] = true;
-          if (event.key.keysym.sym == SDLK_w) state.keyisdown[4] = true;
+          if (event.key.keysym.sym == SDLK_RETURN) state.keyisdown[4] = true;
           if (event.key.keysym.sym == SDLK_s) state.keyisdown[5] = true;
           if (event.key.keysym.sym == SDLK_n) state.keypressed[0] = true;
           if (event.key.keysym.sym == SDLK_m) state.keypressed[1] = true;
           if (event.key.keysym.sym == SDLK_j) state.keypressed[2] = true;
           if (event.key.keysym.sym == SDLK_k) state.keypressed[3] = true;
+          if (event.key.keysym.sym == SDLK_RETURN) state.keypressed[4] = true;
 
           if (event.key.keysym.sym == SDLK_ESCAPE) exit(0);
         } break;
@@ -899,27 +1031,36 @@ int wmain(int, wchar_t *[], wchar_t *[] ) {
           if (event.key.keysym.sym == SDLK_DOWN) state.keyisdown[1] = false;
           if (event.key.keysym.sym == SDLK_LEFT) state.keyisdown[2] = false;
           if (event.key.keysym.sym == SDLK_RIGHT) state.keyisdown[3] = false;
-          if (event.key.keysym.sym == SDLK_w) state.keyisdown[4] = false;
+          if (event.key.keysym.sym == SDLK_RETURN) state.keyisdown[4] = false;
           if (event.key.keysym.sym == SDLK_s) state.keyisdown[5] = false;
         } break;
 
         case SDL_MOUSEMOTION: {
-          const float turn_sensitivity = 0.003f;
-          const float pitch_sensitivity = 0.003f;
+          const float turn_sensitivity =  dt*0.003f;
+          const float pitch_sensitivity = dt*0.003f;
           if (event.motion.xrel) camera_turn(&state.camera, event.motion.xrel * turn_sensitivity);
           if (event.motion.yrel) camera_pitch(&state.camera, -event.motion.yrel * pitch_sensitivity);
         } break;
       }
     }
 
-    const float SPEED = 0.4f;
-    if (state.keyisdown[0]) camera_forward(&state.camera, SPEED);
-    if (state.keyisdown[1]) camera_backward(&state.camera, SPEED);
-    if (state.keyisdown[2]) camera_strafe_left(&state.camera, SPEED);
-    if (state.keyisdown[3]) camera_strafe_right(&state.camera, SPEED);
-    if (state.keyisdown[4]) camera_up(&state.camera, SPEED);
-    if (state.keyisdown[5]) camera_down(&state.camera, SPEED);
+    // move camera
+    const float SPEED = 0.15f;
+    const float GRAVITY = 0.015f;
+    const float JUMPPOWER = 0.21f;
+    v3 plane_vel = {};
+    if (state.keyisdown[0]) plane_vel += camera_getforward(&state.camera, SPEED);
+    if (state.keyisdown[1]) plane_vel += camera_getbackward(&state.camera, SPEED);
+    if (state.keyisdown[2]) plane_vel += camera_getstrafe_left(&state.camera, SPEED);
+    if (state.keyisdown[3]) plane_vel += camera_getstrafe_right(&state.camera, SPEED);
+    if (state.keypressed[4]) state.player_vel.z = JUMPPOWER;
+    state.player_vel.x = plane_vel.x*dt;
+    state.player_vel.y = plane_vel.y*dt;
+    state.player_vel.z -= GRAVITY;
+    state.player_pos = collision(state.player_pos, &state.player_vel, dt, {0.8f, 0.8f, 1.5f});
+    state.camera.pos = state.player_pos + v3{0.0f, 0.0f, 1.0f};
 
+    // clear screen
     glClearColor(0.0f, 0.8f, 0.6f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
@@ -927,11 +1068,10 @@ int wmain(int, wchar_t *[], wchar_t *[] ) {
 
     // camera
     const float fov = PI/3.0f;
-    const float nearz = 1.0f;
+    const float nearz = 0.3f;
     const float farz = 300.0f;
 
     m4 camera = camera_get_projection_matrix(&state.camera, fov, nearz, farz, screen_ratio);
-    // m4_print(camera);
     glUniformMatrix4fv(state.gl_camera, 1, GL_TRUE, camera.d);
     glGetUniformLocation(state.gl_shader, "far");
     glGetUniformLocation(state.gl_shader, "nearsize");
@@ -950,8 +1090,6 @@ int wmain(int, wchar_t *[], wchar_t *[] ) {
       glBufferData(GL_ELEMENT_ARRAY_BUFFER, state.num_elements*sizeof(*state.elements), state.elements, GL_STREAM_DRAW);
       state.chunk_dirty = false;
     }
-    printf("%i\n", get_blocktype(0, 1, 0, 0, 0, DIRECTION_MINUS_Z));
-    printf("%i %i\n", state.num_vertices, state.num_elements);
 
     // draw
     glDrawElements(GL_TRIANGLES, state.num_elements, GL_UNSIGNED_INT, 0);
