@@ -13,7 +13,7 @@ typedef uint32_t u32;
 typedef uint64_t u64;
 
 // @logging
-void die(const char *fmt, ...) {
+static void die(const char *fmt, ...) {
   va_list args;
   va_start(args, fmt);
   SDL_LogMessageV(SDL_LOG_CATEGORY_APPLICATION, SDL_LOG_PRIORITY_ERROR, fmt, args);
@@ -21,7 +21,7 @@ void die(const char *fmt, ...) {
   abort();
 }
 
-void sdl_die(const char *fmt, ...) {
+static void sdl_die(const char *fmt, ...) {
   va_list args;
   va_start(args, fmt);
   SDL_LogMessageV(SDL_LOG_CATEGORY_APPLICATION, SDL_LOG_PRIORITY_ERROR, fmt, args);
@@ -142,13 +142,13 @@ static float perlin(float x, float y, float z) {
 #define ARRAY_LAST(a) ((a)[ARRAY_LEN(a)-1])
 
 template<class T>
-T clamp(T x, T a, T b) {
+static T clamp(T x, T a, T b) {
   if (x < a) return a;
   if (x > b) return b;
   return x;
 }
 
-const float PI = 3.141592651f;
+static const float PI = 3.141592651f;
 
 struct v3i {
   int x,y,z;
@@ -242,6 +242,7 @@ struct r2 {
 struct Vertex {
   v3 pos;
   v2 tex;
+  int direction;
 };
 
 struct m4 {
@@ -457,7 +458,7 @@ static m4 camera_get_projection_matrix(Camera *camera, float fov, float nearz, f
 
 
 // openglstuff
-GLuint array_element_buffer_create() {
+static GLuint array_element_buffer_create() {
   GLuint vao, ebo, vbo;
   glGenVertexArrays(1, &vao);
   glGenBuffers(1, &vbo);
@@ -469,18 +470,17 @@ GLuint array_element_buffer_create() {
   glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
 
   glEnableVertexAttribArray(0);
-  gl_ok_or_die;
-  glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), 0);
-  gl_ok_or_die;
   glEnableVertexAttribArray(1);
-  gl_ok_or_die;
-  glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (GLvoid*)(3*sizeof(float)));
+  glEnableVertexAttribArray(2);
+  glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (GLvoid*)0);
+  glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (GLvoid*)offsetof(Vertex, tex));
+  glVertexAttribIPointer(2, 1, GL_INT, sizeof(Vertex), (GLvoid*)offsetof(Vertex, direction));
   gl_ok_or_die;
 
   return vao;
 }
 
-GLuint texture_load(const char *filename) {
+static GLuint texture_load(const char *filename) {
   int w,h,n;
 
   // load image
@@ -502,36 +502,75 @@ GLuint texture_load(const char *filename) {
 }
 
 // @vertex_shader
-const char *vertex_shader = R"VSHADER(
+static const char *vertex_shader = R"VSHADER(
   #version 330 core
 
+  // in
   layout(location = 0) in vec3 pos;
   layout(location = 1) in vec2 tpos;
+  layout(location = 2) in int dir;
+
+  // out
   out vec2 ftpos;
+  flat out int fdir;
+
+  // uniform
   uniform mat4 ucamera;
 
   void main() {
     vec4 p = ucamera * vec4(pos, 1.0f);
     gl_Position = p;
     ftpos = tpos;
+    fdir = dir;
   }
   )VSHADER";
 
 // @fragment_shader
-const char *fragment_shader = R"FSHADER(
+static const char *fragment_shader = R"FSHADER(
   #version 330 core
 
+  // in
   in vec2 ftpos;
+  flat in int fdir;
+
+  // out
   out vec4 fcolor;
 
+  // uniform
   uniform sampler2D utexture;
 
   void main() {
-    fcolor = vec4(texture(utexture, ftpos).xyz, 1.0f);
+    float shade = 0.0;
+    switch(fdir) {
+      case 0: // UP
+        shade = 0.9;
+        break;
+      case 1: // DOWN
+        shade = 0.7;
+        break;
+      case 2: // X
+        shade = 0.85;
+        break;
+      case 3: // Y
+        shade = 0.8;
+        break;
+      case 4: // -X
+        shade = 0.7;
+        break;
+      case 5: // -Y
+        shade = 0.8;
+        break;
+      default:
+        shade = 0.1;
+        break;
+    }
+    vec3 c = texture(utexture, ftpos).xyz;
+    c = c * shade;
+    fcolor = vec4(c, 1.0f);
   }
   )FSHADER";
 
-GLuint shader_create(const char *vertex_shader_source, const char *fragment_shader_source) {
+static GLuint shader_create(const char *vertex_shader_source, const char *fragment_shader_source) {
   GLint success;
   GLuint p = glCreateProgram();
   GLuint vs = glCreateShader(GL_VERTEX_SHADER);
@@ -630,45 +669,45 @@ static void push_block_face(v3 p, BlockType type, Direction dir) {
 
   switch (dir) {
     case DIRECTION_UP: {
-      state.vertices[state.num_vertices++] = {p.x,      p.y,      p.z+size, ttop.x0, ttop.y0};
-      state.vertices[state.num_vertices++] = {p.x+size, p.y,      p.z+size, ttop.x1, ttop.y0};
-      state.vertices[state.num_vertices++] = {p.x+size, p.y+size, p.z+size, ttop.x1, ttop.y1};
-      state.vertices[state.num_vertices++] = {p.x,      p.y+size, p.z+size, ttop.x0, ttop.y1};
+      state.vertices[state.num_vertices++] = {p.x,      p.y,      p.z+size, ttop.x0, ttop.y0, DIRECTION_UP};
+      state.vertices[state.num_vertices++] = {p.x+size, p.y,      p.z+size, ttop.x1, ttop.y0, DIRECTION_UP};
+      state.vertices[state.num_vertices++] = {p.x+size, p.y+size, p.z+size, ttop.x1, ttop.y1, DIRECTION_UP};
+      state.vertices[state.num_vertices++] = {p.x,      p.y+size, p.z+size, ttop.x0, ttop.y1, DIRECTION_UP};
     } break;
 
     case DIRECTION_DOWN: {
-      state.vertices[state.num_vertices++] = {p.x+size, p.y,      p.z, tbot.x0, tbot.y0};
-      state.vertices[state.num_vertices++] = {p.x,      p.y,      p.z, tbot.x1, tbot.y0};
-      state.vertices[state.num_vertices++] = {p.x,      p.y+size, p.z, tbot.x1, tbot.y1};
-      state.vertices[state.num_vertices++] = {p.x+size, p.y+size, p.z, tbot.x0, tbot.y1};
+      state.vertices[state.num_vertices++] = {p.x+size, p.y,      p.z, tbot.x0, tbot.y0, DIRECTION_DOWN};
+      state.vertices[state.num_vertices++] = {p.x,      p.y,      p.z, tbot.x1, tbot.y0, DIRECTION_DOWN};
+      state.vertices[state.num_vertices++] = {p.x,      p.y+size, p.z, tbot.x1, tbot.y1, DIRECTION_DOWN};
+      state.vertices[state.num_vertices++] = {p.x+size, p.y+size, p.z, tbot.x0, tbot.y1, DIRECTION_DOWN};
     } break;
 
     case DIRECTION_X: {
-      state.vertices[state.num_vertices++] = {p.x+size, p.y,      p.z,      tside.x0, tside.y0};
-      state.vertices[state.num_vertices++] = {p.x+size, p.y+size, p.z,      tside.x1, tside.y0};
-      state.vertices[state.num_vertices++] = {p.x+size, p.y+size, p.z+size, tside.x1, tside.y1};
-      state.vertices[state.num_vertices++] = {p.x+size, p.y,      p.z+size, tside.x0, tside.y1};
+      state.vertices[state.num_vertices++] = {p.x+size, p.y,      p.z,      tside.x0, tside.y0, DIRECTION_X};
+      state.vertices[state.num_vertices++] = {p.x+size, p.y+size, p.z,      tside.x1, tside.y0, DIRECTION_X};
+      state.vertices[state.num_vertices++] = {p.x+size, p.y+size, p.z+size, tside.x1, tside.y1, DIRECTION_X};
+      state.vertices[state.num_vertices++] = {p.x+size, p.y,      p.z+size, tside.x0, tside.y1, DIRECTION_X};
     } break;
 
     case DIRECTION_Y: {
-      state.vertices[state.num_vertices++] = {p.x+size, p.y+size, p.z,      tside.x0, tside.y0};
-      state.vertices[state.num_vertices++] = {p.x,      p.y+size, p.z,      tside.x1, tside.y0};
-      state.vertices[state.num_vertices++] = {p.x,      p.y+size, p.z+size, tside.x1, tside.y1};
-      state.vertices[state.num_vertices++] = {p.x+size, p.y+size, p.z+size, tside.x0, tside.y1};
+      state.vertices[state.num_vertices++] = {p.x+size, p.y+size, p.z,      tside.x0, tside.y0, DIRECTION_Y};
+      state.vertices[state.num_vertices++] = {p.x,      p.y+size, p.z,      tside.x1, tside.y0, DIRECTION_Y};
+      state.vertices[state.num_vertices++] = {p.x,      p.y+size, p.z+size, tside.x1, tside.y1, DIRECTION_Y};
+      state.vertices[state.num_vertices++] = {p.x+size, p.y+size, p.z+size, tside.x0, tside.y1, DIRECTION_Y};
     } break;
 
     case DIRECTION_MINUS_X: {
-      state.vertices[state.num_vertices++] = {p.x, p.y+size, p.z,      tside.x0, tside.y0};
-      state.vertices[state.num_vertices++] = {p.x, p.y,      p.z,      tside.x1, tside.y0};
-      state.vertices[state.num_vertices++] = {p.x, p.y,      p.z+size, tside.x1, tside.y1};
-      state.vertices[state.num_vertices++] = {p.x, p.y+size, p.z+size, tside.x0, tside.y1};
+      state.vertices[state.num_vertices++] = {p.x, p.y+size, p.z,      tside.x0, tside.y0, DIRECTION_MINUS_X};
+      state.vertices[state.num_vertices++] = {p.x, p.y,      p.z,      tside.x1, tside.y0, DIRECTION_MINUS_X};
+      state.vertices[state.num_vertices++] = {p.x, p.y,      p.z+size, tside.x1, tside.y1, DIRECTION_MINUS_X};
+      state.vertices[state.num_vertices++] = {p.x, p.y+size, p.z+size, tside.x0, tside.y1, DIRECTION_MINUS_X};
     } break;
 
     case DIRECTION_MINUS_Y: {
-      state.vertices[state.num_vertices++] = {p.x,      p.y, p.z,      tside.x0, tside.y0};
-      state.vertices[state.num_vertices++] = {p.x+size, p.y, p.z,      tside.x1, tside.y0};
-      state.vertices[state.num_vertices++] = {p.x+size, p.y, p.z+size, tside.x1, tside.y1};
-      state.vertices[state.num_vertices++] = {p.x,      p.y, p.z+size, tside.x0, tside.y1};
+      state.vertices[state.num_vertices++] = {p.x,      p.y, p.z,      tside.x0, tside.y0, DIRECTION_MINUS_Y};
+      state.vertices[state.num_vertices++] = {p.x+size, p.y, p.z,      tside.x1, tside.y0, DIRECTION_MINUS_Y};
+      state.vertices[state.num_vertices++] = {p.x+size, p.y, p.z+size, tside.x1, tside.y1, DIRECTION_MINUS_Y};
+      state.vertices[state.num_vertices++] = {p.x,      p.y, p.z+size, tside.x0, tside.y1, DIRECTION_MINUS_Y};
     } break;
 
     default: return;
@@ -864,8 +903,6 @@ static v3 collision(v3 p0, v3 *vel, float dt, v3 size) {
     int y1 = (int)ceil(max(p0.y, p1.y)+size.y);
     int z1 = (int)ceil(max(p0.z, p1.z)+size.z);
 
-    printf("%i %i %i\n", (x1-x0),(y1-y0),(z1-z0));
-
     Block which_block_was_hit = invalid_block();
     bool did_hit = false;
 
@@ -912,7 +949,6 @@ static v3 collision(v3 p0, v3 *vel, float dt, v3 size) {
      * b is the part that goes beyond the wall
      */
     normal = normalize(normal);
-    printf("%f %f %f\n", normal.x, normal.y, normal.z);
 
     v3 dp = p1 - p0;
     float dot = dp*normal;
@@ -933,7 +969,6 @@ static v3 collision(v3 p0, v3 *vel, float dt, v3 size) {
   // if we reach full number of iterations, something is weird. Don't move anywhere
   if (iterations == MAX_ITERATIONS)
     p1 = p0;
-  printf("%i\n", iterations);
 
   return p1;
 }
@@ -962,7 +997,7 @@ int wmain(int, wchar_t *[], wchar_t *[] ) {
   sdl_try(SDL_SetRelativeMouseMode(SDL_TRUE));
 
   // create window
-  SDL_Window *window = SDL_CreateWindow("mineclone", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 800, 600, SDL_WINDOW_OPENGL /*| SDL_WINDOW_FULLSCREEN*/);
+  SDL_Window *window = SDL_CreateWindow("mineclone", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 800, 600, SDL_WINDOW_OPENGL | SDL_WINDOW_FULLSCREEN);
   if (!window) sdl_die("Couldn't create window");
   int screenW, screenH;
   SDL_GetWindowSize(window, &screenW, &screenH);
@@ -1080,8 +1115,7 @@ int wmain(int, wchar_t *[], wchar_t *[] ) {
     const float fov = PI/3.0f;
     const float nearz = 0.3f;
     const float farz = 300.0f;
-
-    m4 camera = camera_get_projection_matrix(&state.camera, fov, nearz, farz, screen_ratio);
+    const m4 camera = camera_get_projection_matrix(&state.camera, fov, nearz, farz, screen_ratio);
     glUniformMatrix4fv(state.gl_camera, 1, GL_TRUE, camera.d);
     glGetUniformLocation(state.gl_shader, "far");
     glGetUniformLocation(state.gl_shader, "nearsize");
@@ -1096,8 +1130,8 @@ int wmain(int, wchar_t *[], wchar_t *[] ) {
 
     if (state.chunk_dirty) {
       glBindVertexArray(state.gl_buffer);
-      glBufferData(GL_ARRAY_BUFFER, state.num_vertices*sizeof(*state.vertices), state.vertices, GL_STREAM_DRAW);
-      glBufferData(GL_ELEMENT_ARRAY_BUFFER, state.num_elements*sizeof(*state.elements), state.elements, GL_STREAM_DRAW);
+      glBufferData(GL_ARRAY_BUFFER, state.num_vertices*sizeof(*state.vertices), state.vertices, GL_STATIC_DRAW);
+      glBufferData(GL_ELEMENT_ARRAY_BUFFER, state.num_elements*sizeof(*state.elements), state.elements, GL_STATIC_DRAW);
       state.chunk_dirty = false;
     }
 
