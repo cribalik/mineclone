@@ -1,3 +1,7 @@
+// TODO:
+// @remove_block
+//
+
 #include <stdarg.h>
 #include "GL/gl3w.h"
 #include "SDL2/SDL.h"
@@ -631,7 +635,7 @@ enum BlockType: u8 {
 };
 
 enum Direction: u8 {
-  DIRECTION_UP, DIRECTION_DOWN, DIRECTION_X, DIRECTION_Y, DIRECTION_MINUS_X, DIRECTION_MINUS_Y
+  DIRECTION_UP, DIRECTION_DOWN, DIRECTION_X, DIRECTION_Y, DIRECTION_MINUS_X, DIRECTION_MINUS_Y, DIRECTION_MAX
 };
 
 #define For(container) decltype(next(iter(container))) it; for(auto _iterator = iter(container); it = next(_iterator);)
@@ -736,6 +740,7 @@ static struct GameState {
   GLuint gl_texture;
 
   // world data
+  v3i chunk_offset;
   Chunk chunks[NUM_CHUNKS_X][NUM_CHUNKS_Y];
   bool block_dirty;
 
@@ -815,23 +820,16 @@ static void render_clear() {
   state.num_vertices = state.num_elements = 0;
 }
 
-static Chunk* getchunk(Block b) {
-  if (b.x < 0 || b.x >= NUM_CHUNKS_X*CHUNKSIZE_X || b.y < 0 || b.y >= NUM_CHUNKS_Y*CHUNKSIZE_Y || b.z < 0 || b.z > CHUNKSIZE_Z)
+static Chunk* block_to_chunk(Block b) {
+  int x = b.x/CHUNKSIZE_X - state.chunk_offset.x;
+  int y = b.y/CHUNKSIZE_Y - state.chunk_offset.y;
+  if (x < 0 || x >= NUM_CHUNKS_X || y < 0 || y >= NUM_CHUNKS_Y)
     return 0;
-  return &state.chunks[b.x/CHUNKSIZE_X][b.y/CHUNKSIZE_Y];
-}
-#define block_to_chunk getchunk
-
-static Block chunk_to_block(int chunk_x, int chunk_y, int x, int y, int z) {
-  return {
-    chunk_x*CHUNKSIZE_X + x,
-    chunk_y*CHUNKSIZE_Y + y,
-    z
-  };
+  return &state.chunks[x][y];
 }
 
-static Chunk* getchunk(v3 p) {
-  getchunk(Block{(int)p.x, (int)p.y, (int)p.z});
+static Chunk* block_to_chunk(v3 p) {
+  block_to_chunk(Block{(int)p.x, (int)p.y, (int)p.z});
 }
 
 // TODO: maybe have a cache for these
@@ -861,19 +859,26 @@ static BlockType get_blocktype(Block b) {
   return BLOCKTYPE_AIR;
 }
 
-// static bool set_blocktype(Block b, BlockType t) {
-//   Chunk *c = getchunk(b);
-//   if (!c) return false;
-//   c->blocktypes[b.x&(CHUNKSIZE_X-1)][b.y&(CHUNKSIZE_Y-1)][b.z] = t;
-//   return true;
-// }
-
 static v3 block_to_v3(Block b) {
   return {
     (float)(b.x),
     (float)(b.y),
     (float)(b.z),
   };
+}
+
+static Block get_adjacent_block(Block b, Direction dir) {
+  switch (dir) {
+    case DIRECTION_UP:      return ++b.z, b;
+    case DIRECTION_DOWN:    return --b.z, b;
+    case DIRECTION_X:       return ++b.x, b;
+    case DIRECTION_Y:       return ++b.y, b;
+    case DIRECTION_MINUS_X: return --b.x, b;
+    case DIRECTION_MINUS_Y: return --b.y, b;
+    default:
+      die("Invalid direction %i", (int)dir);
+      return {};
+  }
 }
 
 static bool push_blockdiff(Block b, BlockType t) {
@@ -888,68 +893,9 @@ static bool push_blockdiff(Block b, BlockType t) {
 }
 
 static void remove_block(Block b) {
+  // TODO: @remove_block more efficient mesh then just rebulding everything! :D
   if (push_blockdiff(b, BLOCKTYPE_AIR))
     state.block_dirty = true;
-}
-
-static BlockType get_adjacent_blocktype(Block b, Direction dir) {
-  switch (dir) {
-    case DIRECTION_UP:      return ++b.z, get_blocktype(b);
-    case DIRECTION_DOWN:    return --b.z, get_blocktype(b);
-    case DIRECTION_X:       return ++b.x, get_blocktype(b);
-    case DIRECTION_Y:       return ++b.y, get_blocktype(b);
-    case DIRECTION_MINUS_X: return --b.x, get_blocktype(b);
-    case DIRECTION_MINUS_Y: return --b.y, get_blocktype(b);
-  }
-  return BLOCKTYPE_AIR;
-  #if 0
-  switch (dir) {
-    case DIRECTION_UP:
-      if (z+1 >= CHUNKSIZE_Z) return BLOCKTYPE_AIR;
-      return state.chunks[chunk_x][chunk_y].blocktypes[x][y][z+1];
-
-    case DIRECTION_DOWN:
-      if (z-1 < 0) return BLOCKTYPE_AIR;
-      return state.chunks[chunk_x][chunk_y].blocktypes[x][y][z-1];
-
-    case DIRECTION_X:
-      if (x+1 >= CHUNKSIZE_X) {
-        if (chunk_x+1 >= NUM_CHUNKS_X)
-          return BLOCKTYPE_AIR;
-        else
-          return state.chunks[chunk_x+1][chunk_y].blocktypes[0][y][z];
-      }
-      return state.chunks[chunk_x][chunk_y].blocktypes[x+1][y][z];
-
-    case DIRECTION_Y:
-      if (y+1 >= CHUNKSIZE_Y) {
-        if (chunk_y+1 >= NUM_CHUNKS_Y)
-          return BLOCKTYPE_AIR;
-        else
-          return state.chunks[chunk_x][chunk_y+1].blocktypes[x][0][z];
-      }
-      return state.chunks[chunk_x][chunk_y].blocktypes[x][y+1][z];
-
-    case DIRECTION_MINUS_X:
-      if (x-1 < 0) {
-        if (chunk_x-1 < 0)
-          return BLOCKTYPE_AIR;
-        else
-          return state.chunks[chunk_x-1][chunk_y].blocktypes[CHUNKSIZE_X-1][y][z];
-      }
-      return state.chunks[chunk_x][chunk_y].blocktypes[x-1][y][z];
-
-    case DIRECTION_MINUS_Y:
-      if (y-1 < 0) {
-        if (chunk_y-1 < 0)
-          return BLOCKTYPE_AIR;
-        else
-          return state.chunks[chunk_x][chunk_y-1].blocktypes[x][CHUNKSIZE_Y-1][z];
-      }
-      return state.chunks[chunk_x][chunk_y].blocktypes[x][y-1][z];
-    }
-  #endif
-  return BLOCKTYPE_AIR;
 }
 
 static void generate_block_mesh() {
@@ -964,7 +910,7 @@ static void generate_block_mesh() {
 
     v3 p = block_to_v3(block);
     for (int d = 0; d < 6; ++d)
-      if (get_adjacent_blocktype(block, (Direction)d) == BLOCKTYPE_AIR)
+      if (get_blocktype(get_adjacent_block(block, (Direction)d)) == BLOCKTYPE_AIR)
         push_block_face(p, t, (Direction)d);
   }
 }
@@ -1177,7 +1123,7 @@ int wmain(int, wchar_t *[], wchar_t *[] ) {
     // update time
     const float dt = clamp((SDL_GetTicks() - time)/(1000.0f/60.0f), 0.2f, 5.0f);
     time = SDL_GetTicks();
-    if (!(loopindex%100))
+    if (loopindex%100 == 0)
       printf("fps: %f\n", dt*60.0f);
 
     // clear earlier events
@@ -1285,6 +1231,8 @@ int wmain(int, wchar_t *[], wchar_t *[] ) {
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, state.gl_texture);
 
+    if (loopindex%100 == 0)
+      printf("%lu\n", state.num_vertices*sizeof(state.vertices[0]));
 
     if (state.block_dirty) {
       puts("re-rendering :O");
