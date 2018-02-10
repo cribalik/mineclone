@@ -12,6 +12,9 @@ typedef uint8_t u8;
 typedef uint32_t u32;
 typedef uint64_t u64;
 
+// just a tag to say that it's okay if argument is null
+#define OPTIONAL
+
 // @logging
 static void die(const char *fmt, ...) {
   va_list args;
@@ -20,6 +23,13 @@ static void die(const char *fmt, ...) {
   va_end(args);
   abort();
 }
+
+#define DEBUG 1
+#ifdef DEBUG
+  #define debug(stmt) stmt
+#else
+  #define debug(stmt) 0
+#endif
 
 static void sdl_die(const char *fmt, ...) {
   va_list args;
@@ -349,6 +359,12 @@ static v3 camera_getforward(const Camera *camera, float speed) {
   return {camera->look.x*speed, camera->look.y*speed, 0.0f};
 }
 
+static v3 camera_getforward_fly(const Camera *camera, float speed) {
+  float cu = cosf(camera->up);
+  float su = sinf(camera->up);
+  return {camera->look.x*speed*cu, camera->look.y*speed*cu, su*speed};
+}
+
 static v3 camera_getbackward(const Camera *camera, float speed) {
   return camera_getforward(camera, -speed);
 }
@@ -618,17 +634,91 @@ enum Direction: u8 {
   DIRECTION_UP, DIRECTION_DOWN, DIRECTION_X, DIRECTION_Y, DIRECTION_MINUS_X, DIRECTION_MINUS_Y
 };
 
-static const int NUM_CHUNKS_X = 8, NUM_CHUNKS_Y = 8;
-static const int NUM_BLOCKS_X = 16, NUM_BLOCKS_Y = 16, NUM_BLOCKS_Z = 256;
-struct Chunk {
-  BlockType blocktypes[NUM_BLOCKS_X][NUM_BLOCKS_Y][NUM_BLOCKS_Z];
-  static char mesh_buffer[NUM_BLOCKS_X][NUM_BLOCKS_Y][NUM_BLOCKS_Z];
+#define For(container) decltype(next(iter(container))) it; for(auto _iterator = iter(container); it = next(_iterator);)
+
+template <class T, int N>
+struct Colony {
+  int size;
+  Colony<T,N> *next;
+  T items[N];
 };
 
+template<class T, int N>
+static void push(Colony<T,N> **c, T t) {
+  if (!*c) {
+    *c = (Colony<T,N>*)malloc(sizeof(Colony<T,N>));
+    (*c)->size = 0;
+    (*c)->next = 0;
+  }
+  else if ((*c)->size == N) {
+    Colony<T,N> *c_new = (Colony<T,N>*)malloc(sizeof(Colony<T,N>));
+    c_new->size = 0;
+    c_new->next = *c;
+    *c = c_new;
+  }
+  (*c)->items[(*c)->size++] = t;
+}
+
+template<class T, int N>
+struct ColonyIter {
+  Colony<T,N> *c;
+  int i;
+};
+
+template<class T, int N>
+static ColonyIter<T,N> iter(Colony<T,N> *c) {
+  return {c, -1};
+}
+
+template<class T, int N>
+static T* next(ColonyIter<T,N> &iter) {
+  if (!iter.c)
+    return 0;
+
+  ++iter.i;
+  if (iter.i >= iter.c->size) {
+    if (!iter.c->next)
+      return 0;
+    iter.c = iter.c->next;
+    iter.i = 0;
+  }
+
+  return &iter.c->items[iter.i];
+};
+
+static const int NUM_CHUNKS_X = 8, NUM_CHUNKS_Y = 8, NUM_CHUNKS_Z = 1;
+static const int CHUNKSIZE_X = 16, CHUNKSIZE_Y = 16, CHUNKSIZE_Z = 256;
+static const int MAX_DIFFS = 128;
+struct ChunkLocalBlock {
+  unsigned int x: 5;
+  unsigned int y: 5;
+  unsigned int z: 8;
+};
+
+struct BlockDiff {
+  ChunkLocalBlock block;
+  BlockType t;
+};
+struct Chunk {
+  Colony<BlockDiff, 64> *diffs;
+  // static char mesh_buffer[CHUNKSIZE_X][CHUNKSIZE_Y][CHUNKSIZE_Z];
+};
+
+static ChunkLocalBlock block_to_chunklocal(Block b) {
+  ChunkLocalBlock l;
+  l.x = b.x&(CHUNKSIZE_X-1);
+  l.y = b.y&(CHUNKSIZE_Y-1);
+  l.z = b.z;
+  return l;
+}
+
+
+static const v3 CAMERA_OFFSET = v3{0.0f, 0.0f, 1.0f};
 static struct GameState {
   // input
   bool keyisdown[6];
   bool keypressed[5];
+  bool clicked;
 
   // graphics data
   Camera camera;
@@ -647,7 +737,7 @@ static struct GameState {
 
   // world data
   Chunk chunks[NUM_CHUNKS_X][NUM_CHUNKS_Y];
-  bool chunk_dirty;
+  bool block_dirty;
 
   // player data
   v3 player_vel;
@@ -725,30 +815,97 @@ static void render_clear() {
   state.num_vertices = state.num_elements = 0;
 }
 
-static v2i getchunk(v3 p) {
+static Chunk* getchunk(Block b) {
+  if (b.x < 0 || b.x >= NUM_CHUNKS_X*CHUNKSIZE_X || b.y < 0 || b.y >= NUM_CHUNKS_Y*CHUNKSIZE_Y || b.z < 0 || b.z > CHUNKSIZE_Z)
+    return 0;
+  return &state.chunks[b.x/CHUNKSIZE_X][b.y/CHUNKSIZE_Y];
+}
+#define block_to_chunk getchunk
+
+static Block chunk_to_block(int chunk_x, int chunk_y, int x, int y, int z) {
   return {
-    (int)p.x/NUM_BLOCKS_X,
-    (int)p.y/NUM_BLOCKS_Y
+    chunk_x*CHUNKSIZE_X + x,
+    chunk_y*CHUNKSIZE_Y + y,
+    z
   };
 }
 
-static v2i getchunk(int x, int y) {
+static Chunk* getchunk(v3 p) {
+  getchunk(Block{(int)p.x, (int)p.y, (int)p.z});
+}
+
+// TODO: maybe have a cache for these
+static BlockType get_blocktype(Block b) {
+  // first check diffs
+  Chunk *c = block_to_chunk(b);
+  if (c && c->diffs) {
+    ChunkLocalBlock lb = block_to_chunklocal(b);
+    For(c->diffs)
+      if (it->block.x == lb.x && it->block.y == lb.y && it->block.z == lb.z)
+        return it->t;
+  }
+
+  // otherwise generate
+  static float freq = 0.05f;
+  static float amp = 50.0f;
+
+  v2 off = {
+    b.x*freq,
+    b.y*freq
+  };
+  const float p = (perlin(off.x, off.y, 0)+1.0f)/2.0f;
+  const int groundlevel = 1 + (int)(p*amp);
+
+  if (b.z < groundlevel)
+    return BLOCKTYPE_DIRT;
+  return BLOCKTYPE_AIR;
+}
+
+// static bool set_blocktype(Block b, BlockType t) {
+//   Chunk *c = getchunk(b);
+//   if (!c) return false;
+//   c->blocktypes[b.x&(CHUNKSIZE_X-1)][b.y&(CHUNKSIZE_Y-1)][b.z] = t;
+//   return true;
+// }
+
+static v3 block_to_v3(Block b) {
   return {
-    x/NUM_BLOCKS_X,
-    y/NUM_BLOCKS_Y
+    (float)(b.x),
+    (float)(b.y),
+    (float)(b.z),
   };
 }
 
-static BlockType get_blocktype(int x, int y, int z) {
-  if (x < 0 || x >= NUM_CHUNKS_X*NUM_BLOCKS_X || y < 0 || y >= NUM_CHUNKS_Y*NUM_BLOCKS_Y || z < 0 || z > NUM_BLOCKS_Z)
-    return BLOCKTYPE_AIR;
-  return state.chunks[x/NUM_BLOCKS_X][y/NUM_BLOCKS_Y].blocktypes[x&(NUM_BLOCKS_X-1)][y&(NUM_BLOCKS_Y-1)][z];
+static bool push_blockdiff(Block b, BlockType t) {
+  Chunk *c = block_to_chunk(b);
+  if (!c) {
+    debug(die("tried to push a diff to a chunk that was not loaded"));
+    return false;
+  }
+
+  push(&c->diffs, {block_to_chunklocal(b), t});
+  return true;
 }
 
-static BlockType get_adjacent_blocktype(int chunk_x, int chunk_y, int x, int y, int z, Direction dir) {
+static void remove_block(Block b) {
+  if (push_blockdiff(b, BLOCKTYPE_AIR))
+    state.block_dirty = true;
+}
+
+static BlockType get_adjacent_blocktype(Block b, Direction dir) {
+  switch (dir) {
+    case DIRECTION_UP:      return ++b.z, get_blocktype(b);
+    case DIRECTION_DOWN:    return --b.z, get_blocktype(b);
+    case DIRECTION_X:       return ++b.x, get_blocktype(b);
+    case DIRECTION_Y:       return ++b.y, get_blocktype(b);
+    case DIRECTION_MINUS_X: return --b.x, get_blocktype(b);
+    case DIRECTION_MINUS_Y: return --b.y, get_blocktype(b);
+  }
+  return BLOCKTYPE_AIR;
+  #if 0
   switch (dir) {
     case DIRECTION_UP:
-      if (z+1 >= NUM_BLOCKS_Z) return BLOCKTYPE_AIR;
+      if (z+1 >= CHUNKSIZE_Z) return BLOCKTYPE_AIR;
       return state.chunks[chunk_x][chunk_y].blocktypes[x][y][z+1];
 
     case DIRECTION_DOWN:
@@ -756,7 +913,7 @@ static BlockType get_adjacent_blocktype(int chunk_x, int chunk_y, int x, int y, 
       return state.chunks[chunk_x][chunk_y].blocktypes[x][y][z-1];
 
     case DIRECTION_X:
-      if (x+1 >= NUM_BLOCKS_X) {
+      if (x+1 >= CHUNKSIZE_X) {
         if (chunk_x+1 >= NUM_CHUNKS_X)
           return BLOCKTYPE_AIR;
         else
@@ -765,7 +922,7 @@ static BlockType get_adjacent_blocktype(int chunk_x, int chunk_y, int x, int y, 
       return state.chunks[chunk_x][chunk_y].blocktypes[x+1][y][z];
 
     case DIRECTION_Y:
-      if (y+1 >= NUM_BLOCKS_Y) {
+      if (y+1 >= CHUNKSIZE_Y) {
         if (chunk_y+1 >= NUM_CHUNKS_Y)
           return BLOCKTYPE_AIR;
         else
@@ -778,7 +935,7 @@ static BlockType get_adjacent_blocktype(int chunk_x, int chunk_y, int x, int y, 
         if (chunk_x-1 < 0)
           return BLOCKTYPE_AIR;
         else
-          return state.chunks[chunk_x-1][chunk_y].blocktypes[NUM_BLOCKS_X-1][y][z];
+          return state.chunks[chunk_x-1][chunk_y].blocktypes[CHUNKSIZE_X-1][y][z];
       }
       return state.chunks[chunk_x][chunk_y].blocktypes[x-1][y][z];
 
@@ -787,65 +944,29 @@ static BlockType get_adjacent_blocktype(int chunk_x, int chunk_y, int x, int y, 
         if (chunk_y-1 < 0)
           return BLOCKTYPE_AIR;
         else
-          return state.chunks[chunk_x][chunk_y-1].blocktypes[x][NUM_BLOCKS_Y-1][z];
+          return state.chunks[chunk_x][chunk_y-1].blocktypes[x][CHUNKSIZE_Y-1][z];
       }
       return state.chunks[chunk_x][chunk_y].blocktypes[x][y-1][z];
     }
+  #endif
   return BLOCKTYPE_AIR;
 }
 
-static void build_chunks() {
-  static v2 base_offset = {};
-  const int default_groundlevel = 1;
+static void generate_block_mesh() {
+  render_clear();
+  // render block faces that face transparent blocks
+  for(int x = 0; x < NUM_CHUNKS_X*CHUNKSIZE_X; ++x)
+  for(int y = 0; y < NUM_CHUNKS_Y*CHUNKSIZE_Y; ++y)
+  for(int z = 0; z < NUM_CHUNKS_Z*CHUNKSIZE_Z; ++z) {
+    Block block = {x,y,z};
+    BlockType t = get_blocktype(block);
+    if (t == BLOCKTYPE_AIR) continue;
 
-  base_offset += v2{0.05f, 0.05f};
-
-  memset(state.chunks, 0, sizeof(state.chunks));
-
-  // create terrain
-  for(int chunk_x = 0; chunk_x < NUM_CHUNKS_X; ++chunk_x)
-  for(int chunk_y = 0; chunk_y < NUM_CHUNKS_Y; ++chunk_y) {
-    Chunk *chunk = &state.chunks[chunk_x][chunk_y];
-    static float freq = 0.05f;
-    static float amp = 50.0f;
-
-    for (int x = 0; x < NUM_BLOCKS_X; ++x)
-    for (int y = 0; y < NUM_BLOCKS_Y; ++y) {
-      v2 off = {
-        (chunk_x*NUM_BLOCKS_X + x)*freq,
-        (chunk_y*NUM_BLOCKS_Y + y)*freq,
-      };
-      off += base_offset;
-
-      int groundlevel = default_groundlevel + (int)((perlin(off.x, off.y, 0)+1.0f)/2.0f*amp);
-      groundlevel = clamp(groundlevel, 0, (int)ARRAY_LEN(**chunk->blocktypes));
-
-      int z = 0;
-      for (; z < groundlevel; ++z)
-        chunk->blocktypes[x][y][z] = BLOCKTYPE_DIRT;
-    }
+    v3 p = block_to_v3(block);
+    for (int d = 0; d < 6; ++d)
+      if (get_adjacent_blocktype(block, (Direction)d) == BLOCKTYPE_AIR)
+        push_block_face(p, t, (Direction)d);
   }
-
-  // render only block faces that face transparent blocks
-  for(int chunk_x = 0; chunk_x < NUM_CHUNKS_X; ++chunk_x)
-  for(int chunk_y = 0; chunk_y < NUM_CHUNKS_Y; ++chunk_y) {
-    const Chunk &chunk = state.chunks[chunk_x][chunk_y];
-    for(int x = 0; x < NUM_BLOCKS_X; ++x)
-    for(int y = 0; y < NUM_BLOCKS_Y; ++y)
-    for(int z = 0; z < NUM_BLOCKS_Z; ++z) {
-      if (chunk.blocktypes[x][y][z] == BLOCKTYPE_AIR) continue;
-      v3 p = {
-        (float)(chunk_x*NUM_BLOCKS_X + x),
-        (float)(chunk_y*NUM_BLOCKS_Y + y),
-        (float)(z),
-      };
-      for (int d = 0; d < 6; ++d)
-        if (get_adjacent_blocktype(chunk_x, chunk_y, x, y, z, (Direction)d) == BLOCKTYPE_AIR)
-          push_block_face(p, state.chunks[chunk_x][chunk_y].blocktypes[x][y][z], (Direction)d);
-    }
-  }
-
-  state.chunk_dirty = true;
 }
 
 /* in: line, plane, plane origin */
@@ -887,13 +1008,22 @@ static bool collision_plane(v3 x0, v3 x1, v3 p0, v3 p1, v3 p2, float *t_out, v3 
   return true;
 }
 
-static v3 collision(v3 p0, v3 *vel, float dt, v3 size) {
+template <class T>
+struct Vec {
+  int size;
+  T *items;
+};
+
+static Vec<Block> collision(v3 p0, v3 p1, float dt, v3 size, OPTIONAL v3 *p_out, OPTIONAL v3 *vel_out, bool glide) {
   const int MAX_ITERATIONS = 20;
+  static Block hits[MAX_ITERATIONS];
+  int num_hits = 0;
   int iterations;
-  v3 p1 = p0 + *vel*dt;
 
   // because we glide along a wall when we hit it, we do multiple iterations to check if the gliding hits another wall
   for(iterations = 0; iterations < MAX_ITERATIONS; ++iterations) {
+
+    Block which_block_was_hit;
 
     // get blocks we can collide with
     int x0 = (int)floor(min(p0.x, p1.x)-size.x);
@@ -903,7 +1033,6 @@ static v3 collision(v3 p0, v3 *vel, float dt, v3 size) {
     int y1 = (int)ceil(max(p0.y, p1.y)+size.y);
     int z1 = (int)ceil(max(p0.z, p1.z)+size.z);
 
-    Block which_block_was_hit = invalid_block();
     bool did_hit = false;
 
     float time = 1.0f;
@@ -911,7 +1040,7 @@ static v3 collision(v3 p0, v3 *vel, float dt, v3 size) {
     for (int x = x0; x <= x1; ++x)
     for (int y = y0; y <= y1; ++y)
     for (int z = z0; z <= z1; ++z) {
-      if (get_blocktype(x,y,z) == BLOCKTYPE_AIR) continue;
+      if (get_blocktype({x,y,z}) == BLOCKTYPE_AIR) continue;
 
       float t = 2.0f;
       v3 n;
@@ -937,46 +1066,53 @@ static v3 collision(v3 p0, v3 *vel, float dt, v3 size) {
       normal = n;
       // TODO: we might want to be able to pass through some kinds of blocks
     }
-
-
     if (!did_hit) break;
 
-    /**
-     * Glide along the wall
-     *
-     * v is the movement vector
-     * a is the part that goes up to the wall
-     * b is the part that goes beyond the wall
-     */
-    normal = normalize(normal);
+    hits[num_hits++] = which_block_was_hit;
+    if (glide) {
+      /**
+       * Glide along the wall
+       *
+       * dp is the movement vector
+       * a is the part that goes up to the wall
+       * b is the part that glides beyond the wall
+       */
+      normal = normalize(normal);
 
-    v3 dp = p1 - p0;
-    float dot = dp*normal;
+      v3 dp = p1 - p0;
+      float dot = dp*normal;
 
-    // go up against the wall
-    v3 a = (normal * dot) * time;
-    // back off a bit
-    a = a + normal * 0.0001f;
-    p1 = p0 + a;
+      // go up against the wall
+      v3 a = (normal * dot) * time;
+      // back off a bit. TODO: we want to back off in the movement direction, not the normal direction :O
+      a = a + normal * 0.0001f;
+      p1 = p0 + a;
 
-    /* remove the part that goes into the wall, and glide the rest */
-    v3 b = dp - dot * normal;
-    *vel = b/dt;
+      // remove the part that goes into the wall, and glide the rest
+      v3 b = dp - dot * normal;
+      if (vel_out)
+        *vel_out = b/dt;
 
-    p1 = p1 + b;
+      p1 = p1 + b;
+    } else {
+      // TODO: implement
+      break;
+    }
   }
 
   // if we reach full number of iterations, something is weird. Don't move anywhere
   if (iterations == MAX_ITERATIONS)
     p1 = p0;
 
-  return p1;
+  if (p_out) *p_out = p1;
+  return Vec<Block>{num_hits, hits};
 }
 
 static void gamestate_init() {
+  if (sizeof(ChunkLocalBlock) != sizeof(u32)) die("we assume ChunkLocalBlock is u32");
   state.camera.look = {0.0f, 1.0f};
-  state.player_pos = {25.0f, 25.0f, 50.0f};
-  build_chunks();
+  state.player_pos = {0.0f, 0.0f, 30.0f};
+  state.block_dirty = true;
 }
 
 // int WINAPI wWinMain(HINSTANCE /*hInstance*/, HINSTANCE /*hPrevInstance*/, PWSTR /*pCmdLine*/, int /*nCmdShow*/) {
@@ -997,7 +1133,7 @@ int wmain(int, wchar_t *[], wchar_t *[] ) {
   sdl_try(SDL_SetRelativeMouseMode(SDL_TRUE));
 
   // create window
-  SDL_Window *window = SDL_CreateWindow("mineclone", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 800, 600, SDL_WINDOW_OPENGL | SDL_WINDOW_FULLSCREEN);
+  SDL_Window *window = SDL_CreateWindow("mineclone", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 800, 600, SDL_WINDOW_OPENGL /*| SDL_WINDOW_FULLSCREEN*/);
   if (!window) sdl_die("Couldn't create window");
   int screenW, screenH;
   SDL_GetWindowSize(window, &screenW, &screenH);
@@ -1044,15 +1180,23 @@ int wmain(int, wchar_t *[], wchar_t *[] ) {
     if (!(loopindex%100))
       printf("fps: %f\n", dt*60.0f);
 
-    // poll events
+    // clear earlier events
     for (int i = 0; i < ARRAY_LEN(state.keypressed); ++i)
       state.keypressed[i] = false;
+    state.clicked = false;
+
+    // process events
     for (SDL_Event event; SDL_PollEvent(&event);) {
       switch (event.type) {
 
         case SDL_WINDOWEVENT: {
           if (event.window.event == SDL_WINDOWEVENT_CLOSE)
             exit(0);
+        } break;
+
+        case SDL_MOUSEBUTTONDOWN: {
+          if (event.button.button & SDL_BUTTON(SDL_BUTTON_LEFT))
+            state.clicked = true;
         } break;
 
         case SDL_KEYDOWN: {
@@ -1102,8 +1246,24 @@ int wmain(int, wchar_t *[], wchar_t *[] ) {
     state.player_vel.x = plane_vel.x*dt;
     state.player_vel.y = plane_vel.y*dt;
     state.player_vel.z -= GRAVITY;
-    state.player_pos = collision(state.player_pos, &state.player_vel, dt, {0.8f, 0.8f, 1.5f});
-    state.camera.pos = state.player_pos + v3{0.0f, 0.0f, 1.0f};
+
+    collision(state.player_pos, state.player_pos + state.player_vel*dt, dt, {0.8f, 0.8f, 1.5f}, &state.player_pos, &state.player_vel, true);
+    state.camera.pos = state.player_pos + CAMERA_OFFSET;
+
+    // clicked - remove block
+    if (state.clicked) {
+      // find the block
+      const float RAY_DISTANCE = 5.0f;
+      v3 ray = camera_getforward_fly(&state.camera, RAY_DISTANCE);
+      v3 p0 = state.player_pos + CAMERA_OFFSET;
+      v3 p1 = p0 + ray;
+      Vec<Block> hits = collision(p0, p1, dt, {0.01f, 0.01f, 0.01f}, 0, 0, false);
+      if (hits.size) {
+        debug(if (hits.size != 1) die("Multiple collisions when not gliding? Somethings wrong"));
+        remove_block(hits.items[0]);
+        puts("hit!");
+      }
+    }
 
     // clear screen
     glClearColor(0.0f, 0.8f, 0.6f, 1.0f);
@@ -1125,14 +1285,15 @@ int wmain(int, wchar_t *[], wchar_t *[] ) {
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, state.gl_texture);
 
-    // render_clear();
-    // build_chunks();
 
-    if (state.chunk_dirty) {
+    if (state.block_dirty) {
+      puts("re-rendering :O");
+      render_clear();
+      generate_block_mesh();
       glBindVertexArray(state.gl_buffer);
       glBufferData(GL_ARRAY_BUFFER, state.num_vertices*sizeof(*state.vertices), state.vertices, GL_STATIC_DRAW);
       glBufferData(GL_ELEMENT_ARRAY_BUFFER, state.num_elements*sizeof(*state.elements), state.elements, GL_STATIC_DRAW);
-      state.chunk_dirty = false;
+      state.block_dirty = false;
     }
 
     // draw
