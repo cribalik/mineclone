@@ -1,5 +1,6 @@
 // TODO:
-// @remove_block
+// @remove_block: Keep a hashmap of (block face, index in vertex list), so when we change the map, we know exactly
+// where in the vertex list our changes should be made. Lets hope this doesn't take too much space (should be pretty much the size of the actual vertex buffer, which isn't too bad)
 //
 
 #include <stdarg.h>
@@ -1132,6 +1133,7 @@ int wmain(int, wchar_t *[], wchar_t *[] ) {
     state.clicked = false;
 
     // process events
+    // @input
     for (SDL_Event event; SDL_PollEvent(&event);) {
       switch (event.type) {
 
@@ -1146,6 +1148,8 @@ int wmain(int, wchar_t *[], wchar_t *[] ) {
         } break;
 
         case SDL_KEYDOWN: {
+          if (event.key.repeat) break;
+
           if (event.key.keysym.sym == SDLK_UP) state.keyisdown[0] = true;
           if (event.key.keysym.sym == SDLK_DOWN) state.keyisdown[1] = true;
           if (event.key.keysym.sym == SDLK_LEFT) state.keyisdown[2] = true;
@@ -1162,6 +1166,8 @@ int wmain(int, wchar_t *[], wchar_t *[] ) {
         } break;
 
         case SDL_KEYUP: {
+          if (event.key.repeat) break;
+
           if (event.key.keysym.sym == SDLK_UP) state.keyisdown[0] = false;
           if (event.key.keysym.sym == SDLK_DOWN) state.keyisdown[1] = false;
           if (event.key.keysym.sym == SDLK_LEFT) state.keyisdown[2] = false;
@@ -1215,6 +1221,7 @@ int wmain(int, wchar_t *[], wchar_t *[] ) {
     glClearColor(0.0f, 0.8f, 0.6f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
+    // @render
     glUseProgram(state.gl_shader);
 
     // camera
