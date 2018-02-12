@@ -1,7 +1,18 @@
 // TODO:
-// @remove_block: Keep a hashmap of (block face, index in vertex list), so when we change the map, we know exactly
-// where in the vertex list our changes should be made. Lets hope this doesn't take too much space (should be pretty much the size of the actual vertex buffer, which isn't too bad)
 //
+// * dynamically load chunks
+//
+// * persisting chunks to disk
+// 
+// * load chunks in separate thread
+//
+// * inventory
+//
+// * transparent blocks
+//
+// * better terrain (different block types)
+//
+////
 
 #include <stdarg.h>
 #include "GL/gl3w.h"
@@ -14,6 +25,7 @@
 #include <stdint.h>
 
 typedef uint8_t u8;
+typedef uint16_t u16;
 typedef uint32_t u32;
 typedef uint64_t u64;
 
@@ -254,10 +266,16 @@ struct r2 {
   float x0,y0,x1,y1;
 };
 
+struct VertexPos {
+  u16 x,y,z;
+};
+struct VertexTexPos {
+  u16 x,y;
+};
 struct Vertex {
-  v3 pos;
-  v2 tex;
-  int direction;
+  VertexPos pos;
+  VertexTexPos tex;
+  u8 direction;
 };
 
 struct m4 {
@@ -504,13 +522,13 @@ static const char *vertex_shader = R"VSHADER(
   #version 330 core
 
   // in
-  layout(location = 0) in vec3 pos;
+  layout(location = 0) in uvec3 pos;
   layout(location = 1) in vec2 tpos;
-  layout(location = 2) in int dir;
+  layout(location = 2) in uint dir;
 
   // out
   out vec2 ftpos;
-  flat out int fdir;
+  flat out uint fdir;
 
   // uniform
   uniform mat4 ucamera;
@@ -529,7 +547,7 @@ static const char *fragment_shader = R"FSHADER(
 
   // in
   in vec2 ftpos;
-  flat in int fdir;
+  flat in uint fdir;
 
   // out
   out vec4 fcolor;
@@ -540,22 +558,22 @@ static const char *fragment_shader = R"FSHADER(
   void main() {
     float shade = 0.0;
     switch(fdir) {
-      case 0: // UP
+      case 0u: // UP
         shade = 0.9;
         break;
-      case 1: // DOWN
+      case 1u: // DOWN
         shade = 0.7;
         break;
-      case 2: // X
+      case 2u: // X
         shade = 0.85;
         break;
-      case 3: // Y
+      case 3u: // Y
         shade = 0.8;
         break;
-      case 4: // -X
+      case 4u: // -X
         shade = 0.7;
         break;
-      case 5: // -Y
+      case 5u: // -Y
         shade = 0.8;
         break;
       default:
@@ -603,7 +621,6 @@ static GLuint shader_create(const char *vertex_shader_source, const char *fragme
   }
   return p;
 }
-
 
 // game
 enum BlockType: u8 {
@@ -742,9 +759,9 @@ static void array_element_buffer_create() {
   glEnableVertexAttribArray(0);
   glEnableVertexAttribArray(1);
   glEnableVertexAttribArray(2);
-  glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (GLvoid*)0);
-  glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (GLvoid*)offsetof(Vertex, tex));
-  glVertexAttribIPointer(2, 1, GL_INT, sizeof(Vertex), (GLvoid*)offsetof(Vertex, direction));
+  glVertexAttribIPointer(0, 3, GL_UNSIGNED_SHORT, sizeof(Vertex), (GLvoid*)0);
+  glVertexAttribPointer(1, 2, GL_UNSIGNED_SHORT, GL_TRUE, sizeof(Vertex), (GLvoid*)offsetof(Vertex, tex));
+  glVertexAttribIPointer(2, 1, GL_UNSIGNED_BYTE, sizeof(Vertex), (GLvoid*)offsetof(Vertex, direction));
   gl_ok_or_die;
 
   state.gl_vao = vao;
@@ -753,20 +770,20 @@ static void array_element_buffer_create() {
 }
 
 static void push_block_face(Block block, BlockType type, Direction dir) {
-  const float size = 1.0f;
-  const float tsize = 1.0f/3.0f;
-  const v3 p = {
-    (float)(block.x),
-    (float)(block.y),
-    (float)(block.z),
-  };
+  const int tex_max = UINT16_MAX;
+  const int tsize = tex_max/3;
+  const VertexPos p =  {(u16)(block.x), (u16)(block.y), (u16)(block.z)};
+  const VertexPos p2 = {(u16)(block.x+1), (u16)(block.y+1), (u16)(block.z+1)};
 
   if (state.num_vertices + 4 >= ARRAY_LEN(state.vertices) || state.num_elements + 6 > ARRAY_LEN(state.elements))
     return;
 
-  const r2 ttop = {0.0f, 0.0f, tsize, 1.0f};
-  const r2 tside = {tsize, 0.0f, 2*tsize, 1.0f};
-  const r2 tbot = {2*tsize, 0.0f, 3*tsize, 1.0f};
+  const VertexTexPos ttop = {0, 0};
+  const VertexTexPos ttop2 = {tsize, tex_max};
+  const VertexTexPos tside = {tsize, 0};
+  const VertexTexPos tside2 = {2*tsize, tex_max};
+  const VertexTexPos tbot = {2*tsize, 0};
+  const VertexTexPos tbot2 = {3*tsize, tex_max};
 
   int v, el;
   // check if there are free vertex slots
@@ -786,45 +803,45 @@ static void push_block_face(Block block, BlockType type, Direction dir) {
 
   switch (dir) {
     case DIRECTION_UP: {
-      state.vertices[v] = {p.x,      p.y,      p.z+size, ttop.x0, ttop.y0, DIRECTION_UP};
-      state.vertices[v+1] = {p.x+size, p.y,      p.z+size, ttop.x1, ttop.y0, DIRECTION_UP};
-      state.vertices[v+2] = {p.x+size, p.y+size, p.z+size, ttop.x1, ttop.y1, DIRECTION_UP};
-      state.vertices[v+3] = {p.x,      p.y+size, p.z+size, ttop.x0, ttop.y1, DIRECTION_UP};
+      state.vertices[v] = {p.x,      p.y,      p2.z, ttop.x, ttop.y, DIRECTION_UP};
+      state.vertices[v+1] = {p2.x, p.y,      p2.z, ttop2.x, ttop.y, DIRECTION_UP};
+      state.vertices[v+2] = {p2.x, p2.y, p2.z, ttop2.x, ttop2.y, DIRECTION_UP};
+      state.vertices[v+3] = {p.x,      p2.y, p2.z, ttop.x, ttop2.y, DIRECTION_UP};
     } break;
 
     case DIRECTION_DOWN: {
-      state.vertices[v] = {p.x+size, p.y,      p.z, tbot.x0, tbot.y0, DIRECTION_DOWN};
-      state.vertices[v+1] = {p.x,      p.y,      p.z, tbot.x1, tbot.y0, DIRECTION_DOWN};
-      state.vertices[v+2] = {p.x,      p.y+size, p.z, tbot.x1, tbot.y1, DIRECTION_DOWN};
-      state.vertices[v+3] = {p.x+size, p.y+size, p.z, tbot.x0, tbot.y1, DIRECTION_DOWN};
+      state.vertices[v] = {p2.x, p.y,      p.z, tbot.x, tbot.y, DIRECTION_DOWN};
+      state.vertices[v+1] = {p.x,      p.y,      p.z, tbot2.x, tbot.y, DIRECTION_DOWN};
+      state.vertices[v+2] = {p.x,      p2.y, p.z, tbot2.x, tbot2.y, DIRECTION_DOWN};
+      state.vertices[v+3] = {p2.x, p2.y, p.z, tbot.x, tbot2.y, DIRECTION_DOWN};
     } break;
 
     case DIRECTION_X: {
-      state.vertices[v] = {p.x+size, p.y,      p.z,      tside.x0, tside.y0, DIRECTION_X};
-      state.vertices[v+1] = {p.x+size, p.y+size, p.z,      tside.x1, tside.y0, DIRECTION_X};
-      state.vertices[v+2] = {p.x+size, p.y+size, p.z+size, tside.x1, tside.y1, DIRECTION_X};
-      state.vertices[v+3] = {p.x+size, p.y,      p.z+size, tside.x0, tside.y1, DIRECTION_X};
+      state.vertices[v] = {p2.x, p.y,      p.z,      tside.x, tside.y, DIRECTION_X};
+      state.vertices[v+1] = {p2.x, p2.y, p.z,      tside2.x, tside.y, DIRECTION_X};
+      state.vertices[v+2] = {p2.x, p2.y, p2.z, tside2.x, tside2.y, DIRECTION_X};
+      state.vertices[v+3] = {p2.x, p.y,      p2.z, tside.x, tside2.y, DIRECTION_X};
     } break;
 
     case DIRECTION_Y: {
-      state.vertices[v] = {p.x+size, p.y+size, p.z,      tside.x0, tside.y0, DIRECTION_Y};
-      state.vertices[v+1] = {p.x,      p.y+size, p.z,      tside.x1, tside.y0, DIRECTION_Y};
-      state.vertices[v+2] = {p.x,      p.y+size, p.z+size, tside.x1, tside.y1, DIRECTION_Y};
-      state.vertices[v+3] = {p.x+size, p.y+size, p.z+size, tside.x0, tside.y1, DIRECTION_Y};
+      state.vertices[v] = {p2.x, p2.y, p.z,      tside.x, tside.y, DIRECTION_Y};
+      state.vertices[v+1] = {p.x,      p2.y, p.z,      tside2.x, tside.y, DIRECTION_Y};
+      state.vertices[v+2] = {p.x,      p2.y, p2.z, tside2.x, tside2.y, DIRECTION_Y};
+      state.vertices[v+3] = {p2.x, p2.y, p2.z, tside.x, tside2.y, DIRECTION_Y};
     } break;
 
     case DIRECTION_MINUS_X: {
-      state.vertices[v] = {p.x, p.y+size, p.z,      tside.x0, tside.y0, DIRECTION_MINUS_X};
-      state.vertices[v+1] = {p.x, p.y,      p.z,      tside.x1, tside.y0, DIRECTION_MINUS_X};
-      state.vertices[v+2] = {p.x, p.y,      p.z+size, tside.x1, tside.y1, DIRECTION_MINUS_X};
-      state.vertices[v+3] = {p.x, p.y+size, p.z+size, tside.x0, tside.y1, DIRECTION_MINUS_X};
+      state.vertices[v] = {p.x, p2.y, p.z,      tside.x, tside.y, DIRECTION_MINUS_X};
+      state.vertices[v+1] = {p.x, p.y,      p.z,      tside2.x, tside.y, DIRECTION_MINUS_X};
+      state.vertices[v+2] = {p.x, p.y,      p2.z, tside2.x, tside2.y, DIRECTION_MINUS_X};
+      state.vertices[v+3] = {p.x, p2.y, p2.z, tside.x, tside2.y, DIRECTION_MINUS_X};
     } break;
 
     case DIRECTION_MINUS_Y: {
-      state.vertices[v] = {p.x,      p.y, p.z,      tside.x0, tside.y0, DIRECTION_MINUS_Y};
-      state.vertices[v+1] = {p.x+size, p.y, p.z,      tside.x1, tside.y0, DIRECTION_MINUS_Y};
-      state.vertices[v+2] = {p.x+size, p.y, p.z+size, tside.x1, tside.y1, DIRECTION_MINUS_Y};
-      state.vertices[v+3] = {p.x,      p.y, p.z+size, tside.x0, tside.y1, DIRECTION_MINUS_Y};
+      state.vertices[v] = {p.x,      p.y, p.z,      tside.x, tside.y, DIRECTION_MINUS_Y};
+      state.vertices[v+1] = {p2.x, p.y, p.z,      tside2.x, tside.y, DIRECTION_MINUS_Y};
+      state.vertices[v+2] = {p2.x, p.y, p2.z, tside2.x, tside2.y, DIRECTION_MINUS_Y};
+      state.vertices[v+3] = {p.x,      p.y, p2.z, tside.x, tside2.y, DIRECTION_MINUS_Y};
     } break;
 
     default: return;
