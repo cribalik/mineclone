@@ -478,29 +478,6 @@ static m4 camera_get_projection_matrix(Camera *camera, float fov, float nearz, f
 }
 
 
-// openglstuff
-static GLuint array_element_buffer_create() {
-  GLuint vao, ebo, vbo;
-  glGenVertexArrays(1, &vao);
-  glGenBuffers(1, &vbo);
-  glGenBuffers(1, &ebo);
-
-  glBindVertexArray(vao);
-
-  glBindBuffer(GL_ARRAY_BUFFER, vbo);
-  glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
-
-  glEnableVertexAttribArray(0);
-  glEnableVertexAttribArray(1);
-  glEnableVertexAttribArray(2);
-  glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (GLvoid*)0);
-  glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (GLvoid*)offsetof(Vertex, tex));
-  glVertexAttribIPointer(2, 1, GL_INT, sizeof(Vertex), (GLvoid*)offsetof(Vertex, direction));
-  gl_ok_or_die;
-
-  return vao;
-}
-
 static GLuint texture_load(const char *filename) {
   int w,h,n;
 
@@ -636,11 +613,14 @@ enum BlockType: u8 {
 };
 
 enum Direction: u8 {
-  DIRECTION_UP, DIRECTION_DOWN, DIRECTION_X, DIRECTION_Y, DIRECTION_MINUS_X, DIRECTION_MINUS_Y, DIRECTION_MAX
+  DIRECTION_UP, DIRECTION_X, DIRECTION_Y, DIRECTION_MINUS_Y, DIRECTION_MINUS_X, DIRECTION_DOWN, DIRECTION_MAX
 };
 
-#define For(container) decltype(next(iter(container))) it; for(auto _iterator = iter(container); it = next(_iterator);)
+static Direction invert_direction(Direction d) {
+  return (Direction)(DIRECTION_MAX - 1 - d);
+}
 
+// @colony
 template <class T, int N>
 struct Colony {
   int size;
@@ -671,7 +651,7 @@ struct ColonyIter {
 };
 
 template<class T, int N>
-static ColonyIter<T,N> iter(Colony<T,N> *c) {
+static ColonyIter<T,N> iter(Colony<T,N> &c) {
   return {c, -1};
 }
 
@@ -691,32 +671,19 @@ static T* next(ColonyIter<T,N> &iter) {
   return &iter.c->items[iter.i];
 };
 
+#ifndef For
+#define For(container) decltype(next(iter(container))) it; for(auto _iterator = iter(container); it = next(_iterator);)
+#endif
+
+static const int NUM_BLOCKS_X = 128, NUM_BLOCKS_Y = 128, NUM_BLOCKS_Z = 128;
 static const int NUM_CHUNKS_X = 8, NUM_CHUNKS_Y = 8, NUM_CHUNKS_Z = 1;
 static const int CHUNKSIZE_X = 16, CHUNKSIZE_Y = 16, CHUNKSIZE_Z = 256;
 static const int MAX_DIFFS = 128;
-struct ChunkLocalBlock {
-  unsigned int x: 5;
-  unsigned int y: 5;
-  unsigned int z: 8;
-};
 
 struct BlockDiff {
-  ChunkLocalBlock block;
+  Block block;
   BlockType t;
 };
-struct Chunk {
-  Colony<BlockDiff, 64> *diffs;
-  // static char mesh_buffer[CHUNKSIZE_X][CHUNKSIZE_Y][CHUNKSIZE_Z];
-};
-
-static ChunkLocalBlock block_to_chunklocal(Block b) {
-  ChunkLocalBlock l;
-  l.x = b.x&(CHUNKSIZE_X-1);
-  l.y = b.y&(CHUNKSIZE_Y-1);
-  l.z = b.z;
-  return l;
-}
-
 
 static const v3 CAMERA_OFFSET = v3{0.0f, 0.0f, 1.0f};
 static struct GameState {
@@ -727,32 +694,72 @@ static struct GameState {
 
   // graphics data
   Camera camera;
-  // vertices
+
   #define MAX_VERTICES 1024*1024
+  #define MAX_ELEMENTS (MAX_VERTICES*2)
+  bool vertices_dirty;
   Vertex vertices[MAX_VERTICES];
   int num_vertices;
-  unsigned int elements[MAX_VERTICES*4];
+
+  unsigned int elements[MAX_VERTICES*2];
   int num_elements;
+
+  int free_block_faces[MAX_VERTICES];
+  int num_free_block_faces;
+
+  int block_vertex_pos[NUM_BLOCKS_X][NUM_BLOCKS_Y][NUM_BLOCKS_Z][DIRECTION_MAX];
+
   // identifiers
-  GLuint gl_buffer;
+  GLuint gl_vao, gl_vbo, gl_ebo;
   GLuint gl_shader;
-  GLuint gl_camera;
-  GLuint gl_texture_loc;
+  GLuint gl_camera_uniform;
+  GLuint gl_texture_uniform;
   GLuint gl_texture;
 
   // world data
   v3i chunk_offset;
-  Chunk chunks[NUM_CHUNKS_X][NUM_CHUNKS_Y];
-  bool block_dirty;
+
+  Array<BlockDiff> block_diffs;
+  bool block_mesh_dirty;
 
   // player data
   v3 player_vel;
   v3 player_pos;
 } state;
 
-static void push_block_face(v3 p, BlockType type, Direction dir) {
+// openglstuff
+static void array_element_buffer_create() {
+  GLuint vao, ebo, vbo;
+  glGenVertexArrays(1, &vao);
+  glGenBuffers(1, &vbo);
+  glGenBuffers(1, &ebo);
+
+  glBindVertexArray(vao);
+
+  glBindBuffer(GL_ARRAY_BUFFER, vbo);
+  glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
+
+  glEnableVertexAttribArray(0);
+  glEnableVertexAttribArray(1);
+  glEnableVertexAttribArray(2);
+  glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (GLvoid*)0);
+  glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (GLvoid*)offsetof(Vertex, tex));
+  glVertexAttribIPointer(2, 1, GL_INT, sizeof(Vertex), (GLvoid*)offsetof(Vertex, direction));
+  gl_ok_or_die;
+
+  state.gl_vao = vao;
+  state.gl_vbo = vbo;
+  state.gl_ebo = ebo;
+}
+
+static void push_block_face(Block block, BlockType type, Direction dir) {
   const float size = 1.0f;
   const float tsize = 1.0f/3.0f;
+  const v3 p = {
+    (float)(block.x),
+    (float)(block.y),
+    (float)(block.z),
+  };
 
   if (state.num_vertices + 4 >= ARRAY_LEN(state.vertices) || state.num_elements + 6 > ARRAY_LEN(state.elements))
     return;
@@ -761,88 +768,86 @@ static void push_block_face(v3 p, BlockType type, Direction dir) {
   const r2 tside = {tsize, 0.0f, 2*tsize, 1.0f};
   const r2 tbot = {2*tsize, 0.0f, 3*tsize, 1.0f};
 
-  int e = state.num_vertices;
+  int v, el;
+  // check if there are free vertex slots
+  if (state.num_free_block_faces) {
+    int i = state.free_block_faces[--state.num_free_block_faces];
+    v = i*4; // 4 vertices per face
+    el = i*6; // 6 elements per face
+  }
+  else {
+    // else push at the end
+    v = state.num_vertices;
+    state.num_vertices += 4;
+    el = state.num_elements;
+    state.num_elements += 6;
+  }
+  state.block_vertex_pos[block.x][block.y][block.z][dir] = v/4;
 
   switch (dir) {
     case DIRECTION_UP: {
-      state.vertices[state.num_vertices++] = {p.x,      p.y,      p.z+size, ttop.x0, ttop.y0, DIRECTION_UP};
-      state.vertices[state.num_vertices++] = {p.x+size, p.y,      p.z+size, ttop.x1, ttop.y0, DIRECTION_UP};
-      state.vertices[state.num_vertices++] = {p.x+size, p.y+size, p.z+size, ttop.x1, ttop.y1, DIRECTION_UP};
-      state.vertices[state.num_vertices++] = {p.x,      p.y+size, p.z+size, ttop.x0, ttop.y1, DIRECTION_UP};
+      state.vertices[v] = {p.x,      p.y,      p.z+size, ttop.x0, ttop.y0, DIRECTION_UP};
+      state.vertices[v+1] = {p.x+size, p.y,      p.z+size, ttop.x1, ttop.y0, DIRECTION_UP};
+      state.vertices[v+2] = {p.x+size, p.y+size, p.z+size, ttop.x1, ttop.y1, DIRECTION_UP};
+      state.vertices[v+3] = {p.x,      p.y+size, p.z+size, ttop.x0, ttop.y1, DIRECTION_UP};
     } break;
 
     case DIRECTION_DOWN: {
-      state.vertices[state.num_vertices++] = {p.x+size, p.y,      p.z, tbot.x0, tbot.y0, DIRECTION_DOWN};
-      state.vertices[state.num_vertices++] = {p.x,      p.y,      p.z, tbot.x1, tbot.y0, DIRECTION_DOWN};
-      state.vertices[state.num_vertices++] = {p.x,      p.y+size, p.z, tbot.x1, tbot.y1, DIRECTION_DOWN};
-      state.vertices[state.num_vertices++] = {p.x+size, p.y+size, p.z, tbot.x0, tbot.y1, DIRECTION_DOWN};
+      state.vertices[v] = {p.x+size, p.y,      p.z, tbot.x0, tbot.y0, DIRECTION_DOWN};
+      state.vertices[v+1] = {p.x,      p.y,      p.z, tbot.x1, tbot.y0, DIRECTION_DOWN};
+      state.vertices[v+2] = {p.x,      p.y+size, p.z, tbot.x1, tbot.y1, DIRECTION_DOWN};
+      state.vertices[v+3] = {p.x+size, p.y+size, p.z, tbot.x0, tbot.y1, DIRECTION_DOWN};
     } break;
 
     case DIRECTION_X: {
-      state.vertices[state.num_vertices++] = {p.x+size, p.y,      p.z,      tside.x0, tside.y0, DIRECTION_X};
-      state.vertices[state.num_vertices++] = {p.x+size, p.y+size, p.z,      tside.x1, tside.y0, DIRECTION_X};
-      state.vertices[state.num_vertices++] = {p.x+size, p.y+size, p.z+size, tside.x1, tside.y1, DIRECTION_X};
-      state.vertices[state.num_vertices++] = {p.x+size, p.y,      p.z+size, tside.x0, tside.y1, DIRECTION_X};
+      state.vertices[v] = {p.x+size, p.y,      p.z,      tside.x0, tside.y0, DIRECTION_X};
+      state.vertices[v+1] = {p.x+size, p.y+size, p.z,      tside.x1, tside.y0, DIRECTION_X};
+      state.vertices[v+2] = {p.x+size, p.y+size, p.z+size, tside.x1, tside.y1, DIRECTION_X};
+      state.vertices[v+3] = {p.x+size, p.y,      p.z+size, tside.x0, tside.y1, DIRECTION_X};
     } break;
 
     case DIRECTION_Y: {
-      state.vertices[state.num_vertices++] = {p.x+size, p.y+size, p.z,      tside.x0, tside.y0, DIRECTION_Y};
-      state.vertices[state.num_vertices++] = {p.x,      p.y+size, p.z,      tside.x1, tside.y0, DIRECTION_Y};
-      state.vertices[state.num_vertices++] = {p.x,      p.y+size, p.z+size, tside.x1, tside.y1, DIRECTION_Y};
-      state.vertices[state.num_vertices++] = {p.x+size, p.y+size, p.z+size, tside.x0, tside.y1, DIRECTION_Y};
+      state.vertices[v] = {p.x+size, p.y+size, p.z,      tside.x0, tside.y0, DIRECTION_Y};
+      state.vertices[v+1] = {p.x,      p.y+size, p.z,      tside.x1, tside.y0, DIRECTION_Y};
+      state.vertices[v+2] = {p.x,      p.y+size, p.z+size, tside.x1, tside.y1, DIRECTION_Y};
+      state.vertices[v+3] = {p.x+size, p.y+size, p.z+size, tside.x0, tside.y1, DIRECTION_Y};
     } break;
 
     case DIRECTION_MINUS_X: {
-      state.vertices[state.num_vertices++] = {p.x, p.y+size, p.z,      tside.x0, tside.y0, DIRECTION_MINUS_X};
-      state.vertices[state.num_vertices++] = {p.x, p.y,      p.z,      tside.x1, tside.y0, DIRECTION_MINUS_X};
-      state.vertices[state.num_vertices++] = {p.x, p.y,      p.z+size, tside.x1, tside.y1, DIRECTION_MINUS_X};
-      state.vertices[state.num_vertices++] = {p.x, p.y+size, p.z+size, tside.x0, tside.y1, DIRECTION_MINUS_X};
+      state.vertices[v] = {p.x, p.y+size, p.z,      tside.x0, tside.y0, DIRECTION_MINUS_X};
+      state.vertices[v+1] = {p.x, p.y,      p.z,      tside.x1, tside.y0, DIRECTION_MINUS_X};
+      state.vertices[v+2] = {p.x, p.y,      p.z+size, tside.x1, tside.y1, DIRECTION_MINUS_X};
+      state.vertices[v+3] = {p.x, p.y+size, p.z+size, tside.x0, tside.y1, DIRECTION_MINUS_X};
     } break;
 
     case DIRECTION_MINUS_Y: {
-      state.vertices[state.num_vertices++] = {p.x,      p.y, p.z,      tside.x0, tside.y0, DIRECTION_MINUS_Y};
-      state.vertices[state.num_vertices++] = {p.x+size, p.y, p.z,      tside.x1, tside.y0, DIRECTION_MINUS_Y};
-      state.vertices[state.num_vertices++] = {p.x+size, p.y, p.z+size, tside.x1, tside.y1, DIRECTION_MINUS_Y};
-      state.vertices[state.num_vertices++] = {p.x,      p.y, p.z+size, tside.x0, tside.y1, DIRECTION_MINUS_Y};
+      state.vertices[v] = {p.x,      p.y, p.z,      tside.x0, tside.y0, DIRECTION_MINUS_Y};
+      state.vertices[v+1] = {p.x+size, p.y, p.z,      tside.x1, tside.y0, DIRECTION_MINUS_Y};
+      state.vertices[v+2] = {p.x+size, p.y, p.z+size, tside.x1, tside.y1, DIRECTION_MINUS_Y};
+      state.vertices[v+3] = {p.x,      p.y, p.z+size, tside.x0, tside.y1, DIRECTION_MINUS_Y};
     } break;
 
     default: return;
   }
 
-  state.elements[state.num_elements++] = e;
-  state.elements[state.num_elements++] = e+1;
-  state.elements[state.num_elements++] = e+2;
-  state.elements[state.num_elements++] = e;
-  state.elements[state.num_elements++] = e+2;
-  state.elements[state.num_elements++] = e+3;
+  state.elements[el]   = v;
+  state.elements[el+1] = v+1;
+  state.elements[el+2] = v+2;
+  state.elements[el+3] = v;
+  state.elements[el+4] = v+2;
+  state.elements[el+5] = v+3;
 }
 
 static void render_clear() {
   state.num_vertices = state.num_elements = 0;
 }
 
-static Chunk* block_to_chunk(Block b) {
-  int x = b.x/CHUNKSIZE_X - state.chunk_offset.x;
-  int y = b.y/CHUNKSIZE_Y - state.chunk_offset.y;
-  if (x < 0 || x >= NUM_CHUNKS_X || y < 0 || y >= NUM_CHUNKS_Y)
-    return 0;
-  return &state.chunks[x][y];
-}
-
-static Chunk* block_to_chunk(v3 p) {
-  block_to_chunk(Block{(int)p.x, (int)p.y, (int)p.z});
-}
-
 // TODO: maybe have a cache for these
 static BlockType get_blocktype(Block b) {
   // first check diffs
-  Chunk *c = block_to_chunk(b);
-  if (c && c->diffs) {
-    ChunkLocalBlock lb = block_to_chunklocal(b);
-    For(c->diffs)
-      if (it->block.x == lb.x && it->block.y == lb.y && it->block.z == lb.z)
-        return it->t;
-  }
+  For(state.block_diffs)
+    if (it->block.x == b.x && it->block.y == b.y && it->block.z == b.z)
+      return it->t;
 
   // otherwise generate
   static float freq = 0.05f;
@@ -860,14 +865,6 @@ static BlockType get_blocktype(Block b) {
   return BLOCKTYPE_AIR;
 }
 
-static v3 block_to_v3(Block b) {
-  return {
-    (float)(b.x),
-    (float)(b.y),
-    (float)(b.z),
-  };
-}
-
 static Block get_adjacent_block(Block b, Direction dir) {
   switch (dir) {
     case DIRECTION_UP:      return ++b.z, b;
@@ -882,37 +879,46 @@ static Block get_adjacent_block(Block b, Direction dir) {
   }
 }
 
-static bool push_blockdiff(Block b, BlockType t) {
-  Chunk *c = block_to_chunk(b);
-  if (!c) {
-    debug(die("tried to push a diff to a chunk that was not loaded"));
-    return false;
-  }
-
-  push(&c->diffs, {block_to_chunklocal(b), t});
-  return true;
+static void push_blockdiff(Block b, BlockType t) {
+  array_push(state.block_diffs, {b, t});
 }
 
 static void remove_block(Block b) {
-  // TODO: @remove_block more efficient mesh then just rebulding everything! :D
-  if (push_blockdiff(b, BLOCKTYPE_AIR))
-    state.block_dirty = true;
+  // remove the visible faces of this block
+  for (int d = 0; d < DIRECTION_MAX; ++d) {
+    if (get_blocktype(get_adjacent_block(b, (Direction)d)) != BLOCKTYPE_AIR) continue;
+
+    int free_index = state.block_vertex_pos[b.x][b.y][b.z][d];
+    state.free_block_faces[state.num_free_block_faces++] = free_index;
+    int v = free_index*4;
+    state.vertices[v] = {};
+    state.vertices[v+1] = {};
+    state.vertices[v+2] = {};
+    state.vertices[v+3] = {};
+  }
+  // and add the newly visible faces of the adjacent blocks
+  for (int d = 0; d < DIRECTION_MAX; ++d) {
+    BlockType t = get_blocktype(get_adjacent_block(b, (Direction)d));
+    if (t != BLOCKTYPE_AIR)
+      push_block_face(get_adjacent_block(b, (Direction)d), t, invert_direction((Direction)d));
+  }
+  state.vertices_dirty = true;
+  push_blockdiff(b, BLOCKTYPE_AIR);
 }
 
 static void generate_block_mesh() {
   render_clear();
   // render block faces that face transparent blocks
-  for(int x = 0; x < NUM_CHUNKS_X*CHUNKSIZE_X; ++x)
-  for(int y = 0; y < NUM_CHUNKS_Y*CHUNKSIZE_Y; ++y)
-  for(int z = 0; z < NUM_CHUNKS_Z*CHUNKSIZE_Z; ++z) {
+  for(int x = 0; x < NUM_BLOCKS_X; ++x)
+  for(int y = 0; y < NUM_BLOCKS_Y; ++y)
+  for(int z = 0; z < NUM_BLOCKS_Z; ++z) {
     Block block = {x,y,z};
     BlockType t = get_blocktype(block);
     if (t == BLOCKTYPE_AIR) continue;
 
-    v3 p = block_to_v3(block);
     for (int d = 0; d < 6; ++d)
       if (get_blocktype(get_adjacent_block(block, (Direction)d)) == BLOCKTYPE_AIR)
-        push_block_face(p, t, (Direction)d);
+        push_block_face(block, t, (Direction)d);
   }
 }
 
@@ -1056,10 +1062,10 @@ static Vec<Block> collision(v3 p0, v3 p1, float dt, v3 size, OPTIONAL v3 *p_out,
 }
 
 static void gamestate_init() {
-  if (sizeof(ChunkLocalBlock) != sizeof(u32)) die("we assume ChunkLocalBlock is u32");
   state.camera.look = {0.0f, 1.0f};
   state.player_pos = {0.0f, 0.0f, 30.0f};
-  state.block_dirty = true;
+  state.block_mesh_dirty = true;
+  state.vertices_dirty = true;
 }
 
 // int WINAPI wWinMain(HINSTANCE /*hInstance*/, HINSTANCE /*hPrevInstance*/, PWSTR /*pCmdLine*/, int /*nCmdShow*/) {
@@ -1095,16 +1101,16 @@ int wmain(int, wchar_t *[], wchar_t *[] ) {
   gl3wInit();
 
   // gl buffers, shaders, and uniform locations
-  state.gl_buffer  = array_element_buffer_create();
+  array_element_buffer_create();
   state.gl_shader  = shader_create(vertex_shader, fragment_shader);
-  state.gl_camera  = glGetUniformLocation(state.gl_shader, "ucamera");
-  state.gl_texture_loc = glGetUniformLocation(state.gl_shader, "utexture");
-  if (state.gl_texture_loc == -1) die("Failed to find uniform location of 'utexture'");
+  state.gl_camera_uniform  = glGetUniformLocation(state.gl_shader, "ucamera");
+  state.gl_texture_uniform = glGetUniformLocation(state.gl_shader, "utexture");
+  if (state.gl_texture_uniform == -1) die("Failed to find uniform location of 'utexture'");
 
   // some gl settings
   glEnable(GL_DEPTH_TEST);
   glEnable(GL_CULL_FACE);
-  glCullFace(GL_CCW);
+  glCullFace(GL_BACK);
 
   // load block textures
   state.gl_texture = texture_load("textures.bmp");
@@ -1229,30 +1235,39 @@ int wmain(int, wchar_t *[], wchar_t *[] ) {
     const float nearz = 0.3f;
     const float farz = 300.0f;
     const m4 camera = camera_get_projection_matrix(&state.camera, fov, nearz, farz, screen_ratio);
-    glUniformMatrix4fv(state.gl_camera, 1, GL_TRUE, camera.d);
+    glUniformMatrix4fv(state.gl_camera_uniform, 1, GL_TRUE, camera.d);
     glGetUniformLocation(state.gl_shader, "far");
     glGetUniformLocation(state.gl_shader, "nearsize");
 
     // texture
-    glUniform1i(state.gl_texture_loc, 0);
+    glUniform1i(state.gl_texture_uniform, 0);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, state.gl_texture);
+
+    glBindVertexArray(state.gl_vao);
 
     if (loopindex%100 == 0)
       printf("%lu\n", state.num_vertices*sizeof(state.vertices[0]));
 
-    if (state.block_dirty) {
+    if (state.block_mesh_dirty) {
       puts("re-rendering :O");
       render_clear();
       generate_block_mesh();
-      glBindVertexArray(state.gl_buffer);
-      glBufferData(GL_ARRAY_BUFFER, state.num_vertices*sizeof(*state.vertices), state.vertices, GL_STATIC_DRAW);
-      glBufferData(GL_ELEMENT_ARRAY_BUFFER, state.num_elements*sizeof(*state.elements), state.elements, GL_STATIC_DRAW);
-      state.block_dirty = false;
+      state.block_mesh_dirty = false;
+      state.vertices_dirty = true;
+    }
+    if (state.vertices_dirty) {
+      puts("resending vertices");
+      glBindBuffer(GL_ARRAY_BUFFER, state.gl_vbo);
+      glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, state.gl_ebo);
+      glBufferData(GL_ARRAY_BUFFER, state.num_vertices*sizeof(*state.vertices), state.vertices, GL_DYNAMIC_DRAW);
+      glBufferData(GL_ELEMENT_ARRAY_BUFFER, state.num_elements*sizeof(*state.elements), state.elements, GL_DYNAMIC_DRAW);
+      state.vertices_dirty = false;
     }
 
     // draw
     glDrawElements(GL_TRIANGLES, state.num_elements, GL_UNSIGNED_INT, 0);
+    gl_ok_or_die;
 
     SDL_GL_SwapWindow(window);
   }
