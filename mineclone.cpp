@@ -14,6 +14,12 @@
 //
 ////
 
+#ifdef _MSC_VER
+  #define OS_WINDOWS 1
+#else
+  #define OS_LINUX 1
+#endif
+
 #include <stdarg.h>
 #include "GL/gl3w.h"
 #include "SDL2/SDL.h"
@@ -689,7 +695,7 @@ static T* next(ColonyIter<T,N> &iter) {
 };
 
 #ifndef For
-#define For(container) decltype(next(iter(container))) it; for(auto _iterator = iter(container); it = next(_iterator);)
+#define For(container) decltype(container)::Iterator it; for(auto _iterator = iter(container); it = next(_iterator);)
 #endif
 
 static const int NUM_BLOCKS_X = 128, NUM_BLOCKS_Y = 128, NUM_BLOCKS_Z = 128;
@@ -984,6 +990,16 @@ struct Vec {
   T *items;
 };
 
+template <class T>
+T max(T a, T b) {
+  return a < b ? b : a;
+}
+
+template <class T>
+T min(T a, T b) {
+  return b < a ? b : a;
+}
+
 static Vec<Block> collision(v3 p0, v3 p1, float dt, v3 size, OPTIONAL v3 *p_out, OPTIONAL v3 *vel_out, bool glide) {
   const int MAX_ITERATIONS = 20;
   static Block hits[MAX_ITERATIONS];
@@ -1086,8 +1102,12 @@ static void gamestate_init() {
 }
 
 // int WINAPI wWinMain(HINSTANCE /*hInstance*/, HINSTANCE /*hPrevInstance*/, PWSTR /*pCmdLine*/, int /*nCmdShow*/) {
-int wmain(int, wchar_t *[], wchar_t *[] ) {
-
+#ifdef OS_WINDOWS
+int wmain(int, wchar_t *[], wchar_t *[] )
+#else
+int main(int argc, const char **argv)
+#endif
+{
   // init sdl
   sdl_try(SDL_Init(SDL_INIT_EVERYTHING));
   atexit(SDL_Quit);

@@ -16,7 +16,14 @@
 #endif
 
 template<class T>
+struct ArrayIter {
+  T *t, *end;
+};
+
+template<class T>
 struct Array {
+	typedef T* Iterator;
+
 	T *items;
 	int size,cap;
 
@@ -152,25 +159,19 @@ void array_free(Array<T> &a) {
 #endif /*array_copy*/
 
 template<class T>
-struct ArrayIter {
-  T *t, *end;
-};
-
-template<class T>
-static ArrayIter<T> iter(Array<T> &a) {
+static ArrayIter<T> iter(const Array<T> &a) {
   return {a.items, a.items+a.size};
 }
 
 template<class T>
 static T* next(ArrayIter<T> &i) {
-  ++i.t;
-  if (i.t >= i.end)
-    return 0;
-  return i.t;
+	if (i.t == i.end) return 0;
+  return i.t++;
 }
 
+
 #ifndef For
-#define For(container) decltype(next(iter(container))) it; for(auto _iterator = iter(container); it = next(_iterator);)
+#define For(container) decltype(container)::Iterator it; for(auto _iterator = iter(container); it = next(_iterator);)
 #endif
 
 #endif
