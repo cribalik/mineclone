@@ -1123,7 +1123,8 @@ int main(int argc, const char **argv)
   sdl_try(SDL_SetRelativeMouseMode(SDL_TRUE));
 
   // create window
-  SDL_Window *window = SDL_CreateWindow("mineclone", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 800, 600, SDL_WINDOW_OPENGL /*| SDL_WINDOW_FULLSCREEN*/);
+  // SDL_Window *window = SDL_CreateWindow("mineclone", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 800, 600, SDL_WINDOW_OPENGL);
+  SDL_Window *window = SDL_CreateWindow("mineclone", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1920, 1080, SDL_WINDOW_OPENGL | SDL_WINDOW_BORDERLESS | SDL_WINDOW_FULLSCREEN);
   if (!window) sdl_die("Couldn't create window");
   int screenW, screenH;
   SDL_GetWindowSize(window, &screenW, &screenH);
