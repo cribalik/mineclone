@@ -1,10 +1,8 @@
 // TODO:
 //
-// * dynamically load chunks
-//
-// * persisting chunks to disk
+// * persisting block changes to disk
 // 
-// * load chunks in separate thread
+// * load new blocks in separate thread
 //
 // * inventory
 //
@@ -32,6 +30,7 @@
 
 typedef uint8_t u8;
 typedef uint16_t u16;
+typedef int16_t i16;
 typedef uint32_t u32;
 typedef uint64_t u64;
 
@@ -187,10 +186,23 @@ struct v3i {
   int x,y,z;
 };
 
+static v3i operator-(v3i a, v3i b) {
+  return {a.x-b.x, a.y-b.y, a.z-b.z};
+}
+
+static v3i operator+(v3i a, v3i b) {
+  return {a.x+b.x, a.y+b.y, a.z+b.z};
+}
+
 typedef v3i Block;
 static Block invalid_block() {
   return {INT_MIN};
 }
+struct BlockIndex {
+  int x: 16;
+  int y: 16;
+  int z: 16;
+};
 
 static bool is_invalid(Block b) {
   return b.x == INT_MIN;
@@ -273,7 +285,7 @@ struct r2 {
 };
 
 struct VertexPos {
-  u16 x,y,z;
+  i16 x,y,z;
 };
 struct VertexTexPos {
   u16 x,y;
@@ -396,6 +408,10 @@ static v3 camera_getforward_fly(const Camera *camera, float speed) {
 
 static v3 camera_getbackward(const Camera *camera, float speed) {
   return camera_getforward(camera, -speed);
+}
+
+static v3 camera_getbackward_fly(const Camera *camera, float speed) {
+  return camera_getforward_fly(camera, -speed);
 }
 
 static v3 camera_getup(const Camera *camera, float speed) {
@@ -528,7 +544,7 @@ static const char *vertex_shader = R"VSHADER(
   #version 330 core
 
   // in
-  layout(location = 0) in uvec3 pos;
+  layout(location = 0) in ivec3 pos;
   layout(location = 1) in vec2 tpos;
   layout(location = 2) in uint dir;
 
@@ -698,39 +714,72 @@ static T* next(ColonyIter<T,N> &iter) {
 #define For(container) decltype(container)::Iterator it; for(auto _iterator = iter(container); it = next(_iterator);)
 #endif
 
-static const int NUM_BLOCKS_X = 128, NUM_BLOCKS_Y = 128, NUM_BLOCKS_Z = 128;
-static const int NUM_CHUNKS_X = 8, NUM_CHUNKS_Y = 8, NUM_CHUNKS_Z = 1;
-static const int CHUNKSIZE_X = 16, CHUNKSIZE_Y = 16, CHUNKSIZE_Z = 256;
-static const int MAX_DIFFS = 128;
+static const int NUM_BLOCKS_x = 16, NUM_BLOCKS_y = 16, NUM_BLOCKS_z = 128;
 
 struct BlockDiff {
   Block block;
   BlockType t;
 };
 
+#if 0
+struct EndOfFrameCommand {
+  enum {
+    REMOVE_BLOCK,
+    ADD_BLOCK,
+    REMOVE_FACE_FROM_MESH,
+    ADD_FACE_TO_MESH,
+  } type;
+
+  union {
+    struct {
+      Block block;
+    } remove_block;
+    struct {
+      Block block;
+      BlockType type;
+    } show_block;
+    struct {
+      int pos;
+      Direction dir;
+    } remove_face_from_mesh;
+    struct {
+      Block block;
+      BlockType type;
+      Direction dir;
+    } add_face_to_mesh;
+  };
+};
+#endif
+
 static const v3 CAMERA_OFFSET = v3{0.0f, 0.0f, 1.0f};
 static struct GameState {
-  // input
-  bool keyisdown[6];
-  bool keypressed[5];
-  bool clicked;
+  // input, see read_input()
+  struct {
+    bool keyisdown[7];
+    bool keypressed[5];
+    int mouse_dx, mouse_dy;
+    bool clicked;
+  };
 
   // graphics data
-  Camera camera;
+  struct {
+    Camera camera;
 
-  #define MAX_VERTICES 1024*1024
-  #define MAX_ELEMENTS (MAX_VERTICES*2)
-  bool vertices_dirty;
-  Vertex vertices[MAX_VERTICES];
-  int num_vertices;
+    #define MAX_VERTICES 1024*1024
+    #define MAX_ELEMENTS (MAX_VERTICES*2)
+    bool vertices_dirty;
+    Vertex vertices[MAX_VERTICES];
+    int num_vertices;
 
-  unsigned int elements[MAX_VERTICES*2];
-  int num_elements;
+    unsigned int elements[MAX_VERTICES*2];
+    int num_elements;
 
-  int free_block_faces[MAX_VERTICES];
-  int num_free_block_faces;
+    int free_faces[MAX_VERTICES];
+    int num_free_faces;
 
-  int block_vertex_pos[NUM_BLOCKS_X][NUM_BLOCKS_Y][NUM_BLOCKS_Z][DIRECTION_MAX];
+    // use get_block_vertex_pos to get
+    int block_vertex_pos[NUM_BLOCKS_x][NUM_BLOCKS_y][NUM_BLOCKS_z][DIRECTION_MAX];
+  };
 
   // identifiers
   GLuint gl_vao, gl_vbo, gl_ebo;
@@ -740,15 +789,53 @@ static struct GameState {
   GLuint gl_texture;
 
   // world data
-  v3i chunk_offset;
-
   Array<BlockDiff> block_diffs;
   bool block_mesh_dirty;
 
   // player data
   v3 player_vel;
   v3 player_pos;
+
+  // commands from other threads of stuff for the main thread to do at end of frame
+  // Array<EndOfFrameCommand> commands;
 } state;
+
+static Block pos_to_block(v3 p) {
+  return {(int)floorf(p.x), (int)floorf(p.y), (int)floorf(p.z)};
+}
+
+#define FOR_BLOCKS_IN_RANGE_x for (int x = (int)floorf(state.player_pos.x) - NUM_BLOCKS_x/2, x_end = (int)floorf(state.player_pos.x) + NUM_BLOCKS_x/2; x < x_end; ++x)
+#define FOR_BLOCKS_IN_RANGE_y for (int y = (int)floorf(state.player_pos.y) - NUM_BLOCKS_y/2, y_end = (int)floorf(state.player_pos.y) + NUM_BLOCKS_y/2; y < y_end; ++y)
+#define FOR_BLOCKS_IN_RANGE_z for (int z = (int)floorf(state.player_pos.z) - NUM_BLOCKS_z/2, z_end = (int)floorf(state.player_pos.z) + NUM_BLOCKS_z/2; z < z_end; ++z)
+
+static Block range_get_bottom(Block b) {
+  return {b.x - NUM_BLOCKS_x/2, b.y - NUM_BLOCKS_y/2, b.z - NUM_BLOCKS_z/2, };
+}
+
+struct BlockRange {
+  Block a, b;
+};
+
+// returned range is inclusive
+static BlockRange pos_to_range(v3 p) {
+  Block b = pos_to_block(p);
+  return {
+    {b.x - NUM_BLOCKS_x/2, b.y - NUM_BLOCKS_y/2, b.z - NUM_BLOCKS_z/2, },
+    {b.x + NUM_BLOCKS_x/2 - 1, b.y + NUM_BLOCKS_y/2 - 1, b.z + NUM_BLOCKS_z/2 - 1}
+  };
+}
+
+static BlockIndex block_to_blockindex(Block b) {
+  return {b.x & (NUM_BLOCKS_x-1), b.y & (NUM_BLOCKS_y-1), b.z & (NUM_BLOCKS_z-1)};
+}
+
+static int* get_block_vertex_pos(BlockIndex b, Direction dir) {
+  return &state.block_vertex_pos[b.x][b.y][b.z][dir];
+}
+
+static int* get_block_vertex_pos(Block b, Direction dir) {
+  return get_block_vertex_pos(block_to_blockindex(b), dir);
+}
 
 // openglstuff
 static void array_element_buffer_create() {
@@ -765,7 +852,7 @@ static void array_element_buffer_create() {
   glEnableVertexAttribArray(0);
   glEnableVertexAttribArray(1);
   glEnableVertexAttribArray(2);
-  glVertexAttribIPointer(0, 3, GL_UNSIGNED_SHORT, sizeof(Vertex), (GLvoid*)0);
+  glVertexAttribIPointer(0, 3, GL_SHORT, sizeof(Vertex), (GLvoid*)0);
   glVertexAttribPointer(1, 2, GL_UNSIGNED_SHORT, GL_TRUE, sizeof(Vertex), (GLvoid*)offsetof(Vertex, tex));
   glVertexAttribIPointer(2, 1, GL_UNSIGNED_BYTE, sizeof(Vertex), (GLvoid*)offsetof(Vertex, direction));
   gl_ok_or_die;
@@ -776,13 +863,17 @@ static void array_element_buffer_create() {
 }
 
 static void push_block_face(Block block, BlockType type, Direction dir) {
-  const int tex_max = UINT16_MAX;
-  const int tsize = tex_max/3;
-  const VertexPos p =  {(u16)(block.x), (u16)(block.y), (u16)(block.z)};
-  const VertexPos p2 = {(u16)(block.x+1), (u16)(block.y+1), (u16)(block.z+1)};
-
+  // too many vertices?
   if (state.num_vertices + 4 >= ARRAY_LEN(state.vertices) || state.num_elements + 6 > ARRAY_LEN(state.elements))
     return;
+  // does face already exist?
+  int *vertex_pos = get_block_vertex_pos(block, dir);
+  if (*vertex_pos) return;
+
+  const int tex_max = UINT16_MAX;
+  const int tsize = tex_max/3;
+  const VertexPos p =  {(i16)(block.x), (i16)(block.y), (i16)(block.z)};
+  const VertexPos p2 = {(i16)(block.x+1), (i16)(block.y+1), (i16)(block.z+1)};
 
   const VertexTexPos ttop = {0, 0};
   const VertexTexPos ttop2 = {tsize, tex_max};
@@ -792,9 +883,9 @@ static void push_block_face(Block block, BlockType type, Direction dir) {
   const VertexTexPos tbot2 = {3*tsize, tex_max};
 
   int v, el;
-  // check if there are free vertex slots
-  if (state.num_free_block_faces) {
-    int i = state.free_block_faces[--state.num_free_block_faces];
+  // check if there are any free vertex slots
+  if (state.num_free_faces) {
+    int i = state.free_faces[--state.num_free_faces];
     v = i*4; // 4 vertices per face
     el = i*6; // 6 elements per face
   }
@@ -805,7 +896,7 @@ static void push_block_face(Block block, BlockType type, Direction dir) {
     el = state.num_elements;
     state.num_elements += 6;
   }
-  state.block_vertex_pos[block.x][block.y][block.z][dir] = v/4;
+  *vertex_pos = v/4;
 
   switch (dir) {
     case DIRECTION_UP: {
@@ -862,11 +953,14 @@ static void push_block_face(Block block, BlockType type, Direction dir) {
 }
 
 static void render_clear() {
-  state.num_vertices = state.num_elements = 0;
+  // make first 4 vertices contain the null block
+  state.num_vertices = 4; state.num_elements = 6;
 }
 
 // TODO: maybe have a cache for these
 static BlockType get_blocktype(Block b) {
+  if (b.z < 0) return BLOCKTYPE_AIR;
+
   // first check diffs
   For(state.block_diffs)
     if (it->block.x == b.x && it->block.y == b.y && it->block.z == b.z)
@@ -906,43 +1000,51 @@ static void push_blockdiff(Block b, BlockType t) {
   array_push(state.block_diffs, {b, t});
 }
 
-static void remove_block(Block b) {
-  // remove the visible faces of this block
-  for (int d = 0; d < DIRECTION_MAX; ++d) {
-    if (get_blocktype(get_adjacent_block(b, (Direction)d)) != BLOCKTYPE_AIR) continue;
 
-    int free_index = state.block_vertex_pos[b.x][b.y][b.z][d];
-    state.free_block_faces[state.num_free_block_faces++] = free_index;
-    int v = free_index*4;
-    state.vertices[v] = {};
-    state.vertices[v+1] = {};
-    state.vertices[v+2] = {};
-    state.vertices[v+3] = {};
+static bool is_block_in_bounds(Block b) {
+  Block p = pos_to_block(state.player_pos);
+  return b.x - p.x < NUM_BLOCKS_x/2 && b.x - p.x >= -NUM_BLOCKS_x/2 && b.y - p.y < NUM_BLOCKS_y/2 && b.y - p.y >= -NUM_BLOCKS_y/2 && b.z - p.z < NUM_BLOCKS_z/2 && b.z - p.z >= -NUM_BLOCKS_z/2;
+}
+
+static void hide_block(Block b, bool create_new_faces = true) {
+  // remove the visible faces of this block
+  if (is_block_in_bounds(b)) {
+    for (int d = 0; d < DIRECTION_MAX; ++d) {
+      if (get_blocktype(get_adjacent_block(b, (Direction)d)) != BLOCKTYPE_AIR) continue;
+
+      int *vertex_pos = get_block_vertex_pos(b, (Direction)d);
+      if (!*vertex_pos) continue;
+      state.free_faces[state.num_free_faces++] = *vertex_pos;
+      memset(state.vertices+(*vertex_pos*4), 0, sizeof(*state.vertices)*4);
+      *vertex_pos = 0;
+    }
   }
+
   // and add the newly visible faces of the adjacent blocks
-  for (int d = 0; d < DIRECTION_MAX; ++d) {
-    BlockType t = get_blocktype(get_adjacent_block(b, (Direction)d));
-    if (t != BLOCKTYPE_AIR)
-      push_block_face(get_adjacent_block(b, (Direction)d), t, invert_direction((Direction)d));
+  if (create_new_faces) {
+    for (int d = 0; d < DIRECTION_MAX; ++d) {
+      Block adj = get_adjacent_block(b, (Direction)d);
+      if (!is_block_in_bounds(adj)) continue;
+      BlockType t = get_blocktype(adj);
+      if (t != BLOCKTYPE_AIR)
+        push_block_face(adj, t, invert_direction((Direction)d));
+    }
   }
   state.vertices_dirty = true;
+}
+
+static void remove_block(Block b) {
+  hide_block(b);
   push_blockdiff(b, BLOCKTYPE_AIR);
 }
 
-static void generate_block_mesh() {
-  render_clear();
-  // render block faces that face transparent blocks
-  for(int x = 0; x < NUM_BLOCKS_X; ++x)
-  for(int y = 0; y < NUM_BLOCKS_Y; ++y)
-  for(int z = 0; z < NUM_BLOCKS_Z; ++z) {
-    Block block = {x,y,z};
-    BlockType t = get_blocktype(block);
-    if (t == BLOCKTYPE_AIR) continue;
+static void show_block(Block b) {
+  BlockType t = get_blocktype(b);
+  if (t == BLOCKTYPE_AIR) return;
 
-    for (int d = 0; d < 6; ++d)
-      if (get_blocktype(get_adjacent_block(block, (Direction)d)) == BLOCKTYPE_AIR)
-        push_block_face(block, t, (Direction)d);
-  }
+  for (int d = 0; d < 6; ++d)
+    if (get_blocktype(get_adjacent_block(b, (Direction)d)) == BLOCKTYPE_AIR)
+      push_block_face(b, t, (Direction)d);
 }
 
 /* in: line, plane, plane origin */
@@ -966,7 +1068,7 @@ static bool collision_plane(v3 x0, v3 x1, v3 p0, v3 p1, v3 p2, float *t_out, v3 
 
   if (t < 0.0f || t > 1.0f)
     return false;
-
+// 
 
   v3 xt = x0 + t*dx;
 
@@ -991,6 +1093,13 @@ struct Vec {
 };
 
 template <class T>
+void swap(T &a, T &b) {
+  T tmp = a;
+  a = b;
+  b = tmp;
+}
+
+template <class T>
 T max(T a, T b) {
   return a < b ? b : a;
 }
@@ -998,6 +1107,31 @@ T max(T a, T b) {
 template <class T>
 T min(T a, T b) {
   return b < a ? b : a;
+}
+
+static v3 min(v3 a, v3 b) {
+  return {min(a.x, b.x), min(a.y, b.y), min(a.z, b.z)};
+}
+
+static v3 max(v3 a, v3 b) {
+  return {max(a.x, b.x), max(a.y, b.y), max(a.z, b.z)};
+}
+
+static v3i min(v3i a, v3i b) {
+  return {min(a.x, b.x), min(a.y, b.y), min(a.z, b.z)};
+}
+
+static v3i max(v3i a, v3i b) {
+  return {max(a.x, b.x), max(a.y, b.y), max(a.z, b.z)};
+}
+
+static void generate_block_mesh(v3 player_pos) {
+  render_clear();
+  // render block faces that face transparent blocks
+  FOR_BLOCKS_IN_RANGE_x
+  FOR_BLOCKS_IN_RANGE_y
+  FOR_BLOCKS_IN_RANGE_z
+    show_block({x,y,z});
 }
 
 static Vec<Block> collision(v3 p0, v3 p1, float dt, v3 size, OPTIONAL v3 *p_out, OPTIONAL v3 *vel_out, bool glide) {
@@ -1012,20 +1146,18 @@ static Vec<Block> collision(v3 p0, v3 p1, float dt, v3 size, OPTIONAL v3 *p_out,
     Block which_block_was_hit;
 
     // get blocks we can collide with
-    int x0 = (int)floor(min(p0.x, p1.x)-size.x);
-    int y0 = (int)floor(min(p0.y, p1.y)-size.y);
-    int z0 = (int)floor(min(p0.z, p1.z)-size.z);
-    int x1 = (int)ceil(max(p0.x, p1.x)+size.x);
-    int y1 = (int)ceil(max(p0.y, p1.y)+size.y);
-    int z1 = (int)ceil(max(p0.z, p1.z)+size.z);
+    Block b0 = pos_to_block(min(p0, p1) - size);
+    Block b1 = pos_to_block(max(p0, p1) + size);
+    --b0.x, --b0.y, --b0.z;
+    ++b1.x, ++b1.y, ++b1.z; // round up
 
     bool did_hit = false;
 
     float time = 1.0f;
     v3 normal;
-    for (int x = x0; x <= x1; ++x)
-    for (int y = y0; y <= y1; ++y)
-    for (int z = z0; z <= z1; ++z) {
+    for (int x = b0.x; x <= b1.x; ++x)
+    for (int y = b0.y; y <= b1.y; ++y)
+    for (int z = b0.z; z <= b1.z; ++z) {
       if (get_blocktype({x,y,z}) == BLOCKTYPE_AIR) continue;
 
       float t = 2.0f;
@@ -1097,8 +1229,123 @@ static Vec<Block> collision(v3 p0, v3 p1, float dt, v3 size, OPTIONAL v3 *p_out,
 static void gamestate_init() {
   state.camera.look = {0.0f, 1.0f};
   state.player_pos = {0.0f, 0.0f, 30.0f};
-  state.block_mesh_dirty = true;
   state.vertices_dirty = true;
+  render_clear();
+  generate_block_mesh(state.player_pos);
+}
+
+// fills out the input fields in GameState
+static void read_input() {
+  // clear earlier events
+  for (int i = 0; i < ARRAY_LEN(state.keypressed); ++i)
+    state.keypressed[i] = false;
+  state.mouse_dx = state.mouse_dy = 0;
+  state.clicked = false;
+
+  for (SDL_Event event; SDL_PollEvent(&event);) {
+    switch (event.type) {
+
+      case SDL_WINDOWEVENT: {
+        if (event.window.event == SDL_WINDOWEVENT_CLOSE)
+          exit(0);
+      } break;
+
+      case SDL_MOUSEBUTTONDOWN: {
+        if (event.button.button & SDL_BUTTON(SDL_BUTTON_LEFT))
+          state.clicked = true;
+      } break;
+
+      case SDL_KEYDOWN: {
+        if (event.key.repeat) break;
+
+        if (event.key.keysym.sym == SDLK_UP) state.keyisdown[0] = true;
+        if (event.key.keysym.sym == SDLK_DOWN) state.keyisdown[1] = true;
+        if (event.key.keysym.sym == SDLK_LEFT) state.keyisdown[2] = true;
+        if (event.key.keysym.sym == SDLK_RIGHT) state.keyisdown[3] = true;
+        if (event.key.keysym.sym == SDLK_RETURN) state.keyisdown[4] = true;
+        if (event.key.keysym.sym == SDLK_w) state.keyisdown[5] = true;
+        if (event.key.keysym.sym == SDLK_s) state.keyisdown[6] = true;
+        if (event.key.keysym.sym == SDLK_n) state.keypressed[0] = true;
+        if (event.key.keysym.sym == SDLK_m) state.keypressed[1] = true;
+        if (event.key.keysym.sym == SDLK_j) state.keypressed[2] = true;
+        if (event.key.keysym.sym == SDLK_k) state.keypressed[3] = true;
+        if (event.key.keysym.sym == SDLK_RETURN) state.keypressed[4] = true;
+
+        if (event.key.keysym.sym == SDLK_ESCAPE) exit(0);
+      } break;
+
+      case SDL_KEYUP: {
+        if (event.key.repeat) break;
+
+        if (event.key.keysym.sym == SDLK_UP) state.keyisdown[0] = false;
+        if (event.key.keysym.sym == SDLK_DOWN) state.keyisdown[1] = false;
+        if (event.key.keysym.sym == SDLK_LEFT) state.keyisdown[2] = false;
+        if (event.key.keysym.sym == SDLK_RIGHT) state.keyisdown[3] = false;
+        if (event.key.keysym.sym == SDLK_RETURN) state.keyisdown[4] = false;
+        if (event.key.keysym.sym == SDLK_w) state.keyisdown[5] = false;
+        if (event.key.keysym.sym == SDLK_s) state.keyisdown[6] = false;
+      } break;
+
+      case SDL_MOUSEMOTION: {
+        state.mouse_dx = event.motion.xrel;
+        state.mouse_dy = event.motion.yrel;
+      } break;
+    }
+  }
+}
+
+static void update_player(float dt) {
+
+  // turn
+  const float turn_sensitivity =  dt*0.003f;
+  const float pitch_sensitivity = dt*0.003f;
+  if (state.mouse_dx) camera_turn(&state.camera, state.mouse_dx * turn_sensitivity * dt);
+  if (state.mouse_dy) camera_pitch(&state.camera, -state.mouse_dy * pitch_sensitivity * dt);
+
+  // move player
+  const float SPEED = 0.15f;
+  const float GRAVITY = 0.015f;
+  const float JUMPPOWER = 0.21f;
+  v3 v = {};
+  const bool flying = true;
+  if (flying) {
+    if (state.keyisdown[0]) v += camera_getforward(&state.camera, SPEED);
+    if (state.keyisdown[1]) v += camera_getbackward(&state.camera, SPEED);
+    if (state.keyisdown[2]) v += camera_getstrafe_left(&state.camera, SPEED);
+    if (state.keyisdown[3]) v += camera_getstrafe_right(&state.camera, SPEED);
+    if (state.keyisdown[5]) v += camera_getup(&state.camera, SPEED);
+    if (state.keyisdown[6]) v += camera_getdown(&state.camera, SPEED);
+
+  } else {
+    if (state.keyisdown[0]) v += camera_getforward(&state.camera, SPEED);
+    if (state.keyisdown[1]) v += camera_getbackward(&state.camera, SPEED);
+    if (state.keyisdown[2]) v += camera_getstrafe_left(&state.camera, SPEED);
+    if (state.keyisdown[3]) v += camera_getstrafe_right(&state.camera, SPEED);
+    if (state.keypressed[4]) state.player_vel.z = JUMPPOWER;
+    v.z = -GRAVITY;
+  }
+  state.player_vel.x = v.x*dt;
+  state.player_vel.y = v.y*dt;
+  state.player_vel.z = v.z*dt;
+    // collision
+  collision(state.player_pos, state.player_pos + state.player_vel*dt, dt, {0.8f, 0.8f, 1.5f}, &state.player_pos, &state.player_vel, true);
+    // stick camera to player
+  state.camera.pos = state.player_pos + CAMERA_OFFSET;
+
+  // clicked - remove block
+  if (state.clicked) {
+    // find the block
+    const float RAY_DISTANCE = 5.0f;
+    v3 ray = camera_getforward_fly(&state.camera, RAY_DISTANCE);
+    v3 p0 = state.player_pos + CAMERA_OFFSET;
+    v3 p1 = p0 + ray;
+    Vec<Block> hits = collision(p0, p1, dt, {0.01f, 0.01f, 0.01f}, 0, 0, false);
+    if (hits.size) {
+      debug(if (hits.size != 1) die("Multiple collisions when not gliding? Somethings wrong"));
+      remove_block(hits.items[0]);
+      puts("hit!");
+    }
+  }
 }
 
 // int WINAPI wWinMain(HINSTANCE /*hInstance*/, HINSTANCE /*hPrevInstance*/, PWSTR /*pCmdLine*/, int /*nCmdShow*/) {
@@ -1108,9 +1355,15 @@ int wmain(int, wchar_t *[], wchar_t *[] )
 int main(int argc, const char **argv)
 #endif
 {
+  /* Fix for some builds of SDL 2.0.4, see https://bugs.gentoo.org/show_bug.cgi?id=610326 */
+  #ifdef OS_LINUX
+    setenv("XMODIFIERS", "@im=none", 1);
+  #endif
+
   // init sdl
   sdl_try(SDL_Init(SDL_INIT_EVERYTHING));
   atexit(SDL_Quit);
+
 
   SDL_LogSetAllPriority(SDL_LOG_PRIORITY_WARN); 
 
@@ -1123,8 +1376,8 @@ int main(int argc, const char **argv)
   sdl_try(SDL_SetRelativeMouseMode(SDL_TRUE));
 
   // create window
-  // SDL_Window *window = SDL_CreateWindow("mineclone", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 800, 600, SDL_WINDOW_OPENGL);
-  SDL_Window *window = SDL_CreateWindow("mineclone", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1920, 1080, SDL_WINDOW_OPENGL | SDL_WINDOW_BORDERLESS | SDL_WINDOW_FULLSCREEN);
+  SDL_Window *window = SDL_CreateWindow("mineclone", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 800, 600, SDL_WINDOW_OPENGL);
+  // SDL_Window *window = SDL_CreateWindow("mineclone", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1920, 1080, SDL_WINDOW_OPENGL | SDL_WINDOW_BORDERLESS | SDL_WINDOW_FULLSCREEN);
   if (!window) sdl_die("Couldn't create window");
   int screenW, screenH;
   SDL_GetWindowSize(window, &screenW, &screenH);
@@ -1165,107 +1418,77 @@ int main(int argc, const char **argv)
   // @mainloop
   int time = SDL_GetTicks()-16;
   for (int loopindex = 0;; ++loopindex) {
-    // update time
-    const float dt = clamp((SDL_GetTicks() - time)/(1000.0f/60.0f), 0.2f, 5.0f);
+    // time
+    const float dt = clamp((SDL_GetTicks() - time)/(1000.0f/60.0f), 0.33f, 3.0f);
     time = SDL_GetTicks();
-    if (loopindex%100 == 0)
-      printf("fps: %f\n", dt*60.0f);
+    if (loopindex%100 == 0) printf("fps: %f\n", dt*60.0f);
 
-    // clear earlier events
-    for (int i = 0; i < ARRAY_LEN(state.keypressed); ++i)
-      state.keypressed[i] = false;
-    state.clicked = false;
+    // read input
+    read_input();
 
-    // process events
-    // @input
-    for (SDL_Event event; SDL_PollEvent(&event);) {
-      switch (event.type) {
+    // update player
+    v3 before = state.player_pos;
+    update_player(dt);
+    v3 after = state.player_pos;
 
-        case SDL_WINDOWEVENT: {
-          if (event.window.event == SDL_WINDOWEVENT_CLOSE)
-            exit(0);
-        } break;
+    // hide and show blocks that went in and out of scope
+    state.player_pos = before;
 
-        case SDL_MOUSEBUTTONDOWN: {
-          if (event.button.button & SDL_BUTTON(SDL_BUTTON_LEFT))
-            state.clicked = true;
-        } break;
+    // TODO: hide first, then show
+    BlockRange r0 = pos_to_range(before);
+    BlockRange r1 = pos_to_range(after);
+    int x0 = min(r0.a.x, r1.a.x);
+    int y0 = min(r0.a.y, r1.a.y);
+    int z0 = min(r0.a.z, r1.a.z);
+    int x1 = max(r0.b.x, r1.b.x);
+    int y1 = max(r0.b.y, r1.b.y);
+    int z1 = max(r0.b.z, r1.b.z);
 
-        case SDL_KEYDOWN: {
-          if (event.key.repeat) break;
+    if (r0.a.x != r1.a.x || r0.a.y != r1.a.y || r0.a.z != r1.a.z)
+      state.vertices_dirty = true;
 
-          if (event.key.keysym.sym == SDLK_UP) state.keyisdown[0] = true;
-          if (event.key.keysym.sym == SDLK_DOWN) state.keyisdown[1] = true;
-          if (event.key.keysym.sym == SDLK_LEFT) state.keyisdown[2] = true;
-          if (event.key.keysym.sym == SDLK_RIGHT) state.keyisdown[3] = true;
-          if (event.key.keysym.sym == SDLK_RETURN) state.keyisdown[4] = true;
-          if (event.key.keysym.sym == SDLK_s) state.keyisdown[5] = true;
-          if (event.key.keysym.sym == SDLK_n) state.keypressed[0] = true;
-          if (event.key.keysym.sym == SDLK_m) state.keypressed[1] = true;
-          if (event.key.keysym.sym == SDLK_j) state.keypressed[2] = true;
-          if (event.key.keysym.sym == SDLK_k) state.keypressed[3] = true;
-          if (event.key.keysym.sym == SDLK_RETURN) state.keypressed[4] = true;
+    // hide blocks that went out of scope
+    #if 1
+    #define HIDEBLOCK(A, B, C) \
+      for (int A = r0.a.A; A < r1.a.A; ++A) \
+      for (int B = B##0; B <= B##1; ++B) \
+      for (int C = C##0; C <= C##1; ++C) \
+          hide_block({x, y, z}, false); \
+      for (int A = r0.b.A; A > r1.b.A; --A) \
+      for (int B = B##0; B <= B##1; ++B) \
+      for (int C = C##0; C <= C##1; ++C) \
+          hide_block({x, y, z}, false);
 
-          if (event.key.keysym.sym == SDLK_ESCAPE) exit(0);
-        } break;
+    HIDEBLOCK(x,y,z);
+    HIDEBLOCK(y,x,z);
+    HIDEBLOCK(z,x,y);
+    #endif
 
-        case SDL_KEYUP: {
-          if (event.key.repeat) break;
+    state.player_pos = after;
 
-          if (event.key.keysym.sym == SDLK_UP) state.keyisdown[0] = false;
-          if (event.key.keysym.sym == SDLK_DOWN) state.keyisdown[1] = false;
-          if (event.key.keysym.sym == SDLK_LEFT) state.keyisdown[2] = false;
-          if (event.key.keysym.sym == SDLK_RIGHT) state.keyisdown[3] = false;
-          if (event.key.keysym.sym == SDLK_RETURN) state.keyisdown[4] = false;
-          if (event.key.keysym.sym == SDLK_s) state.keyisdown[5] = false;
-        } break;
+    #if 1
+    #define SHOWBLOCK(A, B, C) \
+      for (int A = r0.b.A+1; A <= r1.b.A; ++A) \
+      FOR_BLOCKS_IN_RANGE_##B \
+      FOR_BLOCKS_IN_RANGE_##C \
+        show_block({x, y, z}); \
+      for (int A = r0.a.A-1; A >= r1.a.A; --A) \
+      FOR_BLOCKS_IN_RANGE_##B \
+      FOR_BLOCKS_IN_RANGE_##C \
+          show_block({x, y, z});
+    SHOWBLOCK(x,y,z);
+    SHOWBLOCK(y,x,z);
+    SHOWBLOCK(z,x,y);
+    #endif
 
-        case SDL_MOUSEMOTION: {
-          const float turn_sensitivity =  dt*0.003f;
-          const float pitch_sensitivity = dt*0.003f;
-          if (event.motion.xrel) camera_turn(&state.camera, event.motion.xrel * turn_sensitivity);
-          if (event.motion.yrel) camera_pitch(&state.camera, -event.motion.yrel * pitch_sensitivity);
-        } break;
-      }
-    }
+    if (loopindex%20 == 0)
+      printf("player pos: %f %f %f\n", state.player_pos.x, state.player_pos.y, state.player_pos.z);
 
-    // move camera
-    const float SPEED = 0.15f;
-    const float GRAVITY = 0.015f;
-    const float JUMPPOWER = 0.21f;
-    v3 plane_vel = {};
-    if (state.keyisdown[0]) plane_vel += camera_getforward(&state.camera, SPEED);
-    if (state.keyisdown[1]) plane_vel += camera_getbackward(&state.camera, SPEED);
-    if (state.keyisdown[2]) plane_vel += camera_getstrafe_left(&state.camera, SPEED);
-    if (state.keyisdown[3]) plane_vel += camera_getstrafe_right(&state.camera, SPEED);
-    if (state.keypressed[4]) state.player_vel.z = JUMPPOWER;
-    state.player_vel.x = plane_vel.x*dt;
-    state.player_vel.y = plane_vel.y*dt;
-    state.player_vel.z -= GRAVITY;
-
-    collision(state.player_pos, state.player_pos + state.player_vel*dt, dt, {0.8f, 0.8f, 1.5f}, &state.player_pos, &state.player_vel, true);
-    state.camera.pos = state.player_pos + CAMERA_OFFSET;
-
-    // clicked - remove block
-    if (state.clicked) {
-      // find the block
-      const float RAY_DISTANCE = 5.0f;
-      v3 ray = camera_getforward_fly(&state.camera, RAY_DISTANCE);
-      v3 p0 = state.player_pos + CAMERA_OFFSET;
-      v3 p1 = p0 + ray;
-      Vec<Block> hits = collision(p0, p1, dt, {0.01f, 0.01f, 0.01f}, 0, 0, false);
-      if (hits.size) {
-        debug(if (hits.size != 1) die("Multiple collisions when not gliding? Somethings wrong"));
-        remove_block(hits.items[0]);
-        puts("hit!");
-      }
-    }
-
-    // clear screen
+    // @render
     glClearColor(0.0f, 0.8f, 0.6f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-    // @render
+    // @renderblocks
     glUseProgram(state.gl_shader);
 
     // camera
@@ -1284,13 +1507,18 @@ int main(int argc, const char **argv)
 
     glBindVertexArray(state.gl_vao);
 
-    if (loopindex%100 == 0)
-      printf("%lu\n", state.num_vertices*sizeof(state.vertices[0]));
+    if (loopindex%20 == 0) {
+      // printf("num_vertices: %lu\n", state.num_vertices*sizeof(state.vertices[0]));
+      printf("num free block faces: %i/%lu\n", state.num_free_faces, ARRAY_LEN(state.free_faces));
+    }
+
+    if (state.keypressed[0])
+      state.block_mesh_dirty = true;
 
     if (state.block_mesh_dirty) {
       puts("re-rendering :O");
       render_clear();
-      generate_block_mesh();
+      generate_block_mesh(state.player_pos);
       state.block_mesh_dirty = false;
       state.vertices_dirty = true;
     }
