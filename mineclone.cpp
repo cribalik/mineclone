@@ -1,12 +1,14 @@
 // TODO:
 //
-// * persisting block changes to disk
+// * inventory
+//
+// * persist block changes to disk
+//
+// * stream vertices in opengl
 // 
 // * load new blocks in separate thread
 //
-// * inventory
-//
-// * transparent blocks
+// * transparent blocks (z-sorting)
 //
 // * better terrain (different block types)
 //
@@ -160,14 +162,14 @@ static float perlin(float x, float y, float z) {
   int A = p[X  ]+Y, AA = p[A]+Z, AB = p[A+1]+Z,      // HASH COORDINATES OF
       B = p[X+1]+Y, BA = p[B]+Z, BB = p[B+1]+Z;      // THE 8 CUBE CORNERS,
 
-  return lerp(w, lerp(v, lerp(u, perlin__grad(p[AA  ], x  , y  , z   ),  // AND ADD
+  return (lerp(w, lerp(v, lerp(u, perlin__grad(p[AA  ], x  , y  , z   ),  // AND ADD
                                  perlin__grad(p[BA  ], x-1, y  , z   )), // BLENDED
                          lerp(u, perlin__grad(p[AB  ], x  , y-1, z   ),  // RESULTS
                                  perlin__grad(p[BB  ], x-1, y-1, z   ))),// FROM  8
                  lerp(v, lerp(u, perlin__grad(p[AA+1], x  , y  , z-1 ),  // CORNERS
                                  perlin__grad(p[BA+1], x-1, y  , z-1 )), // OF CUBE
                          lerp(u, perlin__grad(p[AB+1], x  , y-1, z-1 ),
-                                 perlin__grad(p[BB+1], x-1, y-1, z-1 ))));
+                                 perlin__grad(p[BB+1], x-1, y-1, z-1 )))) + 1.0f )/2.0f;
 }
 
 #define ARRAY_LEN(a) (sizeof(a)/sizeof(*a))
@@ -382,13 +384,12 @@ static float lensq(v3 v) {
 
 // camera
 struct Camera {
-  v3 pos;
   v2 look;
   float up; // how much up we are looking, in radians
 };
 
-// the camera_get* functions transforms from camera movement to (x,y,z) coordinates
-static v3 camera_getmove(const Camera *camera, float forward, float right, float up) {
+// the camera_* functions transforms camera movement to (x,y,z) coordinates, but do not modify the camera position
+static v3 camera_move(const Camera *camera, float forward, float right, float up) {
   return v3{
     camera->look.x*forward + camera->look.y*right,
     camera->look.y*forward + -camera->look.x*right,
@@ -396,38 +397,38 @@ static v3 camera_getmove(const Camera *camera, float forward, float right, float
   };
 };
 
-static v3 camera_getforward(const Camera *camera, float speed) {
+static v3 camera_forward(const Camera *camera, float speed) {
   return {camera->look.x*speed, camera->look.y*speed, 0.0f};
 }
 
-static v3 camera_getforward_fly(const Camera *camera, float speed) {
+static v3 camera_forward_fly(const Camera *camera, float speed) {
   float cu = cosf(camera->up);
   float su = sinf(camera->up);
   return {camera->look.x*speed*cu, camera->look.y*speed*cu, su*speed};
 }
 
-static v3 camera_getbackward(const Camera *camera, float speed) {
-  return camera_getforward(camera, -speed);
+static v3 camera_backward(const Camera *camera, float speed) {
+  return camera_forward(camera, -speed);
 }
 
-static v3 camera_getbackward_fly(const Camera *camera, float speed) {
-  return camera_getforward_fly(camera, -speed);
+static v3 camera_backward_fly(const Camera *camera, float speed) {
+  return camera_forward_fly(camera, -speed);
 }
 
-static v3 camera_getup(const Camera *camera, float speed) {
+static v3 camera_up(const Camera *camera, float speed) {
   return v3{0.0f, 0.0f, speed};
 }
 
-static v3 camera_getdown(const Camera *camera, float speed) {
+static v3 camera_down(const Camera *camera, float speed) {
   return v3{0.0f, 0.0f, -speed};
 }
 
-static v3 camera_getstrafe_right(const Camera *camera, float speed) {
+static v3 camera_strafe_right(const Camera *camera, float speed) {
   return {camera->look.y*speed, -camera->look.x*speed, 0.0f};
 }
 
-static v3 camera_getstrafe_left(const Camera *camera, float speed) {
-  return camera_getstrafe_right(camera, -speed);
+static v3 camera_strafe_left(const Camera *camera, float speed) {
+  return camera_strafe_right(camera, -speed);
 }
 
 static void camera_turn(Camera *camera, float angle) {
@@ -440,32 +441,7 @@ static void camera_pitch(Camera *camera, float angle) {
   camera->up = clamp(camera->up + angle, -PI/2.0f, PI/2.0f);
 }
 
-static void camera_forward(Camera *camera, float speed) {
-  camera->pos += v3{camera->look.x*speed, camera->look.y*speed, 0.0f};
-}
-
-static void camera_backward(Camera *camera, float speed) {
-  camera_forward(camera, -speed);
-}
-
-static void camera_up(Camera *camera, float speed) {
-  camera->pos.z += speed;
-}
-
-static void camera_down(Camera *camera, float speed) {
-  camera->pos.z -= speed;
-}
-
-static void camera_strafe_right(Camera *camera, float speed) {
-  camera->pos += v3{camera->look.y*speed, -camera->look.x*speed, 0.0f};
-}
-
-static void camera_strafe_left(Camera *camera, float speed) {
-  return camera_strafe_right(camera, -speed);
-}
-
-static m4 camera_get_projection_matrix(Camera *camera, float fov, float nearz, float farz, float screen_ratio) {
-  v3 pos = camera->pos;
+static m4 camera__projection_matrix(Camera *camera, v3 pos, float fov, float nearz, float farz, float screen_ratio) {
   float cu = cosf(camera->up);
   float su = sinf(camera->up);
 
@@ -663,6 +639,7 @@ static Direction invert_direction(Direction d) {
 // @colony
 template <class T, int N>
 struct Colony {
+  typedef T* Iterator;
   int size;
   Colony<T,N> *next;
   T items[N];
@@ -752,12 +729,53 @@ struct EndOfFrameCommand {
 };
 #endif
 
+struct Item {
+  enum {
+    ITEM_NULL,
+    ITEM_BLOCK,
+  } type;
+
+  union {
+    struct {
+      BlockType type;
+      int num;
+    } block;
+  };
+};
+
+enum Key {
+  KEY_NULL,
+  KEY_FORWARD,
+  KEY_BACKWARD,
+  KEY_LEFT,
+  KEY_RIGHT,
+  KEY_JUMP,
+  KEY_FLYUP,
+  KEY_FLYDOWN,
+  KEY_ESCAPE,
+  KEY_MAX,
+};
+Key sdlk_to_key(SDL_Keycode k) {
+  switch (k) {
+    case SDLK_UP: return KEY_FORWARD;
+    case SDLK_DOWN: return KEY_BACKWARD;
+    case SDLK_LEFT: return KEY_LEFT;
+    case SDLK_RIGHT: return KEY_RIGHT;
+    case SDLK_RETURN: return KEY_JUMP;
+    case SDLK_w: return KEY_FLYUP;
+    case SDLK_s: return KEY_FLYDOWN;
+    case SDLK_ESCAPE: return KEY_ESCAPE;
+    default: return KEY_NULL;
+  }
+  return KEY_NULL;
+}
+
 static const v3 CAMERA_OFFSET = v3{0.0f, 0.0f, 1.0f};
 static struct GameState {
   // input, see read_input()
   struct {
-    bool keyisdown[7];
-    bool keypressed[5];
+    bool keyisdown[KEY_MAX];
+    bool keypressed[KEY_MAX];
     int mouse_dx, mouse_dy;
     bool clicked;
   };
@@ -797,6 +815,8 @@ static struct GameState {
   v3 player_vel;
   v3 player_pos;
 
+  Item inventory[32];
+
   // commands from other threads of stuff for the main thread to do at end of frame
   // Array<EndOfFrameCommand> commands;
 } state;
@@ -830,11 +850,11 @@ static BlockIndex block_to_blockindex(Block b) {
   return {b.x & (NUM_BLOCKS_x-1), b.y & (NUM_BLOCKS_y-1), b.z & (NUM_BLOCKS_z-1)};
 }
 
-static int* get_block_vertex_pos(BlockIndex b, Direction dir) {
-  return &state.block_vertex_pos[b.x][b.y][b.z][dir];
+static int& get_block_vertex_pos(BlockIndex b, Direction dir) {
+  return state.block_vertex_pos[b.x][b.y][b.z][dir];
 }
 
-static int* get_block_vertex_pos(Block b, Direction dir) {
+static int& get_block_vertex_pos(Block b, Direction dir) {
   return get_block_vertex_pos(block_to_blockindex(b), dir);
 }
 
@@ -868,8 +888,8 @@ static void push_block_face(Block block, BlockType type, Direction dir) {
   if (state.num_vertices + 4 >= ARRAY_LEN(state.vertices) || state.num_elements + 6 > ARRAY_LEN(state.elements))
     return;
   // does face already exist?
-  int *vertex_pos = get_block_vertex_pos(block, dir);
-  if (*vertex_pos) return;
+  int &vertex_pos = get_block_vertex_pos(block, dir);
+  if (vertex_pos) return;
 
   const int tex_max = UINT16_MAX;
   const int txsize = tex_max/3;
@@ -899,7 +919,7 @@ static void push_block_face(Block block, BlockType type, Direction dir) {
     el = state.num_elements;
     state.num_elements += 6;
   }
-  *vertex_pos = v/4;
+  vertex_pos = v/4;
 
   switch (dir) {
     case DIRECTION_UP: {
@@ -970,16 +990,13 @@ static BlockType get_blocktype(Block b) {
       return it->t;
 
   // otherwise generate
-  static float freq = 0.05f;
-  static float amp = 50.0f;
+  // @terrain
+  static const float ground_freq = 0.05f;
+  const float groundlevel = perlin(b.x*ground_freq, b.y*ground_freq, 0) * 50.0f;
+  static const float stone_freq = 0.13f;
+  const float stonelevel = 10.0f + perlin(b.x*stone_freq, b.y*stone_freq, 0) * 20.0f;
+  const int waterlevel = 15;
 
-  v2 off = {
-    b.x*freq,
-    b.y*freq
-  };
-  const float random_number = (perlin(off.x, off.y, 0)+1.0f)/2.0f;
-  const int groundlevel = 1 + (int)(random_number*amp);
-  const int stonelevel = 20;
 
   if (b.z < groundlevel && b.z < stonelevel)
     return BLOCKTYPE_STONE;
@@ -1018,11 +1035,11 @@ static void hide_block(Block b, bool create_new_faces = true) {
     for (int d = 0; d < DIRECTION_MAX; ++d) {
       if (get_blocktype(get_adjacent_block(b, (Direction)d)) != BLOCKTYPE_AIR) continue;
 
-      int *vertex_pos = get_block_vertex_pos(b, (Direction)d);
-      if (!*vertex_pos) continue;
-      state.free_faces[state.num_free_faces++] = *vertex_pos;
-      memset(state.vertices+(*vertex_pos*4), 0, sizeof(*state.vertices)*4);
-      *vertex_pos = 0;
+      int &vertex_pos = get_block_vertex_pos(b, (Direction)d);
+      if (!vertex_pos) continue;
+      state.free_faces[state.num_free_faces++] = vertex_pos;
+      memset(state.vertices+(vertex_pos*4), 0, sizeof(*state.vertices)*4);
+      vertex_pos = 0;
     }
   }
 
@@ -1264,32 +1281,19 @@ static void read_input() {
       case SDL_KEYDOWN: {
         if (event.key.repeat) break;
 
-        if (event.key.keysym.sym == SDLK_UP) state.keyisdown[0] = true;
-        if (event.key.keysym.sym == SDLK_DOWN) state.keyisdown[1] = true;
-        if (event.key.keysym.sym == SDLK_LEFT) state.keyisdown[2] = true;
-        if (event.key.keysym.sym == SDLK_RIGHT) state.keyisdown[3] = true;
-        if (event.key.keysym.sym == SDLK_RETURN) state.keyisdown[4] = true;
-        if (event.key.keysym.sym == SDLK_w) state.keyisdown[5] = true;
-        if (event.key.keysym.sym == SDLK_s) state.keyisdown[6] = true;
-        if (event.key.keysym.sym == SDLK_n) state.keypressed[0] = true;
-        if (event.key.keysym.sym == SDLK_m) state.keypressed[1] = true;
-        if (event.key.keysym.sym == SDLK_j) state.keypressed[2] = true;
-        if (event.key.keysym.sym == SDLK_k) state.keypressed[3] = true;
-        if (event.key.keysym.sym == SDLK_RETURN) state.keypressed[4] = true;
-
-        if (event.key.keysym.sym == SDLK_ESCAPE) exit(0);
+        Key k = sdlk_to_key(event.key.keysym.sym);
+        if (k != KEY_NULL) {
+          state.keyisdown[k] = true;
+          state.keypressed[k] = true;
+        }
       } break;
 
       case SDL_KEYUP: {
         if (event.key.repeat) break;
 
-        if (event.key.keysym.sym == SDLK_UP) state.keyisdown[0] = false;
-        if (event.key.keysym.sym == SDLK_DOWN) state.keyisdown[1] = false;
-        if (event.key.keysym.sym == SDLK_LEFT) state.keyisdown[2] = false;
-        if (event.key.keysym.sym == SDLK_RIGHT) state.keyisdown[3] = false;
-        if (event.key.keysym.sym == SDLK_RETURN) state.keyisdown[4] = false;
-        if (event.key.keysym.sym == SDLK_w) state.keyisdown[5] = false;
-        if (event.key.keysym.sym == SDLK_s) state.keyisdown[6] = false;
+        Key k = sdlk_to_key(event.key.keysym.sym);
+        if (k != KEY_NULL)
+          state.keyisdown[k] = false;
       } break;
 
       case SDL_MOUSEMOTION: {
@@ -1315,19 +1319,19 @@ static void update_player(float dt) {
   v3 v = {};
   const bool flying = true;
   if (flying) {
-    if (state.keyisdown[0]) v += camera_getforward(&state.camera, SPEED);
-    if (state.keyisdown[1]) v += camera_getbackward(&state.camera, SPEED);
-    if (state.keyisdown[2]) v += camera_getstrafe_left(&state.camera, SPEED);
-    if (state.keyisdown[3]) v += camera_getstrafe_right(&state.camera, SPEED);
-    if (state.keyisdown[5]) v += camera_getup(&state.camera, SPEED);
-    if (state.keyisdown[6]) v += camera_getdown(&state.camera, SPEED);
+    if (state.keyisdown[KEY_FORWARD]) v += camera_forward(&state.camera, SPEED);
+    if (state.keyisdown[KEY_BACKWARD]) v += camera_backward(&state.camera, SPEED);
+    if (state.keyisdown[KEY_LEFT]) v += camera_strafe_left(&state.camera, SPEED);
+    if (state.keyisdown[KEY_RIGHT]) v += camera_strafe_right(&state.camera, SPEED);
+    if (state.keyisdown[KEY_FLYUP]) v += camera_up(&state.camera, SPEED);
+    if (state.keyisdown[KEY_FLYDOWN]) v += camera_down(&state.camera, SPEED);
 
   } else {
-    if (state.keyisdown[0]) v += camera_getforward(&state.camera, SPEED);
-    if (state.keyisdown[1]) v += camera_getbackward(&state.camera, SPEED);
-    if (state.keyisdown[2]) v += camera_getstrafe_left(&state.camera, SPEED);
-    if (state.keyisdown[3]) v += camera_getstrafe_right(&state.camera, SPEED);
-    if (state.keypressed[4]) state.player_vel.z = JUMPPOWER;
+    if (state.keyisdown[KEY_FORWARD]) v += camera_forward(&state.camera, SPEED);
+    if (state.keyisdown[KEY_BACKWARD]) v += camera_backward(&state.camera, SPEED);
+    if (state.keyisdown[KEY_LEFT]) v += camera_strafe_left(&state.camera, SPEED);
+    if (state.keyisdown[KEY_RIGHT]) v += camera_strafe_right(&state.camera, SPEED);
+    if (state.keypressed[KEY_JUMP]) state.player_vel.z = JUMPPOWER;
     v.z = -GRAVITY;
   }
   state.player_vel.x = v.x*dt;
@@ -1336,13 +1340,12 @@ static void update_player(float dt) {
     // collision
   collision(state.player_pos, state.player_pos + state.player_vel*dt, dt, {0.8f, 0.8f, 1.5f}, &state.player_pos, &state.player_vel, true);
     // stick camera to player
-  state.camera.pos = state.player_pos + CAMERA_OFFSET;
 
   // clicked - remove block
   if (state.clicked) {
     // find the block
     const float RAY_DISTANCE = 5.0f;
-    v3 ray = camera_getforward_fly(&state.camera, RAY_DISTANCE);
+    v3 ray = camera_forward_fly(&state.camera, RAY_DISTANCE);
     v3 p0 = state.player_pos + CAMERA_OFFSET;
     v3 p1 = p0 + ray;
     Vec<Block> hits = collision(p0, p1, dt, {0.01f, 0.01f, 0.01f}, 0, 0, false);
@@ -1432,6 +1435,9 @@ int main(int argc, const char **argv)
     // read input
     read_input();
 
+    if (state.keypressed[KEY_ESCAPE])
+      exit(0);
+
     // update player
     v3 before = state.player_pos;
     update_player(dt);
@@ -1454,6 +1460,7 @@ int main(int argc, const char **argv)
       state.vertices_dirty = true;
 
     // hide blocks that went out of scope
+    // TODO:, FIXME: if we jump farther than NUM_BLOCKS_x this probably breaks
     #if 1
     #define HIDEBLOCK(A, B, C) \
       for (int A = r0.a.A; A < r1.a.A; ++A) \
@@ -1487,9 +1494,6 @@ int main(int argc, const char **argv)
     SHOWBLOCK(z,x,y);
     #endif
 
-    if (loopindex%20 == 0)
-      printf("player pos: %f %f %f\n", state.player_pos.x, state.player_pos.y, state.player_pos.z);
-
     // @render
     glClearColor(0.0f, 0.8f, 0.6f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -1501,7 +1505,7 @@ int main(int argc, const char **argv)
     const float fov = PI/3.0f;
     const float nearz = 0.3f;
     const float farz = 300.0f;
-    const m4 camera = camera_get_projection_matrix(&state.camera, fov, nearz, farz, screen_ratio);
+    const m4 camera = camera__projection_matrix(&state.camera, state.player_pos + CAMERA_OFFSET, fov, nearz, farz, screen_ratio);
     glUniformMatrix4fv(state.gl_camera_uniform, 1, GL_TRUE, camera.d);
     glGetUniformLocation(state.gl_shader, "far");
     glGetUniformLocation(state.gl_shader, "nearsize");
@@ -1514,22 +1518,20 @@ int main(int argc, const char **argv)
     glBindVertexArray(state.gl_vao);
 
     if (loopindex%20 == 0) {
+      // printf("player pos: %f %f %f\n", state.player_pos.x, state.player_pos.y, state.player_pos.z);
       // printf("num_vertices: %lu\n", state.num_vertices*sizeof(state.vertices[0]));
-      printf("num free block faces: %i/%lu\n", state.num_free_faces, ARRAY_LEN(state.free_faces));
+      // printf("num free block faces: %i/%lu\n", state.num_free_faces, ARRAY_LEN(state.free_faces));
     }
 
-    if (state.keypressed[0])
-      state.block_mesh_dirty = true;
-
     if (state.block_mesh_dirty) {
-      puts("re-rendering :O");
+      // puts("re-rendering :O");
       render_clear();
       generate_block_mesh(state.player_pos);
       state.block_mesh_dirty = false;
       state.vertices_dirty = true;
     }
     if (state.vertices_dirty) {
-      puts("resending vertices");
+      // puts("resending vertices");
       glBindBuffer(GL_ARRAY_BUFFER, state.gl_vbo);
       glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, state.gl_ebo);
       glBufferData(GL_ARRAY_BUFFER, state.num_vertices*sizeof(*state.vertices), state.vertices, GL_DYNAMIC_DRAW);
