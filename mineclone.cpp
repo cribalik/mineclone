@@ -4,7 +4,7 @@
 //
 // * persist block changes to disk
 //
-// * stream vertices in opengl
+// * stream block_vertices in opengl
 // 
 // * load new blocks in separate thread
 //
@@ -332,16 +332,21 @@ struct r2 {
   float x0,y0,x1,y1;
 };
 
-struct VertexPos {
+struct BlockVertexPos {
   i16 x,y,z;
 };
-struct VertexTexPos {
+struct BlockVertexTexPos {
   u16 x,y;
 };
-struct Vertex {
-  VertexPos pos;
-  VertexTexPos tex;
+struct BlockVertex {
+  BlockVertexPos pos;
+  BlockVertexTexPos tex;
   u8 direction;
+};
+
+struct UIVertex {
+  float x,y;
+  float tx,ty;
 };
 
 struct m4 {
@@ -561,8 +566,8 @@ static GLuint texture_load(const char *filename) {
   return tex;
 }
 
-// @vertex_shader
-static const char *vertex_shader = R"VSHADER(
+// @block_vertex_shader
+static const char *block_vertex_shader = R"VSHADER(
   #version 330 core
 
   // in
@@ -585,8 +590,8 @@ static const char *vertex_shader = R"VSHADER(
   }
   )VSHADER";
 
-// @fragment_shader
-static const char *fragment_shader = R"FSHADER(
+// @block_fragment_shader
+static const char *block_fragment_shader = R"FSHADER(
   #version 330 core
 
   // in
@@ -630,6 +635,41 @@ static const char *fragment_shader = R"FSHADER(
   }
   )FSHADER";
 
+// @ui_vertex_shader
+static const char *ui_vertex_shader = R"VSHADER(
+  #version 330 core
+
+  // in
+  layout(location = 0) in vec2 pos;
+  layout(location = 1) in vec2 tpos;
+
+  // out
+  out vec2 ftpos;
+
+  void main() {
+    gl_Position = vec4(pos.x*2 - 1, pos.y*2 - 1, 0.0f, 1.0f);
+    ftpos = tpos;
+  }
+  )VSHADER";
+
+// @ui_fragment_shader
+static const char *ui_fragment_shader = R"FSHADER(
+  #version 330 core
+
+  // in
+  in vec2 ftpos;
+
+  // out
+  out vec4 fcolor;
+
+  // uniform
+  uniform sampler2D utexture;
+
+  void main() {
+    fcolor = vec4(texture(utexture, ftpos));
+  }
+  )FSHADER";
+
 static GLuint shader_create(const char *vertex_shader_source, const char *fragment_shader_source) {
   GLint success;
   GLuint p = glCreateProgram();
@@ -647,10 +687,10 @@ static GLuint shader_create(const char *vertex_shader_source, const char *fragme
 
   glShaderSource(fs, 1, &fragment_shader_source, 0);
   glCompileShader(fs);
-  glGetShaderiv(vs, GL_COMPILE_STATUS, &success);
+  glGetShaderiv(fs, GL_COMPILE_STATUS, &success);
   if (!success) {
     char info_log[512];
-    glGetShaderInfoLog(vs, sizeof(info_log), 0, info_log);
+    glGetShaderInfoLog(fs, sizeof(info_log), 0, info_log);
     die("Could not compile fragment shader: %s\n", info_log);
   }
 
@@ -775,11 +815,12 @@ struct EndOfFrameCommand {
 };
 #endif
 
+enum ItemType {
+  ITEM_NULL,
+  ITEM_BLOCK,
+};
 struct Item {
-  enum {
-    ITEM_NULL,
-    ITEM_BLOCK,
-  } type;
+  ItemType type;
 
   union {
     struct {
@@ -801,7 +842,7 @@ enum Key {
   KEY_ESCAPE,
   KEY_MAX,
 };
-Key sdlk_to_key(SDL_Keycode k) {
+Key keymapping(SDL_Keycode k) {
   switch (k) {
     case SDLK_UP: return KEY_FORWARD;
     case SDLK_DOWN: return KEY_BACKWARD;
@@ -826,32 +867,49 @@ static struct GameState {
     bool clicked;
   };
 
-  // graphics data
+  // block graphics data
   struct {
     Camera camera;
 
-    #define MAX_VERTICES 1024*1024
-    #define MAX_ELEMENTS (MAX_VERTICES*2)
-    bool vertices_dirty;
-    Vertex vertices[MAX_VERTICES];
-    int num_vertices;
+    // block
+    #define MAX_BLOCK_VERTICES 1024*1024
+    #define MAX_BLOCK_ELEMENTS (MAX_BLOCK_VERTICES*2)
+    bool block_vertices_dirty;
+    BlockVertex block_vertices[MAX_BLOCK_VERTICES];
+    int num_block_vertices;
 
-    unsigned int elements[MAX_VERTICES*2];
-    int num_elements;
+    unsigned int block_elements[MAX_BLOCK_VERTICES*2];
+    int num_block_elements;
 
-    int free_faces[MAX_VERTICES];
+    int free_faces[MAX_BLOCK_VERTICES];
     int num_free_faces;
 
     // use get_block_vertex_pos to get
     int block_vertex_pos[NUM_BLOCKS_x][NUM_BLOCKS_y][NUM_BLOCKS_z][DIRECTION_MAX];
+
+    GLuint gl_block_vao, gl_block_vbo, gl_block_ebo;
+    GLuint gl_block_shader;
+    GLuint gl_camera_uniform;
+    GLuint gl_block_texture_uniform;
+    GLuint gl_block_texture;
+
   };
 
-  // identifiers
-  GLuint gl_vao, gl_vbo, gl_ebo;
-  GLuint gl_shader;
-  GLuint gl_camera_uniform;
-  GLuint gl_texture_uniform;
-  GLuint gl_texture;
+  // ui graphics data
+  struct {
+    #define MAX_UI_VERTICES 1024
+    #define MAX_UI_ELEMENTS (MAX_UI_VERTICES*2)
+
+    UIVertex ui_vertices[MAX_UI_VERTICES];
+    int num_ui_vertices;
+    unsigned int ui_elements[MAX_UI_ELEMENTS];
+    int num_ui_elements;
+    // ui
+    GLuint gl_ui_vao, gl_ui_vbo, gl_ui_ebo;
+    GLuint gl_ui_shader;
+    GLuint gl_ui_texture_uniform;
+    GLuint gl_ui_texture;
+  };
 
   // world data
   Array<BlockDiff> block_diffs;
@@ -862,11 +920,32 @@ static struct GameState {
   v3 player_pos;
   bool player_on_ground;
 
-  Item inventory[32];
+  Item inventory[8];
 
   // commands from other threads of stuff for the main thread to do at end of frame
   // Array<EndOfFrameCommand> commands;
 } state;
+
+static bool add_block_to_inventory(BlockType block_type) {
+  const int STACK_SIZE = 64;
+  // check if already exists
+  for (int i = 0; i < ARRAY_LEN(state.inventory); ++i) {
+    if (state.inventory[i].type == ITEM_BLOCK && state.inventory[i].block.type == block_type && state.inventory[i].block.num < STACK_SIZE) {
+      ++state.inventory[i].block.num;
+      return true;
+    }
+  }
+
+  // otherwise find a free one
+  for (int i = 0; i < ARRAY_LEN(state.inventory); ++i) {
+    if (state.inventory[i].type == ITEM_NULL) {
+      state.inventory[i].type = ITEM_BLOCK;
+      state.inventory[i].block = {block_type, 1};
+      return true;
+    }
+  }
+  return false;
+}
 
 static Block pos_to_block(v3 p) {
   return {(int)floorf(p.x), (int)floorf(p.y), (int)floorf(p.z)};
@@ -906,7 +985,7 @@ static int& get_block_vertex_pos(Block b, Direction dir) {
 }
 
 // openglstuff
-static void array_element_buffer_create() {
+static void block_gl_buffer_create() {
   GLuint vao, ebo, vbo;
   glGenVertexArrays(1, &vao);
   glGenBuffers(1, &vbo);
@@ -920,19 +999,55 @@ static void array_element_buffer_create() {
   glEnableVertexAttribArray(0);
   glEnableVertexAttribArray(1);
   glEnableVertexAttribArray(2);
-  glVertexAttribIPointer(0, 3, GL_SHORT, sizeof(Vertex), (GLvoid*)0);
-  glVertexAttribPointer(1, 2, GL_UNSIGNED_SHORT, GL_TRUE, sizeof(Vertex), (GLvoid*)offsetof(Vertex, tex));
-  glVertexAttribIPointer(2, 1, GL_UNSIGNED_BYTE, sizeof(Vertex), (GLvoid*)offsetof(Vertex, direction));
+  glVertexAttribIPointer(0, 3, GL_SHORT, sizeof(BlockVertex), (GLvoid*)0);
+  glVertexAttribPointer(1, 2, GL_UNSIGNED_SHORT, GL_TRUE, sizeof(BlockVertex), (GLvoid*)offsetof(BlockVertex, tex));
+  glVertexAttribIPointer(2, 1, GL_UNSIGNED_BYTE, sizeof(BlockVertex), (GLvoid*)offsetof(BlockVertex, direction));
   gl_ok_or_die;
 
-  state.gl_vao = vao;
-  state.gl_vbo = vbo;
-  state.gl_ebo = ebo;
+  state.gl_block_vao = vao;
+  state.gl_block_vbo = vbo;
+  state.gl_block_ebo = ebo;
+}
+
+static void ui_gl_buffer_create() {
+  GLuint vao, ebo, vbo;
+  glGenVertexArrays(1, &vao);
+  glGenBuffers(1, &vbo);
+  glGenBuffers(1, &ebo);
+
+  glBindVertexArray(vao);
+
+  glBindBuffer(GL_ARRAY_BUFFER, vbo);
+  glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
+
+  glEnableVertexAttribArray(0);
+  glEnableVertexAttribArray(1);
+  glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(UIVertex), (GLvoid*)0);
+  glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(UIVertex), (GLvoid*)offsetof(UIVertex, tx));
+  gl_ok_or_die;
+
+  state.gl_ui_vao = vao;
+  state.gl_ui_vbo = vbo;
+  state.gl_ui_ebo = ebo;
+}
+
+static void blocktype_to_texpos(BlockType t, u16 *x, u16 *y, u16 *w, u16 *h) {
+  *x = 0;
+  *y = UINT16_MAX/(BLOCKTYPES_MAX-1) * (BLOCKTYPES_MAX-t-1);
+  *w = UINT16_MAX;
+  *h = UINT16_MAX/(BLOCKTYPES_MAX-1);
+}
+
+static void blocktype_to_texpos(BlockType t, float *x, float *y, float *w, float *h) {
+  *x = 0.0f;
+  *y = 1.0f/(BLOCKTYPES_MAX-1) * (BLOCKTYPES_MAX-t-1);
+  *w = 1.0f;
+  *h = 1.0f/(BLOCKTYPES_MAX-1);
 }
 
 static void push_block_face(Block block, BlockType type, Direction dir) {
-  // too many vertices?
-  if (state.num_vertices + 4 >= ARRAY_LEN(state.vertices) || state.num_elements + 6 > ARRAY_LEN(state.elements))
+  // too many block_vertices?
+  if (state.num_block_vertices + 4 >= ARRAY_LEN(state.block_vertices) || state.num_block_elements + 6 > ARRAY_LEN(state.block_elements))
     return;
   // does face already exist?
   int &vertex_pos = get_block_vertex_pos(block, dir);
@@ -941,90 +1056,90 @@ static void push_block_face(Block block, BlockType type, Direction dir) {
   const int tex_max = UINT16_MAX;
   const int txsize = tex_max/3;
   const int tysize = tex_max/(BLOCKTYPES_MAX-1);
-  const VertexPos p =  {(i16)(block.x), (i16)(block.y), (i16)(block.z)};
-  const VertexPos p2 = {(i16)(block.x+1), (i16)(block.y+1), (i16)(block.z+1)};
+  const BlockVertexPos p =  {(i16)(block.x), (i16)(block.y), (i16)(block.z)};
+  const BlockVertexPos p2 = {(i16)(block.x+1), (i16)(block.y+1), (i16)(block.z+1)};
 
   const u16 row = tysize * (BLOCKTYPES_MAX-type-1);
-  const VertexTexPos ttop = {0, row};
-  const VertexTexPos ttop2 = {txsize, (u16)(row+tysize)};
-  const VertexTexPos tside = {txsize, row};
-  const VertexTexPos tside2 = {2*txsize, (u16)(row+tysize)};
-  const VertexTexPos tbot = {2*txsize, row};
-  const VertexTexPos tbot2 = {3*txsize, (u16)(row+tysize)};
+  const BlockVertexTexPos ttop = {0, row};
+  const BlockVertexTexPos ttop2 = {txsize, (u16)(row+tysize)};
+  const BlockVertexTexPos tside = {txsize, row};
+  const BlockVertexTexPos tside2 = {2*txsize, (u16)(row+tysize)};
+  const BlockVertexTexPos tbot = {2*txsize, row};
+  const BlockVertexTexPos tbot2 = {3*txsize, (u16)(row+tysize)};
 
   int v, el;
   // check if there are any free vertex slots
   if (state.num_free_faces) {
     int i = state.free_faces[--state.num_free_faces];
-    v = i*4; // 4 vertices per face
-    el = i*6; // 6 elements per face
+    v = i*4; // 4 block_vertices per face
+    el = i*6; // 6 block_elements per face
   }
   else {
     // else push at the end
-    v = state.num_vertices;
-    state.num_vertices += 4;
-    el = state.num_elements;
-    state.num_elements += 6;
+    v = state.num_block_vertices;
+    state.num_block_vertices += 4;
+    el = state.num_block_elements;
+    state.num_block_elements += 6;
   }
   vertex_pos = v/4;
 
   switch (dir) {
     case DIRECTION_UP: {
-      state.vertices[v] = {p.x,      p.y,      p2.z, ttop.x, ttop.y, DIRECTION_UP};
-      state.vertices[v+1] = {p2.x, p.y,      p2.z, ttop2.x, ttop.y, DIRECTION_UP};
-      state.vertices[v+2] = {p2.x, p2.y, p2.z, ttop2.x, ttop2.y, DIRECTION_UP};
-      state.vertices[v+3] = {p.x,      p2.y, p2.z, ttop.x, ttop2.y, DIRECTION_UP};
+      state.block_vertices[v] = {p.x,      p.y,      p2.z, ttop.x, ttop.y, DIRECTION_UP};
+      state.block_vertices[v+1] = {p2.x, p.y,      p2.z, ttop2.x, ttop.y, DIRECTION_UP};
+      state.block_vertices[v+2] = {p2.x, p2.y, p2.z, ttop2.x, ttop2.y, DIRECTION_UP};
+      state.block_vertices[v+3] = {p.x,      p2.y, p2.z, ttop.x, ttop2.y, DIRECTION_UP};
     } break;
 
     case DIRECTION_DOWN: {
-      state.vertices[v] = {p2.x, p.y,      p.z, tbot.x, tbot.y, DIRECTION_DOWN};
-      state.vertices[v+1] = {p.x,      p.y,      p.z, tbot2.x, tbot.y, DIRECTION_DOWN};
-      state.vertices[v+2] = {p.x,      p2.y, p.z, tbot2.x, tbot2.y, DIRECTION_DOWN};
-      state.vertices[v+3] = {p2.x, p2.y, p.z, tbot.x, tbot2.y, DIRECTION_DOWN};
+      state.block_vertices[v] = {p2.x, p.y,      p.z, tbot.x, tbot.y, DIRECTION_DOWN};
+      state.block_vertices[v+1] = {p.x,      p.y,      p.z, tbot2.x, tbot.y, DIRECTION_DOWN};
+      state.block_vertices[v+2] = {p.x,      p2.y, p.z, tbot2.x, tbot2.y, DIRECTION_DOWN};
+      state.block_vertices[v+3] = {p2.x, p2.y, p.z, tbot.x, tbot2.y, DIRECTION_DOWN};
     } break;
 
     case DIRECTION_X: {
-      state.vertices[v] = {p2.x, p.y,      p.z,      tside.x, tside.y, DIRECTION_X};
-      state.vertices[v+1] = {p2.x, p2.y, p.z,      tside2.x, tside.y, DIRECTION_X};
-      state.vertices[v+2] = {p2.x, p2.y, p2.z, tside2.x, tside2.y, DIRECTION_X};
-      state.vertices[v+3] = {p2.x, p.y,      p2.z, tside.x, tside2.y, DIRECTION_X};
+      state.block_vertices[v] = {p2.x, p.y,      p.z,      tside.x, tside.y, DIRECTION_X};
+      state.block_vertices[v+1] = {p2.x, p2.y, p.z,      tside2.x, tside.y, DIRECTION_X};
+      state.block_vertices[v+2] = {p2.x, p2.y, p2.z, tside2.x, tside2.y, DIRECTION_X};
+      state.block_vertices[v+3] = {p2.x, p.y,      p2.z, tside.x, tside2.y, DIRECTION_X};
     } break;
 
     case DIRECTION_Y: {
-      state.vertices[v] = {p2.x, p2.y, p.z,      tside.x, tside.y, DIRECTION_Y};
-      state.vertices[v+1] = {p.x,      p2.y, p.z,      tside2.x, tside.y, DIRECTION_Y};
-      state.vertices[v+2] = {p.x,      p2.y, p2.z, tside2.x, tside2.y, DIRECTION_Y};
-      state.vertices[v+3] = {p2.x, p2.y, p2.z, tside.x, tside2.y, DIRECTION_Y};
+      state.block_vertices[v] = {p2.x, p2.y, p.z,      tside.x, tside.y, DIRECTION_Y};
+      state.block_vertices[v+1] = {p.x,      p2.y, p.z,      tside2.x, tside.y, DIRECTION_Y};
+      state.block_vertices[v+2] = {p.x,      p2.y, p2.z, tside2.x, tside2.y, DIRECTION_Y};
+      state.block_vertices[v+3] = {p2.x, p2.y, p2.z, tside.x, tside2.y, DIRECTION_Y};
     } break;
 
     case DIRECTION_MINUS_X: {
-      state.vertices[v] = {p.x, p2.y, p.z,      tside.x, tside.y, DIRECTION_MINUS_X};
-      state.vertices[v+1] = {p.x, p.y,      p.z,      tside2.x, tside.y, DIRECTION_MINUS_X};
-      state.vertices[v+2] = {p.x, p.y,      p2.z, tside2.x, tside2.y, DIRECTION_MINUS_X};
-      state.vertices[v+3] = {p.x, p2.y, p2.z, tside.x, tside2.y, DIRECTION_MINUS_X};
+      state.block_vertices[v] = {p.x, p2.y, p.z,      tside.x, tside.y, DIRECTION_MINUS_X};
+      state.block_vertices[v+1] = {p.x, p.y,      p.z,      tside2.x, tside.y, DIRECTION_MINUS_X};
+      state.block_vertices[v+2] = {p.x, p.y,      p2.z, tside2.x, tside2.y, DIRECTION_MINUS_X};
+      state.block_vertices[v+3] = {p.x, p2.y, p2.z, tside.x, tside2.y, DIRECTION_MINUS_X};
     } break;
 
     case DIRECTION_MINUS_Y: {
-      state.vertices[v] = {p.x,      p.y, p.z,      tside.x, tside.y, DIRECTION_MINUS_Y};
-      state.vertices[v+1] = {p2.x, p.y, p.z,      tside2.x, tside.y, DIRECTION_MINUS_Y};
-      state.vertices[v+2] = {p2.x, p.y, p2.z, tside2.x, tside2.y, DIRECTION_MINUS_Y};
-      state.vertices[v+3] = {p.x,      p.y, p2.z, tside.x, tside2.y, DIRECTION_MINUS_Y};
+      state.block_vertices[v] = {p.x,      p.y, p.z,      tside.x, tside.y, DIRECTION_MINUS_Y};
+      state.block_vertices[v+1] = {p2.x, p.y, p.z,      tside2.x, tside.y, DIRECTION_MINUS_Y};
+      state.block_vertices[v+2] = {p2.x, p.y, p2.z, tside2.x, tside2.y, DIRECTION_MINUS_Y};
+      state.block_vertices[v+3] = {p.x,      p.y, p2.z, tside.x, tside2.y, DIRECTION_MINUS_Y};
     } break;
 
     default: return;
   }
 
-  state.elements[el]   = v;
-  state.elements[el+1] = v+1;
-  state.elements[el+2] = v+2;
-  state.elements[el+3] = v;
-  state.elements[el+4] = v+2;
-  state.elements[el+5] = v+3;
+  state.block_elements[el]   = v;
+  state.block_elements[el+1] = v+1;
+  state.block_elements[el+2] = v+2;
+  state.block_elements[el+3] = v;
+  state.block_elements[el+4] = v+2;
+  state.block_elements[el+5] = v+3;
 }
 
 static void render_clear() {
-  // make first 4 vertices contain the null block
-  state.num_vertices = 4; state.num_elements = 6;
+  // make first 4 block_vertices contain the null block
+  state.num_block_vertices = 4; state.num_block_elements = 6;
 }
 
 // TODO: maybe have a cache for these
@@ -1085,7 +1200,7 @@ static void hide_block(Block b, bool create_new_faces = true) {
       int &vertex_pos = get_block_vertex_pos(b, (Direction)d);
       if (!vertex_pos) continue;
       state.free_faces[state.num_free_faces++] = vertex_pos;
-      memset(state.vertices+(vertex_pos*4), 0, sizeof(*state.vertices)*4);
+      memset(state.block_vertices+(vertex_pos*4), 0, sizeof(*state.block_vertices)*4);
       vertex_pos = 0;
     }
   }
@@ -1100,7 +1215,7 @@ static void hide_block(Block b, bool create_new_faces = true) {
         push_block_face(adj, t, invert_direction((Direction)d));
     }
   }
-  state.vertices_dirty = true;
+  state.block_vertices_dirty = true;
 }
 
 static void remove_block(Block b) {
@@ -1286,7 +1401,7 @@ static Vec<Collision> collision(v3 p0, v3 p1, float dt, v3 size, OPTIONAL v3 *p_
 static void gamestate_init() {
   state.camera.look = {0.0f, 1.0f};
   state.player_pos = {0.0f, 0.0f, 50.0f};
-  state.vertices_dirty = true;
+  state.block_vertices_dirty = true;
   render_clear();
   generate_block_mesh(state.player_pos);
 }
@@ -1315,7 +1430,7 @@ static void read_input() {
       case SDL_KEYDOWN: {
         if (event.key.repeat) break;
 
-        Key k = sdlk_to_key(event.key.keysym.sym);
+        Key k = keymapping(event.key.keysym.sym);
         if (k != KEY_NULL) {
           state.keyisdown[k] = true;
           state.keypressed[k] = true;
@@ -1325,7 +1440,7 @@ static void read_input() {
       case SDL_KEYUP: {
         if (event.key.repeat) break;
 
-        Key k = sdlk_to_key(event.key.keysym.sym);
+        Key k = keymapping(event.key.keysym.sym);
         if (k != KEY_NULL)
           state.keyisdown[k] = false;
       } break;
@@ -1337,6 +1452,7 @@ static void read_input() {
     }
   }
 }
+
 
 static void update_player(float dt) {
 
@@ -1406,6 +1522,7 @@ static void update_player(float dt) {
     Vec<Collision> hits = collision(p0, p1, dt, {0.01f, 0.01f, 0.01f}, 0, 0, false);
     if (hits.size) {
       debug(if (hits.size != 1) die("Multiple collisions when not gliding? Somethings wrong"));
+      add_block_to_inventory(get_blocktype(hits.items[0].block));
       remove_block(hits.items[0].block);
       puts("hit!");
     }
@@ -1456,21 +1573,33 @@ int main(int argc, const char **argv)
   gl3wInit();
 
   // gl buffers, shaders, and uniform locations
-  array_element_buffer_create();
-  state.gl_shader  = shader_create(vertex_shader, fragment_shader);
-  state.gl_camera_uniform  = glGetUniformLocation(state.gl_shader, "ucamera");
-  state.gl_texture_uniform = glGetUniformLocation(state.gl_shader, "utexture");
-  if (state.gl_texture_uniform == -1) die("Failed to find uniform location of 'utexture'");
+  block_gl_buffer_create();
+  state.gl_block_shader  = shader_create(block_vertex_shader, block_fragment_shader);
+  state.gl_camera_uniform  = glGetUniformLocation(state.gl_block_shader, "ucamera");
+  state.gl_block_texture_uniform = glGetUniformLocation(state.gl_block_shader, "utexture");
+  if (state.gl_block_texture_uniform == -1) die("Failed to find uniform location of 'utexture'");
+
+  ui_gl_buffer_create();
+  state.gl_ui_shader = shader_create(ui_vertex_shader, ui_fragment_shader);
+  state.gl_ui_texture_uniform = glGetUniformLocation(state.gl_ui_shader, "utexture");
+  if (state.gl_ui_texture_uniform == -1) die("Failed to find uniform location of 'utexture'");
 
   // some gl settings
-  glEnable(GL_DEPTH_TEST);
   glEnable(GL_CULL_FACE);
   glCullFace(GL_BACK);
 
   // load block textures
-  state.gl_texture = texture_load("textures.bmp");
-  if (!state.gl_texture) die("Failed to load texture");
-  glBindTexture(GL_TEXTURE_2D, state.gl_texture);
+  state.gl_block_texture = texture_load("textures.bmp");
+  if (!state.gl_block_texture) die("Failed to load texture");
+  glBindTexture(GL_TEXTURE_2D, state.gl_block_texture);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_MIRRORED_REPEAT);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_MIRRORED_REPEAT);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
+  // load ui textures
+  state.gl_ui_texture = state.gl_block_texture;
+  glBindTexture(GL_TEXTURE_2D, state.gl_ui_texture);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_MIRRORED_REPEAT);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_MIRRORED_REPEAT);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
@@ -1512,7 +1641,7 @@ int main(int argc, const char **argv)
     int z1 = max(r0.b.z, r1.b.z);
 
     if (r0.a.x != r1.a.x || r0.a.y != r1.a.y || r0.a.z != r1.a.z)
-      state.vertices_dirty = true;
+      state.block_vertices_dirty = true;
 
     // hide blocks that went out of scope
     // TODO:, FIXME: if we jump farther than NUM_BLOCKS_x this probably breaks
@@ -1549,54 +1678,127 @@ int main(int argc, const char **argv)
     SHOWBLOCK(z,x,y);
     #endif
 
+    if (loopindex%20 == 0) {
+      // printf("player pos: %f %f %f\n", state.player_pos.x, state.player_pos.y, state.player_pos.z);
+      // printf("num_block_vertices: %lu\n", state.num_block_vertices*sizeof(state.block_vertices[0]));
+      // printf("num free block faces: %i/%lu\n", state.num_free_faces, ARRAY_LEN(state.free_faces));
+      printf("items: ");
+      for (int i = 0; i < ARRAY_LEN(state.inventory); ++i)
+        if (state.inventory[i].type == ITEM_BLOCK)
+          printf("%i ", state.inventory[i].block.num);
+      putchar('\n');
+    }
+
     // @render
     glClearColor(0.0f, 0.8f, 0.6f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     // @renderblocks
-    glUseProgram(state.gl_shader);
+    {
+      glEnable(GL_DEPTH_TEST);
+      glUseProgram(state.gl_block_shader);
 
-    // camera
-    const float fov = PI/3.0f;
-    const float nearz = 0.3f;
-    const float farz = 300.0f;
-    const m4 camera = camera__projection_matrix(&state.camera, state.player_pos + CAMERA_OFFSET, fov, nearz, farz, screen_ratio);
-    glUniformMatrix4fv(state.gl_camera_uniform, 1, GL_TRUE, camera.d);
-    glGetUniformLocation(state.gl_shader, "far");
-    glGetUniformLocation(state.gl_shader, "nearsize");
+      // camera
+      const float fov = PI/3.0f;
+      const float nearz = 0.3f;
+      const float farz = 300.0f;
+      const m4 camera = camera__projection_matrix(&state.camera, state.player_pos + CAMERA_OFFSET, fov, nearz, farz, screen_ratio);
+      glUniformMatrix4fv(state.gl_camera_uniform, 1, GL_TRUE, camera.d);
+      glGetUniformLocation(state.gl_block_shader, "far");
+      glGetUniformLocation(state.gl_block_shader, "nearsize");
 
-    // texture
-    glUniform1i(state.gl_texture_uniform, 0);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, state.gl_texture);
+      // texture
+      glUniform1i(state.gl_block_texture_uniform, 0);
+      glActiveTexture(GL_TEXTURE0);
+      glBindTexture(GL_TEXTURE_2D, state.gl_block_texture);
 
-    glBindVertexArray(state.gl_vao);
+      glBindVertexArray(state.gl_block_vao);
 
-    if (loopindex%20 == 0) {
-      // printf("player pos: %f %f %f\n", state.player_pos.x, state.player_pos.y, state.player_pos.z);
-      // printf("num_vertices: %lu\n", state.num_vertices*sizeof(state.vertices[0]));
-      // printf("num free block faces: %i/%lu\n", state.num_free_faces, ARRAY_LEN(state.free_faces));
+      if (state.block_mesh_dirty) {
+        // puts("re-rendering :O");
+        render_clear();
+        generate_block_mesh(state.player_pos);
+        state.block_mesh_dirty = false;
+        state.block_vertices_dirty = true;
+      }
+      if (state.block_vertices_dirty) {
+        // puts("resending block_vertices");
+        glBindBuffer(GL_ARRAY_BUFFER, state.gl_block_vbo);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, state.gl_block_ebo);
+        glBufferData(GL_ARRAY_BUFFER, state.num_block_vertices*sizeof(*state.block_vertices), state.block_vertices, GL_DYNAMIC_DRAW);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, state.num_block_elements*sizeof(*state.block_elements), state.block_elements, GL_DYNAMIC_DRAW);
+        state.block_vertices_dirty = false;
+      }
+
+      // draw
+      glDrawElements(GL_TRIANGLES, state.num_block_elements, GL_UNSIGNED_INT, 0);
+      glBindVertexArray(0);
+      gl_ok_or_die;
     }
 
-    if (state.block_mesh_dirty) {
-      // puts("re-rendering :O");
-      render_clear();
-      generate_block_mesh(state.player_pos);
-      state.block_mesh_dirty = false;
-      state.vertices_dirty = true;
-    }
-    if (state.vertices_dirty) {
-      // puts("resending vertices");
-      glBindBuffer(GL_ARRAY_BUFFER, state.gl_vbo);
-      glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, state.gl_ebo);
-      glBufferData(GL_ARRAY_BUFFER, state.num_vertices*sizeof(*state.vertices), state.vertices, GL_DYNAMIC_DRAW);
-      glBufferData(GL_ELEMENT_ARRAY_BUFFER, state.num_elements*sizeof(*state.elements), state.elements, GL_DYNAMIC_DRAW);
-      state.vertices_dirty = false;
-    }
+    // @renderui
+    {
+      glDisable(GL_DEPTH_TEST);
+      state.num_ui_vertices = state.num_ui_elements = 0;
 
-    // draw
-    glDrawElements(GL_TRIANGLES, state.num_elements, GL_UNSIGNED_INT, 0);
-    gl_ok_or_die;
+      // draw background
+      const float inv_margin = 0.1f;
+      const float inv_width = 1.0f - 2*inv_margin;
+      // state.ui_vertices[state.num_ui_vertices++] = {inv_margin, 0.0f, 0.0f, 0.0f};
+      // state.ui_vertices[state.num_ui_vertices++] = {1.0f - inv_margin, 0.0f, 3.0f, 0.0f};
+      // state.ui_vertices[state.num_ui_vertices++] = {1.0f - inv_margin, inv_margin, 3.0f, 0.5f};
+      // state.ui_vertices[state.num_ui_vertices++] = {inv_margin, inv_margin, 0.0f, 0.5f};
+      // state.ui_elements[state.num_ui_elements++] = 0;
+      // state.ui_elements[state.num_ui_elements++] = 1;
+      // state.ui_elements[state.num_ui_elements++] = 2;
+      // state.ui_elements[state.num_ui_elements++] = 0;
+      // state.ui_elements[state.num_ui_elements++] = 2;
+      // state.ui_elements[state.num_ui_elements++] = 3;
+
+      float box_margin = 0.02f;
+      float box_width = inv_width / (ARRAY_LEN(state.inventory)+1) - box_margin;
+      float x = inv_margin + box_margin;
+      float y = box_margin;
+      for (int i = 0; i < ARRAY_LEN(state.inventory); ++i) {
+        if (state.inventory[i].type != ITEM_BLOCK) continue;
+        BlockType t = state.inventory[i].block.type;
+        float tx,ty,tw,th;
+        blocktype_to_texpos(t, &tx, &ty, &tw, &th);
+        tw = tw/3.0f; // only get the side
+        tx += tw;
+        // ty += th;
+        // th = -th;
+        const int e = state.num_ui_vertices;
+        state.ui_vertices[state.num_ui_vertices++] = {x, y, tx, ty};
+        state.ui_vertices[state.num_ui_vertices++] = {x+box_width, y, tx+tw, ty};
+        state.ui_vertices[state.num_ui_vertices++] = {x+box_width, y+box_width, tx+tw, ty+th};
+        state.ui_vertices[state.num_ui_vertices++] = {x, y+box_width, tx, ty+th};
+        state.ui_elements[state.num_ui_elements++] = e;
+        state.ui_elements[state.num_ui_elements++] = e+1;
+        state.ui_elements[state.num_ui_elements++] = e+2;
+        state.ui_elements[state.num_ui_elements++] = e;
+        state.ui_elements[state.num_ui_elements++] = e+2;
+        state.ui_elements[state.num_ui_elements++] = e+3;
+
+        x += box_margin + box_width;
+      }
+      glUseProgram(state.gl_ui_shader);
+
+      // texture
+      glUniform1i(state.gl_ui_texture_uniform, 0);
+      glActiveTexture(GL_TEXTURE0);
+      glBindTexture(GL_TEXTURE_2D, state.gl_ui_texture);
+
+      glBindBuffer(GL_ARRAY_BUFFER, state.gl_ui_vbo);
+      glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, state.gl_ui_ebo);
+      glBufferData(GL_ARRAY_BUFFER, state.num_ui_vertices*sizeof(*state.ui_vertices), state.ui_vertices, GL_DYNAMIC_DRAW);
+      glBufferData(GL_ELEMENT_ARRAY_BUFFER, state.num_ui_elements*sizeof(*state.ui_elements), state.ui_elements, GL_DYNAMIC_DRAW);
+
+      glBindVertexArray(state.gl_ui_vao);
+
+      glDrawElements(GL_TRIANGLES, state.num_ui_elements, GL_UNSIGNED_INT, 0);
+      glBindVertexArray(0);
+    }
 
     SDL_GL_SwapWindow(window);
   }
