@@ -90,6 +90,161 @@ static void _gl_ok_or_die(const char* file, int line) {
 
 // @math
 
+static float sign(float f) {
+  return f < 0.0f ? -1.0f : 1.0f;
+}
+#define ARRAY_LEN(a) (sizeof(a)/sizeof(*a))
+#define ARRAY_LAST(a) ((a)[ARRAY_LEN(a)-1])
+
+template<class T>
+static T clamp(T x, T a, T b) {
+  if (x < a) return a;
+  if (x > b) return b;
+  return x;
+}
+
+static const float PI = 3.141592651f;
+
+struct v3i {
+  int x,y,z;
+};
+
+static v3i operator-(v3i a, v3i b) {
+  return {a.x-b.x, a.y-b.y, a.z-b.z};
+}
+
+static v3i operator+(v3i a, v3i b) {
+  return {a.x+b.x, a.y+b.y, a.z+b.z};
+}
+
+typedef v3i Block;
+static Block invalid_block() {
+  return {INT_MIN};
+}
+struct BlockIndex {
+  int x: 16;
+  int y: 16;
+  int z: 16;
+};
+
+static bool is_invalid(Block b) {
+  return b.x == INT_MIN;
+}
+
+struct v3 {
+  float x,y,z;
+};
+
+static float operator*(v3 a, v3 b) {
+  return a.x*b.x + a.y*b.y + a.z*b.z;
+}
+
+static v3 cross(v3 a, v3 b) {
+  v3 r = {
+    a.y*b.z - a.z*b.y,
+    a.z*b.x - a.x*b.z,
+    a.x*b.y - a.y*b.x
+  };
+  return r;
+}
+
+static v3 operator/(v3 v, float f) {
+  return {v.x/f, v.y/f, v.z/f};
+}
+
+static v3 operator*(v3 v, float f) {
+  return {v.x*f, v.y*f, v.z*f};
+}
+
+static v3 operator*(float x, v3 v) {
+  return v*x;
+}
+
+static v3 operator+(v3 a, v3 b) {
+  return {a.x+b.x, a.y+b.y, a.z+b.z};
+}
+
+static v3 operator-(v3 a, v3 b) {
+  return {a.x-b.x, a.y-b.y, a.z-b.z};
+}
+
+static void operator+=(v3& v, v3 x) {
+  v = {v.x+x.x, v.y+x.y, v.z+x.z};
+}
+
+static v3 operator-(v3 v) {
+  return {-v.x, -v.y, -v.z};
+}
+
+static void operator-=(v3& v, v3 x) {
+  v = {v.x-x.x, v.y-x.y, v.z-x.z};
+}
+
+static v3 normalize(v3 v) {
+  float len = sqrtf(v.x*v.x + v.y*v.y + v.z*v.z);
+  if (len == 0.0f) return v;
+  return v/len;
+}
+
+struct v2i {
+  int x,y;
+};
+
+struct v2 {
+  float x,y;
+};
+
+static void operator+=(v2& v, v2 x) {
+  v = {v.x+x.x, v.y+x.y};
+}
+
+static v2 operator*(v2 v, float f) {
+  return {v.x*f, v.y*f};
+}
+
+static v2 operator/(v2 v, float f) {
+  return {v.x/f, v.y/f};
+}
+
+static v2 normalize(v2 v) {
+  float len = sqrtf(v.x*v.x + v.y*v.y);
+  return v/len;
+}
+
+template <class T>
+void swap(T &a, T &b) {
+  T tmp = a;
+  a = b;
+  b = tmp;
+}
+
+template <class T>
+T max(T a, T b) {
+  return a < b ? b : a;
+}
+
+template <class T>
+T min(T a, T b) {
+  return b < a ? b : a;
+}
+
+static v3 min(v3 a, v3 b) {
+  return {min(a.x, b.x), min(a.y, b.y), min(a.z, b.z)};
+}
+
+static v3 max(v3 a, v3 b) {
+  return {max(a.x, b.x), max(a.y, b.y), max(a.z, b.z)};
+}
+
+static v3i min(v3i a, v3i b) {
+  return {min(a.x, b.x), min(a.y, b.y), min(a.z, b.z)};
+}
+
+static v3i max(v3i a, v3i b) {
+  return {max(a.x, b.x), max(a.y, b.y), max(a.z, b.z)};
+}
+
+
 // @perlin
 // good explanation of perlin noise: http://flafla2.github.io/2014/08/09/perlinnoise.html
 static float perlin__grad(int hash, float x, float y, float z) {
@@ -172,115 +327,6 @@ static float perlin(float x, float y, float z) {
                                  perlin__grad(p[BB+1], x-1, y-1, z-1 )))) + 1.0f )/2.0f;
 }
 
-#define ARRAY_LEN(a) (sizeof(a)/sizeof(*a))
-#define ARRAY_LAST(a) ((a)[ARRAY_LEN(a)-1])
-
-template<class T>
-static T clamp(T x, T a, T b) {
-  if (x < a) return a;
-  if (x > b) return b;
-  return x;
-}
-
-static const float PI = 3.141592651f;
-
-struct v3i {
-  int x,y,z;
-};
-
-static v3i operator-(v3i a, v3i b) {
-  return {a.x-b.x, a.y-b.y, a.z-b.z};
-}
-
-static v3i operator+(v3i a, v3i b) {
-  return {a.x+b.x, a.y+b.y, a.z+b.z};
-}
-
-typedef v3i Block;
-static Block invalid_block() {
-  return {INT_MIN};
-}
-struct BlockIndex {
-  int x: 16;
-  int y: 16;
-  int z: 16;
-};
-
-static bool is_invalid(Block b) {
-  return b.x == INT_MIN;
-}
-
-struct v3 {
-  float x,y,z;
-};
-
-static float operator*(v3 a, v3 b) {
-  return a.x*b.x + a.y*b.y + a.z*b.z;
-}
-
-static v3 cross(v3 a, v3 b) {
-  v3 r = {
-    a.y*b.z - a.z*b.y,
-    a.z*b.x - a.x*b.z,
-    a.x*b.y - a.y*b.x
-  };
-  return r;
-}
-
-static v3 operator/(v3 v, float f) {
-  return {v.x/f, v.y/f, v.z/f};
-}
-
-static v3 operator*(v3 v, float f) {
-  return {v.x*f, v.y*f, v.z*f};
-}
-
-static v3 operator*(float x, v3 v) {
-  return v*x;
-}
-
-static v3 operator+(v3 a, v3 b) {
-  return {a.x+b.x, a.y+b.y, a.z+b.z};
-}
-
-static v3 operator-(v3 a, v3 b) {
-  return {a.x-b.x, a.y-b.y, a.z-b.z};
-}
-
-static void operator+=(v3& v, v3 x) {
-  v = {v.x+x.x, v.y+x.y, v.z+x.z};
-}
-
-static v3 normalize(v3 v) {
-  float len = sqrtf(v.x*v.x + v.y*v.y + v.z*v.z);
-  if (len == 0.0f) return v;
-  return v/len;
-}
-
-struct v2i {
-  int x,y;
-};
-
-struct v2 {
-  float x,y;
-};
-
-static void operator+=(v2& v, v2 x) {
-  v = {v.x+x.x, v.y+x.y};
-}
-
-static v2 operator*(v2 v, float f) {
-  return {v.x*f, v.y*f};
-}
-
-static v2 operator/(v2 v, float f) {
-  return {v.x/f, v.y/f};
-}
-
-static v2 normalize(v2 v) {
-  float len = sqrtf(v.x*v.x + v.y*v.y);
-  return v/len;
-}
 
 struct r2 {
   float x0,y0,x1,y1;
@@ -557,22 +603,22 @@ static const char *fragment_shader = R"FSHADER(
     float shade = 0.0;
     switch(fdir) {
       case 0u: // UP
-        shade = 0.9;
+        shade = 0.95;
         break;
-      case 1u: // DOWN
-        shade = 0.7;
-        break;
-      case 2u: // X
+      case 1u: // X
         shade = 0.85;
         break;
-      case 3u: // Y
+      case 2u: // Y
+        shade = 0.8;
+        break;
+      case 3u: // -Y
         shade = 0.8;
         break;
       case 4u: // -X
         shade = 0.7;
         break;
-      case 5u: // -Y
-        shade = 0.8;
+      case 5u: // DOWN
+        shade = 0.7;
         break;
       default:
         shade = 0.1;
@@ -814,6 +860,7 @@ static struct GameState {
   // player data
   v3 player_vel;
   v3 player_pos;
+  bool player_on_ground;
 
   Item inventory[32];
 
@@ -992,11 +1039,11 @@ static BlockType get_blocktype(Block b) {
   // otherwise generate
   // @terrain
   static const float ground_freq = 0.05f;
-  const float groundlevel = perlin(b.x*ground_freq, b.y*ground_freq, 0) * 50.0f;
+  const float crazy_hills = max(powf(perlin(b.x*ground_freq*1.0f, b.y*ground_freq*1.0f, 0) * 2.0f, 6), 0.0f);
+  const float groundlevel = perlin(b.x*ground_freq*0.7f, b.y*ground_freq*0.7f, 0) * 30.0f + crazy_hills; //50.0f;
   static const float stone_freq = 0.13f;
-  const float stonelevel = 10.0f + perlin(b.x*stone_freq, b.y*stone_freq, 0) * 20.0f;
+  const float stonelevel = 10.0f + perlin(b.x*stone_freq, b.y*stone_freq, 0) * 5.0f; // 20.0f;
   const int waterlevel = 15;
-
 
   if (b.z < groundlevel && b.z < stonelevel)
     return BLOCKTYPE_STONE;
@@ -1109,43 +1156,26 @@ static bool collision_plane(v3 x0, v3 x1, v3 p0, v3 p1, v3 p2, float *t_out, v3 
   return true;
 }
 
-template <class T>
+template<class T>
 struct Vec {
+  typedef T* Iterator;
   int size;
   T *items;
 };
 
-template <class T>
-void swap(T &a, T &b) {
-  T tmp = a;
-  a = b;
-  b = tmp;
+template<class T>
+struct VecIter {
+  T *t, *end;
+};
+template<class T>
+static VecIter<T> iter(const Vec<T> &v) {
+  return {v.items, v.items+v.size};
 }
 
-template <class T>
-T max(T a, T b) {
-  return a < b ? b : a;
-}
-
-template <class T>
-T min(T a, T b) {
-  return b < a ? b : a;
-}
-
-static v3 min(v3 a, v3 b) {
-  return {min(a.x, b.x), min(a.y, b.y), min(a.z, b.z)};
-}
-
-static v3 max(v3 a, v3 b) {
-  return {max(a.x, b.x), max(a.y, b.y), max(a.z, b.z)};
-}
-
-static v3i min(v3i a, v3i b) {
-  return {min(a.x, b.x), min(a.y, b.y), min(a.z, b.z)};
-}
-
-static v3i max(v3i a, v3i b) {
-  return {max(a.x, b.x), max(a.y, b.y), max(a.z, b.z)};
+template<class T>
+static T* next(VecIter<T> &i) {
+  if (i.t == i.end) return 0;
+  return i.t++;
 }
 
 static void generate_block_mesh(v3 player_pos) {
@@ -1157,9 +1187,13 @@ static void generate_block_mesh(v3 player_pos) {
     show_block({x,y,z});
 }
 
-static Vec<Block> collision(v3 p0, v3 p1, float dt, v3 size, OPTIONAL v3 *p_out, OPTIONAL v3 *vel_out, bool glide) {
+struct Collision {
+  Block block;
+  v3 normal;
+};
+static Vec<Collision> collision(v3 p0, v3 p1, float dt, v3 size, OPTIONAL v3 *p_out, OPTIONAL v3 *vel_out, bool glide) {
   const int MAX_ITERATIONS = 20;
-  static Block hits[MAX_ITERATIONS];
+  static Collision hits[MAX_ITERATIONS];
   int num_hits = 0;
   int iterations;
 
@@ -1209,7 +1243,7 @@ static Vec<Block> collision(v3 p0, v3 p1, float dt, v3 size, OPTIONAL v3 *p_out,
     }
     if (!did_hit) break;
 
-    hits[num_hits++] = which_block_was_hit;
+    hits[num_hits++] = {which_block_was_hit, normal};
     if (glide) {
       /**
        * Glide along the wall
@@ -1246,12 +1280,12 @@ static Vec<Block> collision(v3 p0, v3 p1, float dt, v3 size, OPTIONAL v3 *p_out,
     p1 = p0;
 
   if (p_out) *p_out = p1;
-  return Vec<Block>{num_hits, hits};
+  return {num_hits, hits};
 }
 
 static void gamestate_init() {
   state.camera.look = {0.0f, 1.0f};
-  state.player_pos = {0.0f, 0.0f, 30.0f};
+  state.player_pos = {0.0f, 0.0f, 50.0f};
   state.vertices_dirty = true;
   render_clear();
   generate_block_mesh(state.player_pos);
@@ -1313,33 +1347,54 @@ static void update_player(float dt) {
   if (state.mouse_dy) camera_pitch(&state.camera, -state.mouse_dy * pitch_sensitivity * dt);
 
   // move player
-  const float SPEED = 0.15f;
+  const float ACCELERATION = 0.03f;
   const float GRAVITY = 0.015f;
   const float JUMPPOWER = 0.21f;
-  v3 v = {};
-  const bool flying = true;
+  v3 v = state.player_vel;
+  static bool flying;
   if (flying) {
-    if (state.keyisdown[KEY_FORWARD]) v += camera_forward(&state.camera, SPEED);
-    if (state.keyisdown[KEY_BACKWARD]) v += camera_backward(&state.camera, SPEED);
-    if (state.keyisdown[KEY_LEFT]) v += camera_strafe_left(&state.camera, SPEED);
-    if (state.keyisdown[KEY_RIGHT]) v += camera_strafe_right(&state.camera, SPEED);
-    if (state.keyisdown[KEY_FLYUP]) v += camera_up(&state.camera, SPEED);
-    if (state.keyisdown[KEY_FLYDOWN]) v += camera_down(&state.camera, SPEED);
-
+    if (state.keyisdown[KEY_FORWARD]) v += dt*camera_forward(&state.camera, ACCELERATION);
+    if (state.keyisdown[KEY_BACKWARD]) v += dt*camera_backward(&state.camera, ACCELERATION);
+    if (state.keyisdown[KEY_LEFT]) v += dt*camera_strafe_left(&state.camera, ACCELERATION);
+    if (state.keyisdown[KEY_RIGHT]) v += dt*camera_strafe_right(&state.camera, ACCELERATION);
+    if (state.keyisdown[KEY_FLYUP]) v += dt*camera_up(&state.camera, ACCELERATION);
+    if (state.keyisdown[KEY_FLYDOWN]) v += dt*camera_down(&state.camera, ACCELERATION);
+    // proportional drag (air resistance)
+    v.x *= powf(0.88f, dt);
+    v.y *= powf(0.88f, dt);
+    v.z *= powf(0.88f, dt);
   } else {
-    if (state.keyisdown[KEY_FORWARD]) v += camera_forward(&state.camera, SPEED);
-    if (state.keyisdown[KEY_BACKWARD]) v += camera_backward(&state.camera, SPEED);
-    if (state.keyisdown[KEY_LEFT]) v += camera_strafe_left(&state.camera, SPEED);
-    if (state.keyisdown[KEY_RIGHT]) v += camera_strafe_right(&state.camera, SPEED);
-    if (state.keypressed[KEY_JUMP]) state.player_vel.z = JUMPPOWER;
-    v.z = -GRAVITY;
+    if (state.keyisdown[KEY_FORWARD]) v += dt*camera_forward(&state.camera, ACCELERATION);
+    if (state.keyisdown[KEY_BACKWARD]) v += dt*camera_backward(&state.camera, ACCELERATION);
+    if (state.keyisdown[KEY_LEFT]) v += dt*camera_strafe_left(&state.camera, ACCELERATION);
+    if (state.keyisdown[KEY_RIGHT]) v += dt*camera_strafe_right(&state.camera, ACCELERATION);
+    if (state.keypressed[KEY_JUMP]) {
+      v.z = JUMPPOWER;
+      if (!state.player_on_ground)
+        flying = true;
+    }
+    v.z += -dt*GRAVITY;
+    // proportional drag (air resistance)
+    v.x *= powf(0.8, dt);
+    v.y *= powf(0.8, dt);
+    // constant drag (friction)
+    v3 n = normalize(v);
+    v3 drag = -dt*v3{0.001f*n.x, 0.001f*n.y, 0.0f};
+    if (abs(drag.x) > abs(v.x)) drag.x = -v.x;
+    if (abs(drag.y) > abs(v.y)) drag.y = -v.y;
+    v += drag;
   }
-  state.player_vel.x = v.x*dt;
-  state.player_vel.y = v.y*dt;
-  state.player_vel.z = v.z*dt;
-    // collision
-  collision(state.player_pos, state.player_pos + state.player_vel*dt, dt, {0.8f, 0.8f, 1.5f}, &state.player_pos, &state.player_vel, true);
-    // stick camera to player
+  state.player_vel = v;
+  // collision
+  Vec<Collision> hits = collision(state.player_pos, state.player_pos + state.player_vel*dt, dt, {0.8f, 0.8f, 1.5f}, &state.player_pos, &state.player_vel, true);
+  state.player_on_ground = false;
+  For(hits) {
+    if (it->normal.z > 0.9f) {
+      state.player_on_ground = true;
+      flying = false;
+      break;
+    }
+  }
 
   // clicked - remove block
   if (state.clicked) {
@@ -1348,10 +1403,10 @@ static void update_player(float dt) {
     v3 ray = camera_forward_fly(&state.camera, RAY_DISTANCE);
     v3 p0 = state.player_pos + CAMERA_OFFSET;
     v3 p1 = p0 + ray;
-    Vec<Block> hits = collision(p0, p1, dt, {0.01f, 0.01f, 0.01f}, 0, 0, false);
+    Vec<Collision> hits = collision(p0, p1, dt, {0.01f, 0.01f, 0.01f}, 0, 0, false);
     if (hits.size) {
       debug(if (hits.size != 1) die("Multiple collisions when not gliding? Somethings wrong"));
-      remove_block(hits.items[0]);
+      remove_block(hits.items[0].block);
       puts("hit!");
     }
   }
