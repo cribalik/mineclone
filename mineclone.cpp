@@ -648,7 +648,8 @@ static GLuint shader_create(const char *vertex_shader_source, const char *fragme
 enum BlockType: u8 {
   BLOCKTYPE_AIR,
   BLOCKTYPE_DIRT,
-  BLOCKTYPE_MAX = 255
+  BLOCKTYPE_STONE,
+  BLOCKTYPES_MAX
 };
 
 enum Direction: u8 {
@@ -714,7 +715,7 @@ static T* next(ColonyIter<T,N> &iter) {
 #define For(container) decltype(container)::Iterator it; for(auto _iterator = iter(container); it = next(_iterator);)
 #endif
 
-static const int NUM_BLOCKS_x = 16, NUM_BLOCKS_y = 16, NUM_BLOCKS_z = 128;
+static const int NUM_BLOCKS_x = 64, NUM_BLOCKS_y = 64, NUM_BLOCKS_z = 128;
 
 struct BlockDiff {
   Block block;
@@ -871,16 +872,18 @@ static void push_block_face(Block block, BlockType type, Direction dir) {
   if (*vertex_pos) return;
 
   const int tex_max = UINT16_MAX;
-  const int tsize = tex_max/3;
+  const int txsize = tex_max/3;
+  const int tysize = tex_max/(BLOCKTYPES_MAX-1);
   const VertexPos p =  {(i16)(block.x), (i16)(block.y), (i16)(block.z)};
   const VertexPos p2 = {(i16)(block.x+1), (i16)(block.y+1), (i16)(block.z+1)};
 
-  const VertexTexPos ttop = {0, 0};
-  const VertexTexPos ttop2 = {tsize, tex_max};
-  const VertexTexPos tside = {tsize, 0};
-  const VertexTexPos tside2 = {2*tsize, tex_max};
-  const VertexTexPos tbot = {2*tsize, 0};
-  const VertexTexPos tbot2 = {3*tsize, tex_max};
+  const u16 row = tysize * (BLOCKTYPES_MAX-type-1);
+  const VertexTexPos ttop = {0, row};
+  const VertexTexPos ttop2 = {txsize, (u16)(row+tysize)};
+  const VertexTexPos tside = {txsize, row};
+  const VertexTexPos tside2 = {2*txsize, (u16)(row+tysize)};
+  const VertexTexPos tbot = {2*txsize, row};
+  const VertexTexPos tbot2 = {3*txsize, (u16)(row+tysize)};
 
   int v, el;
   // check if there are any free vertex slots
@@ -974,9 +977,12 @@ static BlockType get_blocktype(Block b) {
     b.x*freq,
     b.y*freq
   };
-  const float p = (perlin(off.x, off.y, 0)+1.0f)/2.0f;
-  const int groundlevel = 1 + (int)(p*amp);
+  const float random_number = (perlin(off.x, off.y, 0)+1.0f)/2.0f;
+  const int groundlevel = 1 + (int)(random_number*amp);
+  const int stonelevel = 20;
 
+  if (b.z < groundlevel && b.z < stonelevel)
+    return BLOCKTYPE_STONE;
   if (b.z < groundlevel)
     return BLOCKTYPE_DIRT;
   return BLOCKTYPE_AIR;
