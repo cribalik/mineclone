@@ -711,6 +711,7 @@ enum BlockType: u8 {
   BLOCKTYPE_AIR,
   BLOCKTYPE_DIRT,
   BLOCKTYPE_STONE,
+  BLOCKTYPE_CLOUD,
   BLOCKTYPES_MAX
 };
 
@@ -920,6 +921,8 @@ static struct GameState {
   v3 player_pos;
   bool player_on_ground;
 
+  bool is_inventory_open;
+  int selected_item;
   Item inventory[8];
 
   // commands from other threads of stuff for the main thread to do at end of frame
@@ -1164,6 +1167,9 @@ static BlockType get_blocktype(Block b) {
     return BLOCKTYPE_STONE;
   if (b.z < groundlevel)
     return BLOCKTYPE_DIRT;
+  // flying blocks clusters
+  if (perlin(b.x*0.05f, b.y*0.05f, b.z*0.05f) > 0.8)
+    return BLOCKTYPE_CLOUD;
   return BLOCKTYPE_AIR;
 }
 
@@ -1400,7 +1406,7 @@ static Vec<Collision> collision(v3 p0, v3 p1, float dt, v3 size, OPTIONAL v3 *p_
 
 static void gamestate_init() {
   state.camera.look = {0.0f, 1.0f};
-  state.player_pos = {0.0f, 0.0f, 50.0f};
+  state.player_pos = {10.0f, 10.0f, 50.0f};
   state.block_vertices_dirty = true;
   render_clear();
   generate_block_mesh(state.player_pos);
@@ -1453,6 +1459,20 @@ static void read_input() {
   }
 }
 
+static void push_ui_quad(v2 x, v2 w, v2 t, v2 tw) {
+  const int e = state.num_ui_vertices;
+  state.ui_vertices[state.num_ui_vertices++] = {x.x,     x.y,     t.x,      t.y};
+  state.ui_vertices[state.num_ui_vertices++] = {x.x+w.x, x.y,     t.x+tw.x, t.y};
+  state.ui_vertices[state.num_ui_vertices++] = {x.x+w.x, x.y+w.y, t.x+tw.x, t.y+tw.y};
+  state.ui_vertices[state.num_ui_vertices++] = {x.x,     x.y+w.y, t.x,      t.y+tw.y};
+  state.ui_elements[state.num_ui_elements++] = e+0;
+  state.ui_elements[state.num_ui_elements++] = e+1;
+  state.ui_elements[state.num_ui_elements++] = e+2;
+  state.ui_elements[state.num_ui_elements++] = e+0;
+  state.ui_elements[state.num_ui_elements++] = e+2;
+  state.ui_elements[state.num_ui_elements++] = e+3;
+
+}
 
 static void update_player(float dt) {
 
@@ -1622,6 +1642,12 @@ int main(int argc, const char **argv)
     if (state.keypressed[KEY_ESCAPE])
       exit(0);
 
+    // @inventory input
+    if (state.keypressed[KEY_FLYUP])
+      state.selected_item = clamp(state.selected_item+1, 0, (int)ARRAY_LEN(state.inventory));
+    if (state.keypressed[KEY_FLYDOWN])
+      state.selected_item = clamp(state.selected_item-1, 0, (int)ARRAY_LEN(state.inventory));
+
     // update player
     v3 before = state.player_pos;
     update_player(dt);
@@ -1741,24 +1767,35 @@ int main(int argc, const char **argv)
       glDisable(GL_DEPTH_TEST);
       state.num_ui_vertices = state.num_ui_elements = 0;
 
+      if (state.is_inventory_open) {
+        // draw background
+        const float inv_margin = 0.1f;
+        const float inv_width = 1.0f - 2*inv_margin;
+        const float inv_height = 0.1f;
+        state.ui_vertices[state.num_ui_vertices++] = {inv_margin, 0.0f, 0.0f, 0.0f};
+        state.ui_vertices[state.num_ui_vertices++] = {1.0f - inv_margin, 0.0f, 0.2f, 0.0f};
+        state.ui_vertices[state.num_ui_vertices++] = {1.0f - inv_margin, inv_height, 0.2f, 0.03f};
+        state.ui_vertices[state.num_ui_vertices++] = {inv_margin, inv_height, 0.2f, 0.03f};
+        state.ui_elements[state.num_ui_elements++] = 0;
+        state.ui_elements[state.num_ui_elements++] = 1;
+        state.ui_elements[state.num_ui_elements++] = 2;
+        state.ui_elements[state.num_ui_elements++] = 0;
+        state.ui_elements[state.num_ui_elements++] = 2;
+        state.ui_elements[state.num_ui_elements++] = 3;
+      }
       // draw background
       const float inv_margin = 0.1f;
       const float inv_width = 1.0f - 2*inv_margin;
-      // state.ui_vertices[state.num_ui_vertices++] = {inv_margin, 0.0f, 0.0f, 0.0f};
-      // state.ui_vertices[state.num_ui_vertices++] = {1.0f - inv_margin, 0.0f, 3.0f, 0.0f};
-      // state.ui_vertices[state.num_ui_vertices++] = {1.0f - inv_margin, inv_margin, 3.0f, 0.5f};
-      // state.ui_vertices[state.num_ui_vertices++] = {inv_margin, inv_margin, 0.0f, 0.5f};
-      // state.ui_elements[state.num_ui_elements++] = 0;
-      // state.ui_elements[state.num_ui_elements++] = 1;
-      // state.ui_elements[state.num_ui_elements++] = 2;
-      // state.ui_elements[state.num_ui_elements++] = 0;
-      // state.ui_elements[state.num_ui_elements++] = 2;
-      // state.ui_elements[state.num_ui_elements++] = 3;
+      const float inv_height = 0.1f;
+      push_ui_quad({inv_margin, 0.0f}, {inv_width, inv_height}, {0.0f, 0.0f}, {0.2f, 0.03f});
 
-      float box_margin = 0.02f;
-      float box_width = inv_width / (ARRAY_LEN(state.inventory)+1) - box_margin;
-      float x = inv_margin + box_margin;
-      float y = box_margin;
+      float box_margin_y = 0.02f;
+      float box_size = inv_height - 2*box_margin_y;
+      int ni = ARRAY_LEN(state.inventory);
+      // (ni+1)*box_margin_x + ni*box_size = inv_width;
+      float box_margin_x = (inv_width - ni*box_size)/(ni+1);
+      float x = inv_margin + box_margin_x;
+      float y = box_margin_y;
       for (int i = 0; i < ARRAY_LEN(state.inventory); ++i) {
         if (state.inventory[i].type != ITEM_BLOCK) continue;
         BlockType t = state.inventory[i].block.type;
@@ -1766,21 +1803,19 @@ int main(int argc, const char **argv)
         blocktype_to_texpos(t, &tx, &ty, &tw, &th);
         tw = tw/3.0f; // only get the side
         tx += tw;
-        // ty += th;
-        // th = -th;
         const int e = state.num_ui_vertices;
-        state.ui_vertices[state.num_ui_vertices++] = {x, y, tx, ty};
-        state.ui_vertices[state.num_ui_vertices++] = {x+box_width, y, tx+tw, ty};
-        state.ui_vertices[state.num_ui_vertices++] = {x+box_width, y+box_width, tx+tw, ty+th};
-        state.ui_vertices[state.num_ui_vertices++] = {x, y+box_width, tx, ty+th};
-        state.ui_elements[state.num_ui_elements++] = e;
-        state.ui_elements[state.num_ui_elements++] = e+1;
-        state.ui_elements[state.num_ui_elements++] = e+2;
-        state.ui_elements[state.num_ui_elements++] = e;
-        state.ui_elements[state.num_ui_elements++] = e+2;
-        state.ui_elements[state.num_ui_elements++] = e+3;
 
-        x += box_margin + box_width;
+        float x_tmp = x;
+        float y_tmp = y;
+        float box_size_tmp = box_size;
+        if (i == state.selected_item) {
+          x_tmp -= box_margin_y/2;
+          y_tmp -= box_margin_y/2;
+          box_size_tmp += box_margin_y;
+        }
+        push_ui_quad({x_tmp, y_tmp}, {box_size_tmp, box_size_tmp}, {tx, ty}, {tw, th});
+
+        x += box_margin_x + box_size;
       }
       glUseProgram(state.gl_ui_shader);
 
