@@ -723,6 +723,16 @@ static Direction invert_direction(Direction d) {
   return (Direction)(DIRECTION_MAX - 1 - d);
 }
 
+static Direction normal_to_direction(v3 n) {
+  if (n.x > 0.9f) return DIRECTION_X;
+  if (n.x < -0.9f) return DIRECTION_MINUS_X;
+  if (n.y > 0.9f) return DIRECTION_Y;
+  if (n.y < -0.9f) return DIRECTION_MINUS_Y;
+  if (n.z > 0.9f) return DIRECTION_UP;
+  if (n.z < -0.9f) return DIRECTION_DOWN;
+  return DIRECTION_UP;
+}
+
 // @colony
 template <class T, int N>
 struct Colony {
@@ -838,6 +848,7 @@ enum Key {
   KEY_LEFT,
   KEY_RIGHT,
   KEY_JUMP,
+  KEY_INVENTORY,
   KEY_FLYUP,
   KEY_FLYDOWN,
   KEY_ESCAPE,
@@ -850,6 +861,7 @@ Key keymapping(SDL_Keycode k) {
     case SDLK_LEFT: return KEY_LEFT;
     case SDLK_RIGHT: return KEY_RIGHT;
     case SDLK_RETURN: return KEY_JUMP;
+    case SDLK_i: return KEY_INVENTORY;
     case SDLK_w: return KEY_FLYUP;
     case SDLK_s: return KEY_FLYDOWN;
     case SDLK_ESCAPE: return KEY_ESCAPE;
@@ -866,6 +878,7 @@ static struct GameState {
     bool keypressed[KEY_MAX];
     int mouse_dx, mouse_dy;
     bool clicked;
+    bool clicked_right;
   };
 
   // block graphics data
@@ -1187,7 +1200,19 @@ static Block get_adjacent_block(Block b, Direction dir) {
   }
 }
 
+static bool operator==(Block a, Block b) {
+  return a.x == b.x && a.y == b.y && a.z == b.z;
+}
+
 static void push_blockdiff(Block b, BlockType t) {
+  // if already exists, update
+  For(state.block_diffs) {
+    if (it->block == b) {
+      it->t = t;
+      return;
+    }
+  }
+  // otherwise add
   array_push(state.block_diffs, {b, t});
 }
 
@@ -1197,17 +1222,22 @@ static bool is_block_in_bounds(Block b) {
   return b.x - p.x < NUM_BLOCKS_x/2 && b.x - p.x >= -NUM_BLOCKS_x/2 && b.y - p.y < NUM_BLOCKS_y/2 && b.y - p.y >= -NUM_BLOCKS_y/2 && b.z - p.z < NUM_BLOCKS_z/2 && b.z - p.z >= -NUM_BLOCKS_z/2;
 }
 
+static void remove_blockface(Block b, Direction d) {
+  int &vertex_pos = get_block_vertex_pos(b, (Direction)d);
+  if (!vertex_pos)
+    return;
+  state.free_faces[state.num_free_faces++] = vertex_pos;
+  memset(state.block_vertices+(vertex_pos*4), 0, sizeof(*state.block_vertices)*4);
+  vertex_pos = 0;
+}
+
 static void hide_block(Block b, bool create_new_faces = true) {
   // remove the visible faces of this block
   if (is_block_in_bounds(b)) {
     for (int d = 0; d < DIRECTION_MAX; ++d) {
-      if (get_blocktype(get_adjacent_block(b, (Direction)d)) != BLOCKTYPE_AIR) continue;
-
-      int &vertex_pos = get_block_vertex_pos(b, (Direction)d);
-      if (!vertex_pos) continue;
-      state.free_faces[state.num_free_faces++] = vertex_pos;
-      memset(state.block_vertices+(vertex_pos*4), 0, sizeof(*state.block_vertices)*4);
-      vertex_pos = 0;
+      if (get_blocktype(get_adjacent_block(b, (Direction)d)) != BLOCKTYPE_AIR)
+        continue;
+      remove_blockface(b, (Direction)d);
     }
   }
 
@@ -1224,18 +1254,34 @@ static void hide_block(Block b, bool create_new_faces = true) {
   state.block_vertices_dirty = true;
 }
 
+static void show_block(Block b, bool hide_adjacent_faces = true) {
+  BlockType t = get_blocktype(b);
+  if (t == BLOCKTYPE_AIR) return;
+
+  // hide the faces of the adjacent blocks that no longer can be seen
+  if (hide_adjacent_faces) {
+    for (int d = 0; d < DIRECTION_MAX; ++d) {
+      Block adj = get_adjacent_block(b, (Direction)d);
+      if (!is_block_in_bounds(adj))
+        continue;
+      remove_blockface(b, (Direction)d);
+    }
+  }
+
+  for (int d = 0; d < 6; ++d)
+    if (get_blocktype(get_adjacent_block(b, (Direction)d)) == BLOCKTYPE_AIR)
+      push_block_face(b, t, (Direction)d);
+  state.block_vertices_dirty = true;
+}
+
 static void remove_block(Block b) {
   hide_block(b);
   push_blockdiff(b, BLOCKTYPE_AIR);
 }
 
-static void show_block(Block b) {
-  BlockType t = get_blocktype(b);
-  if (t == BLOCKTYPE_AIR) return;
-
-  for (int d = 0; d < 6; ++d)
-    if (get_blocktype(get_adjacent_block(b, (Direction)d)) == BLOCKTYPE_AIR)
-      push_block_face(b, t, (Direction)d);
+static void add_block(Block b, BlockType t) {
+  push_blockdiff(b, t);
+  show_block(b);
 }
 
 /* in: line, plane, plane origin */
@@ -1259,8 +1305,6 @@ static bool collision_plane(v3 x0, v3 x1, v3 p0, v3 p1, v3 p2, float *t_out, v3 
 
   if (t < 0.0f || t > 1.0f)
     return false;
-// 
-
   v3 xt = x0 + t*dx;
 
   u = (xt - p0)*p1/lensq(p1);
@@ -1305,7 +1349,7 @@ static void generate_block_mesh(v3 player_pos) {
   FOR_BLOCKS_IN_RANGE_x
   FOR_BLOCKS_IN_RANGE_y
   FOR_BLOCKS_IN_RANGE_z
-    show_block({x,y,z});
+    show_block({x,y,z}, false);
 }
 
 struct Collision {
@@ -1419,6 +1463,7 @@ static void read_input() {
     state.keypressed[i] = false;
   state.mouse_dx = state.mouse_dy = 0;
   state.clicked = false;
+  state.clicked_right = false;
 
   for (SDL_Event event; SDL_PollEvent(&event);) {
     switch (event.type) {
@@ -1431,6 +1476,10 @@ static void read_input() {
       case SDL_MOUSEBUTTONDOWN: {
         if (event.button.button & SDL_BUTTON(SDL_BUTTON_LEFT))
           state.clicked = true;
+        if (event.button.button & SDL_BUTTON(SDL_BUTTON_RIGHT))
+          state.clicked_right = true;
+        if (event.button.button & SDL_BUTTON(SDL_BUTTON_MIDDLE))
+          state.clicked_right = true;
       } break;
 
       case SDL_KEYDOWN: {
@@ -1457,6 +1506,8 @@ static void read_input() {
       } break;
     }
   }
+  if (state.clicked && state.clicked_right)
+    state.clicked = false;
 }
 
 static void push_ui_quad(v2 x, v2 w, v2 t, v2 tw) {
@@ -1546,6 +1597,36 @@ static void update_player(float dt) {
       remove_block(hits.items[0].block);
       puts("hit!");
     }
+  }
+  // right clicked - add block
+  if (state.clicked_right) {
+    // find the block
+    Block b;
+    Direction d;
+    const float RAY_DISTANCE = 5.0f;
+    v3 ray = camera_forward_fly(&state.camera, RAY_DISTANCE);
+    v3 p0 = state.player_pos + CAMERA_OFFSET;
+    v3 p1 = p0 + ray;
+    Vec<Collision> hits = collision(p0, p1, dt, {0.01f, 0.01f, 0.01f}, 0, 0, false);
+    if (!hits.size)
+      goto skip_blockplace;
+
+    debug(if (hits.size != 1) die("Multiple collisions when not gliding? Somethings wrong"));
+
+    d = normal_to_direction(hits.items[0].normal);
+    printf("%f %f %f : %i\n", hits.items[0].normal.x, hits.items[0].normal.y, hits.items[0].normal.z, (int)d);
+    b = get_adjacent_block(hits.items[0].block, d);
+    if (state.inventory[state.selected_item].type != ITEM_BLOCK || state.inventory[state.selected_item].block.num == 0)
+      goto skip_blockplace;
+
+    add_block(b, state.inventory[state.selected_item].block.type);
+
+    --state.inventory[state.selected_item].block.num;
+    if (state.inventory[state.selected_item].block.num == 0)
+      state.inventory[state.selected_item].type = ITEM_NULL;
+
+    puts("hit!");
+    skip_blockplace:;
   }
 }
 
@@ -1694,11 +1775,11 @@ int main(int argc, const char **argv)
       for (int A = r0.b.A+1; A <= r1.b.A; ++A) \
       FOR_BLOCKS_IN_RANGE_##B \
       FOR_BLOCKS_IN_RANGE_##C \
-        show_block({x, y, z}); \
+        show_block({x, y, z}, false); \
       for (int A = r0.a.A-1; A >= r1.a.A; --A) \
       FOR_BLOCKS_IN_RANGE_##B \
       FOR_BLOCKS_IN_RANGE_##C \
-          show_block({x, y, z});
+          show_block({x, y, z}, false);
     SHOWBLOCK(x,y,z);
     SHOWBLOCK(y,x,z);
     SHOWBLOCK(z,x,y);
@@ -1708,11 +1789,12 @@ int main(int argc, const char **argv)
       // printf("player pos: %f %f %f\n", state.player_pos.x, state.player_pos.y, state.player_pos.z);
       // printf("num_block_vertices: %lu\n", state.num_block_vertices*sizeof(state.block_vertices[0]));
       // printf("num free block faces: %i/%lu\n", state.num_free_faces, ARRAY_LEN(state.free_faces));
-      printf("items: ");
-      for (int i = 0; i < ARRAY_LEN(state.inventory); ++i)
-        if (state.inventory[i].type == ITEM_BLOCK)
-          printf("%i ", state.inventory[i].block.num);
-      putchar('\n');
+
+      // printf("items: ");
+      // for (int i = 0; i < ARRAY_LEN(state.inventory); ++i)
+      //   if (state.inventory[i].type == ITEM_BLOCK)
+      //     printf("%i ", state.inventory[i].block.num);
+      // putchar('\n');
     }
 
     // @render
@@ -1767,21 +1849,11 @@ int main(int argc, const char **argv)
       glDisable(GL_DEPTH_TEST);
       state.num_ui_vertices = state.num_ui_elements = 0;
 
+      if (state.keypressed[KEY_INVENTORY])
+        state.is_inventory_open = !state.is_inventory_open;
       if (state.is_inventory_open) {
-        // draw background
-        const float inv_margin = 0.1f;
-        const float inv_width = 1.0f - 2*inv_margin;
-        const float inv_height = 0.1f;
-        state.ui_vertices[state.num_ui_vertices++] = {inv_margin, 0.0f, 0.0f, 0.0f};
-        state.ui_vertices[state.num_ui_vertices++] = {1.0f - inv_margin, 0.0f, 0.2f, 0.0f};
-        state.ui_vertices[state.num_ui_vertices++] = {1.0f - inv_margin, inv_height, 0.2f, 0.03f};
-        state.ui_vertices[state.num_ui_vertices++] = {inv_margin, inv_height, 0.2f, 0.03f};
-        state.ui_elements[state.num_ui_elements++] = 0;
-        state.ui_elements[state.num_ui_elements++] = 1;
-        state.ui_elements[state.num_ui_elements++] = 2;
-        state.ui_elements[state.num_ui_elements++] = 0;
-        state.ui_elements[state.num_ui_elements++] = 2;
-        state.ui_elements[state.num_ui_elements++] = 3;
+        const float inv_margin = 0.15f;
+        push_ui_quad({inv_margin, inv_margin}, {1.0f - 2*inv_margin, 1.0f - 2*inv_margin}, {0.0f, 0.0f}, {0.2f, 0.04f});
       }
       // draw background
       const float inv_margin = 0.1f;
@@ -1789,31 +1861,28 @@ int main(int argc, const char **argv)
       const float inv_height = 0.1f;
       push_ui_quad({inv_margin, 0.0f}, {inv_width, inv_height}, {0.0f, 0.0f}, {0.2f, 0.03f});
 
+      // draw boxes
       float box_margin_y = 0.02f;
       float box_size = inv_height - 2*box_margin_y;
       int ni = ARRAY_LEN(state.inventory);
-      // (ni+1)*box_margin_x + ni*box_size = inv_width;
       float box_margin_x = (inv_width - ni*box_size)/(ni+1);
       float x = inv_margin + box_margin_x;
       float y = box_margin_y;
       for (int i = 0; i < ARRAY_LEN(state.inventory); ++i) {
-        if (state.inventory[i].type != ITEM_BLOCK) continue;
+        if (state.inventory[i].type != ITEM_BLOCK)
+          continue;
+
         BlockType t = state.inventory[i].block.type;
         float tx,ty,tw,th;
         blocktype_to_texpos(t, &tx, &ty, &tw, &th);
-        tw = tw/3.0f; // only get the side
-        tx += tw;
-        const int e = state.num_ui_vertices;
+        tw = tw/3.0f, tx += tw; // get only side
 
-        float x_tmp = x;
-        float y_tmp = y;
-        float box_size_tmp = box_size;
-        if (i == state.selected_item) {
-          x_tmp -= box_margin_y/2;
-          y_tmp -= box_margin_y/2;
-          box_size_tmp += box_margin_y;
-        }
-        push_ui_quad({x_tmp, y_tmp}, {box_size_tmp, box_size_tmp}, {tx, ty}, {tw, th});
+        float xx = x;
+        float yy = y;
+        float bs = box_size;
+        if (i == state.selected_item)
+          xx -= box_margin_y/2, yy -= box_margin_y/2, bs += box_margin_y;
+        push_ui_quad({xx, yy}, {bs, bs}, {tx, ty}, {tw, th});
 
         x += box_margin_x + box_size;
       }
