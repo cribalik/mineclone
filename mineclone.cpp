@@ -1234,11 +1234,8 @@ static void remove_blockface(Block b, Direction d) {
 static void hide_block(Block b, bool create_new_faces = true) {
   // remove the visible faces of this block
   if (is_block_in_bounds(b)) {
-    for (int d = 0; d < DIRECTION_MAX; ++d) {
-      if (get_blocktype(get_adjacent_block(b, (Direction)d)) != BLOCKTYPE_AIR)
-        continue;
+    for (int d = 0; d < DIRECTION_MAX; ++d)
       remove_blockface(b, (Direction)d);
-    }
   }
 
   // and add the newly visible faces of the adjacent blocks
@@ -1260,12 +1257,9 @@ static void show_block(Block b, bool hide_adjacent_faces = true) {
 
   // hide the faces of the adjacent blocks that no longer can be seen
   if (hide_adjacent_faces) {
-    for (int d = 0; d < DIRECTION_MAX; ++d) {
-      Block adj = get_adjacent_block(b, (Direction)d);
-      if (!is_block_in_bounds(adj))
-        continue;
-      remove_blockface(b, (Direction)d);
-    }
+    Block b;
+    for (int d = 0; d < DIRECTION_MAX; ++d)
+      remove_blockface(get_adjacent_block(b, (Direction)d), invert_direction((Direction)d));
   }
 
   for (int d = 0; d < 6; ++d)
@@ -1725,9 +1719,10 @@ int main(int argc, const char **argv)
 
     // @inventory input
     if (state.keypressed[KEY_FLYUP])
-      state.selected_item = clamp(state.selected_item+1, 0, (int)ARRAY_LEN(state.inventory));
+      ++state.selected_item;
     if (state.keypressed[KEY_FLYDOWN])
-      state.selected_item = clamp(state.selected_item-1, 0, (int)ARRAY_LEN(state.inventory));
+      --state.selected_item;
+    state.selected_item = clamp(state.selected_item, 0, (int)ARRAY_LEN(state.inventory)-1);
 
     // update player
     v3 before = state.player_pos;
@@ -1868,7 +1863,7 @@ int main(int argc, const char **argv)
       float box_margin_x = (inv_width - ni*box_size)/(ni+1);
       float x = inv_margin + box_margin_x;
       float y = box_margin_y;
-      for (int i = 0; i < ARRAY_LEN(state.inventory); ++i) {
+      for (int i = 0; i < ARRAY_LEN(state.inventory); ++i, x += box_margin_x + box_size) {
         if (state.inventory[i].type != ITEM_BLOCK)
           continue;
 
@@ -1883,8 +1878,6 @@ int main(int argc, const char **argv)
         if (i == state.selected_item)
           xx -= box_margin_y/2, yy -= box_margin_y/2, bs += box_margin_y;
         push_ui_quad({xx, yy}, {bs, bs}, {tx, ty}, {tw, th});
-
-        x += box_margin_x + box_size;
       }
       glUseProgram(state.gl_ui_shader);
 
