@@ -1,16 +1,20 @@
 // TODO:
 //
-// * inventory
+// * water
+//
+// * transparent blocks (leaves etc)
+//
+// * complex transparent blocks (arbitrary meshes)
 //
 // * persist block changes to disk
 //
-// * stream block_vertices in opengl
-// 
-// * load new blocks in separate thread
+// * crafting
 //
-// * transparent blocks (z-sorting)
+// * optimize loading blocks (data streaming in opengl for blocks + load new blocks in separate thread)
 //
 // * better terrain (different block types)
+//
+// * inventory
 //
 ////
 
@@ -1197,7 +1201,7 @@ static void text_gl_buffer_create() {
   // load font from file and create texture
   state.text_atlas_size.x = 512;
   state.text_atlas_size.y = 512;
-  const char *filename = "Roboto-Regular.ttf";
+  const char *filename = "UbuntuMono-R.ttf";
   const int BUFFER_SIZE = 1024*1024;
   const int tex_w = state.text_atlas_size.x;
   const int tex_h = state.text_atlas_size.y;
@@ -1834,8 +1838,9 @@ static void update_player(float dt) {
     Vec<Collision> hits = collision(p0, p1, dt, {0.01f, 0.01f, 0.01f}, 0, 0, false);
     if (hits.size) {
       debug(if (hits.size != 1) die("Multiple collisions when not gliding? Somethings wrong"));
-      add_block_to_inventory(get_blocktype(hits.items[0].block));
-      remove_block(hits.items[0].block);
+      if (add_block_to_inventory(get_blocktype(hits.items[0].block))) {
+        remove_block(hits.items[0].block);
+      }
       puts("hit!");
     }
   }
