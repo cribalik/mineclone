@@ -30,6 +30,10 @@
 #include "GL/gl3w.c"
 #include <stdint.h>
 
+#define STB_TRUETYPE_IMPLEMENTATION
+#define STBTT_STATIC
+#include "stb_truetype.h"
+
 typedef uint8_t u8;
 typedef uint16_t u16;
 typedef int16_t i16;
@@ -86,6 +90,28 @@ static void _gl_ok_or_die(const char* file, int line) {
     default: error = "unknown error";
   };
   die("GL error at %s:%u: (%u) %s\n", file, line, error_code, error);
+}
+
+// @utils
+static FILE* mine_fopen(const char *filename, const char *mode) {
+#ifdef OS_WINDOWS
+  FILE *f;
+  if (fopen_s(&f, filename, mode))
+    return 0;
+  return f;
+#else
+  return fopen(filename, mode);
+#endif
+}
+
+static const char* mine_strerror(int err) {
+#ifdef OS_WINDOWS
+  static char buf[128];
+  strerror_s(buf, sizeof(buf), err);
+  return buf;
+#else
+  return strerror(err);
+#endif
 }
 
 // @math
@@ -667,8 +693,65 @@ static const char *ui_fragment_shader = R"FSHADER(
 
   void main() {
     fcolor = vec4(texture(utexture, ftpos));
+    // float c = texture(utexture, ftpos).x;
+    // fcolor = vec4(1, 1, c*0.001, 1);
   }
   )FSHADER";
+
+// @text_vertex_shader
+static const char *text_vertex_shader = R"VSHADER(
+  #version 330 core
+
+  // in
+  layout(location = 0) in vec2 pos;
+  layout(location = 1) in vec2 tpos;
+
+  // out
+  out vec2 ftpos;
+
+  // uniform
+  uniform vec2 utextoffset;
+
+  void main() {
+    vec2 p = vec2(pos.x*2-1, pos.y*2-1) + utextoffset;
+    gl_Position = vec4(p, 0.0f, 1.0f);
+    ftpos = tpos;
+  }
+  )VSHADER";
+
+// @text_fragment_shader
+static const char *text_fragment_shader = R"FSHADER(
+  #version 330 core
+
+  // in
+  in vec2 ftpos;
+
+  // out
+  out vec4 fcolor;
+
+  // uniform
+  uniform sampler2D utexture;
+  uniform vec4 utextcolor;
+
+  void main() {
+    float alpha = texture(utexture, ftpos).x;
+    fcolor = vec4(utextcolor.xyz, utextcolor.w*alpha);
+  }
+  )FSHADER";
+
+static const char* int_to_str(int i) {
+  static char buf[32];
+  char* b = buf + 31;
+  int neg = i < 0;
+  *b-- = 0;
+  if (neg) i *= -1;
+  while (i) {
+    *b-- = '0' + i%10;
+    i /= 10;
+  }
+  if (neg) *b-- = '-';
+  return b+1;
+}
 
 static GLuint shader_create(const char *vertex_shader_source, const char *fragment_shader_source) {
   GLint success;
@@ -870,6 +953,11 @@ Key keymapping(SDL_Keycode k) {
   return KEY_NULL;
 }
 
+struct Glyph {
+  unsigned short x0, y0, x1, y1; /* Position in image */
+  float offset_x, offset_y, advance; /* Glyph offset info */
+};
+
 static const v3 CAMERA_OFFSET = v3{0.0f, 0.0f, 1.0f};
 static struct GameState {
   // input, see read_input()
@@ -911,18 +999,35 @@ static struct GameState {
 
   // ui graphics data
   struct {
-    #define MAX_UI_VERTICES 1024
+    // ui widgets
+    #define MAX_UI_VERTICES 1024*512
     #define MAX_UI_ELEMENTS (MAX_UI_VERTICES*2)
 
     UIVertex ui_vertices[MAX_UI_VERTICES];
     int num_ui_vertices;
     unsigned int ui_elements[MAX_UI_ELEMENTS];
     int num_ui_elements;
-    // ui
+
     GLuint gl_ui_vao, gl_ui_vbo, gl_ui_ebo;
     GLuint gl_ui_shader;
     GLuint gl_ui_texture_uniform;
     GLuint gl_ui_texture;
+
+    // ui text
+    #define RENDERER_FIRST_CHAR 32
+    #define RENDERER_LAST_CHAR 128
+    #define RENDERER_FONT_SIZE 32.0f
+
+    UIVertex text_vertices[1024];
+    int num_text_vertices;
+    v2i text_atlas_size;
+    Glyph glyphs[RENDERER_LAST_CHAR - RENDERER_FIRST_CHAR];
+
+    GLuint gl_text_vao, gl_text_vbo;
+    GLuint gl_text_shader;
+    GLuint gl_text_texture;
+    GLuint gl_text_offset_uniform;
+    GLuint gl_text_color_uniform;
   };
 
   // world data
@@ -941,6 +1046,10 @@ static struct GameState {
   // commands from other threads of stuff for the main thread to do at end of frame
   // Array<EndOfFrameCommand> commands;
 } state;
+
+static Glyph& glyph_get(char c) {
+  return state.glyphs[c - RENDERER_FIRST_CHAR];
+}
 
 static bool add_block_to_inventory(BlockType block_type) {
   const int STACK_SIZE = 64;
@@ -1023,6 +1132,20 @@ static void block_gl_buffer_create() {
   state.gl_block_vao = vao;
   state.gl_block_vbo = vbo;
   state.gl_block_ebo = ebo;
+
+  state.gl_block_shader  = shader_create(block_vertex_shader, block_fragment_shader);
+  state.gl_camera_uniform  = glGetUniformLocation(state.gl_block_shader, "ucamera");
+  state.gl_block_texture_uniform = glGetUniformLocation(state.gl_block_shader, "utexture");
+  if (state.gl_block_texture_uniform == -1) die("Failed to find uniform location of 'utexture'");
+
+  // load block textures
+  state.gl_block_texture = texture_load("textures.bmp");
+  if (!state.gl_block_texture) die("Failed to load texture");
+  glBindTexture(GL_TEXTURE_2D, state.gl_block_texture);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_MIRRORED_REPEAT);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_MIRRORED_REPEAT);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 }
 
 static void ui_gl_buffer_create() {
@@ -1045,6 +1168,72 @@ static void ui_gl_buffer_create() {
   state.gl_ui_vao = vao;
   state.gl_ui_vbo = vbo;
   state.gl_ui_ebo = ebo;
+
+  state.gl_ui_shader = shader_create(ui_vertex_shader, ui_fragment_shader);
+  state.gl_ui_texture_uniform = glGetUniformLocation(state.gl_ui_shader, "utexture");
+  if (state.gl_ui_texture_uniform == -1) die("Failed to find uniform location of 'utexture'");
+
+  // load ui textures
+  state.gl_ui_texture = state.gl_block_texture;
+  glBindTexture(GL_TEXTURE_2D, state.gl_ui_texture);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_MIRRORED_REPEAT);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_MIRRORED_REPEAT);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+}
+
+static void text_gl_buffer_create() {
+  glGenVertexArrays(1, &state.gl_text_vao);
+  glGenBuffers(1, &state.gl_text_vbo);
+  glBindVertexArray(state.gl_text_vao);
+  glBindBuffer(GL_ARRAY_BUFFER, state.gl_text_vbo);
+  glEnableVertexAttribArray(0);
+  glEnableVertexAttribArray(1);
+  glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(UIVertex), (GLvoid*)0);
+  glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(UIVertex), (GLvoid*)offsetof(UIVertex, tx));
+
+  state.gl_text_shader = shader_create(text_vertex_shader, text_fragment_shader);
+
+  // load font from file and create texture
+  state.text_atlas_size.x = 512;
+  state.text_atlas_size.y = 512;
+  const char *filename = "Roboto-Regular.ttf";
+  const int BUFFER_SIZE = 1024*1024;
+  const int tex_w = state.text_atlas_size.x;
+  const int tex_h = state.text_atlas_size.y;
+  const int first_char = RENDERER_FIRST_CHAR;
+  const int last_char = RENDERER_LAST_CHAR;
+  const float height = RENDERER_FONT_SIZE;
+
+  unsigned char *ttf_mem = (unsigned char*)malloc(BUFFER_SIZE);
+  unsigned char *bitmap = (unsigned char*)malloc(tex_w * tex_h);
+  if (!ttf_mem || !bitmap)
+    die("Failed to allocate memory for font\n");
+
+  FILE *f = mine_fopen(filename, "rb");
+  if (!f)
+    die("Failed to open ttf file %s\n", filename);
+  fread(ttf_mem, 1, BUFFER_SIZE, f);
+
+  int res = stbtt_BakeFontBitmap(ttf_mem, 0, height, bitmap, tex_w, tex_h, first_char, last_char - first_char, (stbtt_bakedchar*) state.glyphs);
+  if (res <= 0)
+    die("Failed to bake font: %i\n", res);
+
+  glGenTextures(1, &state.gl_text_texture);
+
+  glBindTexture(GL_TEXTURE_2D, state.gl_text_texture);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RED, tex_w, tex_h, 0, GL_RED, GL_UNSIGNED_BYTE, bitmap);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+  gl_ok_or_die;
+
+  fclose(f);
+  free(ttf_mem);
+  free(bitmap);
+
+  state.gl_text_offset_uniform = glGetUniformLocation(state.gl_text_shader, "utextoffset");
+  state.gl_text_color_uniform = glGetUniformLocation(state.gl_text_shader, "utextcolor");
+  // glUniform2f(state.gl_text_offset_uniform, 0.01f, 0.01f);
 }
 
 static void blocktype_to_texpos(BlockType t, u16 *x, u16 *y, u16 *w, u16 *h) {
@@ -1153,7 +1342,7 @@ static void push_block_face(Block block, BlockType type, Direction dir) {
   state.block_elements[el+5] = v+3;
 }
 
-static void render_clear() {
+static void block_vertices_reset() {
   // make first 4 block_vertices contain the null block
   state.num_block_vertices = 4; state.num_block_elements = 6;
 }
@@ -1338,7 +1527,7 @@ static T* next(VecIter<T> &i) {
 }
 
 static void generate_block_mesh(v3 player_pos) {
-  render_clear();
+  block_vertices_reset();
   // render block faces that face transparent blocks
   FOR_BLOCKS_IN_RANGE_x
   FOR_BLOCKS_IN_RANGE_y
@@ -1442,12 +1631,70 @@ static Vec<Collision> collision(v3 p0, v3 p1, float dt, v3 size, OPTIONAL v3 *p_
   return {num_hits, hits};
 }
 
+
+static int calc_string_width(const char *str) {
+  float result = 0.0f;
+
+  for (; *str; ++str)
+    result += glyph_get(*str).advance;
+  return result;
+}
+
+static void text_vertices_reset() {
+  state.num_text_vertices = 0;
+}
+
+static void push_text(const char *str, v2 pos, float height, bool center) {
+  float h,w, scale, ipw,iph, x,y, tx0,ty0,tx1,ty1;
+  UIVertex *v;
+
+  scale = height / RENDERER_FONT_SIZE;
+  ipw = 1.0f / state.text_atlas_size.x;
+  iph = 1.0f / state.text_atlas_size.y;
+
+  if (state.num_text_vertices + strlen(str) >= ARRAY_LEN(state.text_vertices))
+    return;
+
+  if (center) {
+    pos.x -= calc_string_width(str) * scale / 2;
+    /*pos.y -= height/2.0f;*/ /* Why isn't this working? */
+  }
+
+  for (; *str && state.num_text_vertices + 6 < (int)ARRAY_LEN(state.text_vertices); ++str) {
+    Glyph g = glyph_get(*str);
+
+    x = pos.x + g.offset_x*scale;
+    y = pos.y - g.offset_y*scale;
+    w = (g.x1 - g.x0)*scale;
+    h = (g.y0 - g.y1)*scale;
+
+    /* scale texture to atlas */
+    tx0 = g.x0 * ipw,
+    tx1 = g.x1 * ipw;
+    ty0 = g.y0 * iph;
+    ty1 = g.y1 * iph;
+
+    v = state.text_vertices + state.num_text_vertices;
+
+    *v++ = {x, y, tx0, ty0};
+    *v++ = {x + w, y, tx1, ty0};
+    *v++ = {x, y + h, tx0, ty1};
+    *v++ = {x, y + h, tx0, ty1};
+    *v++ = {x + w, y, tx1, ty0};
+    *v++ = {x + w, y + h, tx1, ty1};
+
+    state.num_text_vertices += 6;
+    pos.x += g.advance * scale;
+  }
+}
+
 static void gamestate_init() {
   state.camera.look = {0.0f, 1.0f};
   state.player_pos = {10.0f, 10.0f, 50.0f};
   state.block_vertices_dirty = true;
-  render_clear();
+  block_vertices_reset();
   generate_block_mesh(state.player_pos);
+
 }
 
 // fills out the input fields in GameState
@@ -1669,36 +1916,12 @@ int main(int argc, const char **argv)
 
   // gl buffers, shaders, and uniform locations
   block_gl_buffer_create();
-  state.gl_block_shader  = shader_create(block_vertex_shader, block_fragment_shader);
-  state.gl_camera_uniform  = glGetUniformLocation(state.gl_block_shader, "ucamera");
-  state.gl_block_texture_uniform = glGetUniformLocation(state.gl_block_shader, "utexture");
-  if (state.gl_block_texture_uniform == -1) die("Failed to find uniform location of 'utexture'");
-
   ui_gl_buffer_create();
-  state.gl_ui_shader = shader_create(ui_vertex_shader, ui_fragment_shader);
-  state.gl_ui_texture_uniform = glGetUniformLocation(state.gl_ui_shader, "utexture");
-  if (state.gl_ui_texture_uniform == -1) die("Failed to find uniform location of 'utexture'");
+  text_gl_buffer_create();
 
   // some gl settings
   glEnable(GL_CULL_FACE);
   glCullFace(GL_BACK);
-
-  // load block textures
-  state.gl_block_texture = texture_load("textures.bmp");
-  if (!state.gl_block_texture) die("Failed to load texture");
-  glBindTexture(GL_TEXTURE_2D, state.gl_block_texture);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_MIRRORED_REPEAT);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_MIRRORED_REPEAT);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-
-  // load ui textures
-  state.gl_ui_texture = state.gl_block_texture;
-  glBindTexture(GL_TEXTURE_2D, state.gl_ui_texture);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_MIRRORED_REPEAT);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_MIRRORED_REPEAT);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 
   // initialize game state
   gamestate_init();
@@ -1796,8 +2019,11 @@ int main(int argc, const char **argv)
     glClearColor(0.0f, 0.8f, 0.6f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
+    text_vertices_reset();
+
     // @renderblocks
     {
+      glEnable(GL_CULL_FACE);
       glEnable(GL_DEPTH_TEST);
       glUseProgram(state.gl_block_shader);
 
@@ -1819,7 +2045,7 @@ int main(int argc, const char **argv)
 
       if (state.block_mesh_dirty) {
         // puts("re-rendering :O");
-        render_clear();
+        block_vertices_reset();
         generate_block_mesh(state.player_pos);
         state.block_mesh_dirty = false;
         state.block_vertices_dirty = true;
@@ -1878,6 +2104,7 @@ int main(int argc, const char **argv)
         if (i == state.selected_item)
           xx -= box_margin_y/2, yy -= box_margin_y/2, bs += box_margin_y;
         push_ui_quad({xx, yy}, {bs, bs}, {tx, ty}, {tw, th});
+        push_text(int_to_str(state.inventory[i].block.num), {x + box_size - 0.01f, y + box_size - 0.01f}, 0.05f, true);
       }
       glUseProgram(state.gl_ui_shader);
 
@@ -1895,6 +2122,36 @@ int main(int argc, const char **argv)
 
       glDrawElements(GL_TRIANGLES, state.num_ui_elements, GL_UNSIGNED_INT, 0);
       glBindVertexArray(0);
+    }
+
+    // @render_text
+    {
+      glEnable(GL_BLEND);
+      glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+      glDisable(GL_CULL_FACE);
+
+      glUseProgram(state.gl_text_shader);
+
+      // data
+      glBindVertexArray(state.gl_text_vao);
+      glBindBuffer(GL_ARRAY_BUFFER, state.gl_text_vbo);
+      glBufferData(GL_ARRAY_BUFFER, state.num_text_vertices*sizeof(*state.text_vertices), state.text_vertices, GL_DYNAMIC_DRAW);
+      glBindTexture(GL_TEXTURE_2D, state.gl_text_texture);
+
+      // shadow
+      glUniform4f(state.gl_text_color_uniform, 0.0f, 0.0f, 0.0f, 0.7f);
+      glUniform2f(state.gl_text_offset_uniform, 0.003f, -0.003f);
+      glDrawArrays(GL_TRIANGLES, 0, state.num_text_vertices);
+
+      // shadow
+      glUniform4f(state.gl_text_color_uniform, 0.0f, 0.0f, 0.0f, 0.5f);
+      glUniform2f(state.gl_text_offset_uniform, -0.003f, 0.003f);
+      glDrawArrays(GL_TRIANGLES, 0, state.num_text_vertices);
+
+      // text
+      glUniform4f(state.gl_text_color_uniform, 0.99f, 0.99f, 0.99f, 1.0f);
+      glUniform2f(state.gl_text_offset_uniform, 0.0f, 0.0f);
+      glDrawArrays(GL_TRIANGLES, 0, state.num_text_vertices);
     }
 
     SDL_GL_SwapWindow(window);
