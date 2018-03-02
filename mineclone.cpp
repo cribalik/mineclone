@@ -362,6 +362,10 @@ struct r2 {
   float x0,y0,x1,y1;
 };
 
+struct r2i {
+  int x0,y0,x1,y1;
+};
+
 struct BlockVertexPos {
   i16 x,y,z;
 };
@@ -575,27 +579,6 @@ static m4 camera__projection_matrix(Camera *camera, v3 pos, float fov, float nea
 }
 
 
-static GLuint texture_load(const char *filename) {
-  int w,h,n;
-
-  // load image
-  stbi_set_flip_vertically_on_load(1);
-  unsigned char *data = stbi_load(filename, &w, &h, &n, 3);
-  if (!data) die("Could not load texture %s", filename);
-  if (n != 3) die("Texture %s must only be rgb, but had %i channels\n", filename, n);
-
-  // create texture
-  GLuint tex;
-  glGenTextures(1, &tex);
-  glBindTexture(GL_TEXTURE_2D, tex);
-
-  // load texture
-  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, w, h, 0, GL_RGB, GL_UNSIGNED_BYTE, data);
-
-  stbi_image_free(data);
-  return tex;
-}
-
 // @block_vertex_shader
 static const char *block_vertex_shader = R"VSHADER(
   #version 330 core
@@ -794,15 +777,26 @@ static GLuint shader_create(const char *vertex_shader_source, const char *fragme
 }
 
 // game
-enum BlockType: u8 {
+enum BlockType {
   BLOCKTYPE_AIR,
   BLOCKTYPE_DIRT,
   BLOCKTYPE_STONE,
   BLOCKTYPE_CLOUD,
+  BLOCKTYPE_WATER,
   BLOCKTYPES_MAX
 };
 
-enum Direction: u8 {
+static bool blocktype_is_transparent(BlockType t) {
+  switch (t) {
+    case BLOCKTYPE_AIR:
+    case BLOCKTYPE_WATER:
+      return true;
+    default:
+      return false;
+  }
+}
+
+enum Direction {
   DIRECTION_UP, DIRECTION_X, DIRECTION_Y, DIRECTION_MINUS_Y, DIRECTION_MINUS_X, DIRECTION_DOWN, DIRECTION_MAX
 };
 
@@ -999,6 +993,9 @@ static struct GameState {
     GLuint gl_block_texture_uniform;
     GLuint gl_block_texture;
 
+    // where in the texture buffer is the water texture, so we can manipulate it
+    r2i water_texture_pos;
+    u8 water_texture_buffer[16*16*3*3];
   };
 
   // ui graphics data
@@ -1113,138 +1110,25 @@ static int& get_block_vertex_pos(Block b, Direction dir) {
   return get_block_vertex_pos(block_to_blockindex(b), dir);
 }
 
-// openglstuff
-static void block_gl_buffer_create() {
-  GLuint vao, ebo, vbo;
-  glGenVertexArrays(1, &vao);
-  glGenBuffers(1, &vbo);
-  glGenBuffers(1, &ebo);
-
-  glBindVertexArray(vao);
-
-  glBindBuffer(GL_ARRAY_BUFFER, vbo);
-  glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
-
-  glEnableVertexAttribArray(0);
-  glEnableVertexAttribArray(1);
-  glEnableVertexAttribArray(2);
-  glVertexAttribIPointer(0, 3, GL_SHORT, sizeof(BlockVertex), (GLvoid*)0);
-  glVertexAttribPointer(1, 2, GL_UNSIGNED_SHORT, GL_TRUE, sizeof(BlockVertex), (GLvoid*)offsetof(BlockVertex, tex));
-  glVertexAttribIPointer(2, 1, GL_UNSIGNED_BYTE, sizeof(BlockVertex), (GLvoid*)offsetof(BlockVertex, direction));
-  gl_ok_or_die;
-
-  state.gl_block_vao = vao;
-  state.gl_block_vbo = vbo;
-  state.gl_block_ebo = ebo;
-
-  state.gl_block_shader  = shader_create(block_vertex_shader, block_fragment_shader);
-  state.gl_camera_uniform  = glGetUniformLocation(state.gl_block_shader, "ucamera");
-  state.gl_block_texture_uniform = glGetUniformLocation(state.gl_block_shader, "utexture");
-  if (state.gl_block_texture_uniform == -1) die("Failed to find uniform location of 'utexture'");
-
-  // load block textures
-  state.gl_block_texture = texture_load("textures.bmp");
-  if (!state.gl_block_texture) die("Failed to load texture");
-  glBindTexture(GL_TEXTURE_2D, state.gl_block_texture);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_MIRRORED_REPEAT);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_MIRRORED_REPEAT);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+static void blocktype_to_texpos_top(BlockType t, u16 *x0, u16 *y0, u16 *x1, u16 *y1) {
+  *x0 = 0;
+  *y0 = UINT16_MAX/(BLOCKTYPES_MAX-1) * (BLOCKTYPES_MAX-t-1);
+  *x1 = UINT16_MAX/3;
+  *y1 = UINT16_MAX*(BLOCKTYPES_MAX-t)/(BLOCKTYPES_MAX-1);
 }
 
-static void ui_gl_buffer_create() {
-  GLuint vao, ebo, vbo;
-  glGenVertexArrays(1, &vao);
-  glGenBuffers(1, &vbo);
-  glGenBuffers(1, &ebo);
-
-  glBindVertexArray(vao);
-
-  glBindBuffer(GL_ARRAY_BUFFER, vbo);
-  glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
-
-  glEnableVertexAttribArray(0);
-  glEnableVertexAttribArray(1);
-  glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(UIVertex), (GLvoid*)0);
-  glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(UIVertex), (GLvoid*)offsetof(UIVertex, tx));
-  gl_ok_or_die;
-
-  state.gl_ui_vao = vao;
-  state.gl_ui_vbo = vbo;
-  state.gl_ui_ebo = ebo;
-
-  state.gl_ui_shader = shader_create(ui_vertex_shader, ui_fragment_shader);
-  state.gl_ui_texture_uniform = glGetUniformLocation(state.gl_ui_shader, "utexture");
-  if (state.gl_ui_texture_uniform == -1) die("Failed to find uniform location of 'utexture'");
-
-  // load ui textures
-  state.gl_ui_texture = state.gl_block_texture;
-  glBindTexture(GL_TEXTURE_2D, state.gl_ui_texture);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_MIRRORED_REPEAT);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_MIRRORED_REPEAT);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+static void blocktype_to_texpos_side(BlockType t, u16 *x0, u16 *y0, u16 *x1, u16 *y1) {
+  *x0 = UINT16_MAX/3;
+  *y0 = UINT16_MAX/(BLOCKTYPES_MAX-1) * (BLOCKTYPES_MAX-t-1);
+  *x1 = 2*UINT16_MAX/3;
+  *y1 = UINT16_MAX*(BLOCKTYPES_MAX-t)/(BLOCKTYPES_MAX-1);
 }
 
-static void text_gl_buffer_create() {
-  glGenVertexArrays(1, &state.gl_text_vao);
-  glGenBuffers(1, &state.gl_text_vbo);
-  glBindVertexArray(state.gl_text_vao);
-  glBindBuffer(GL_ARRAY_BUFFER, state.gl_text_vbo);
-  glEnableVertexAttribArray(0);
-  glEnableVertexAttribArray(1);
-  glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(UIVertex), (GLvoid*)0);
-  glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(UIVertex), (GLvoid*)offsetof(UIVertex, tx));
-
-  state.gl_text_shader = shader_create(text_vertex_shader, text_fragment_shader);
-
-  // load font from file and create texture
-  state.text_atlas_size.x = 512;
-  state.text_atlas_size.y = 512;
-  const char *filename = "UbuntuMono-R.ttf";
-  const int BUFFER_SIZE = 1024*1024;
-  const int tex_w = state.text_atlas_size.x;
-  const int tex_h = state.text_atlas_size.y;
-  const int first_char = RENDERER_FIRST_CHAR;
-  const int last_char = RENDERER_LAST_CHAR;
-  const float height = RENDERER_FONT_SIZE;
-
-  unsigned char *ttf_mem = (unsigned char*)malloc(BUFFER_SIZE);
-  unsigned char *bitmap = (unsigned char*)malloc(tex_w * tex_h);
-  if (!ttf_mem || !bitmap)
-    die("Failed to allocate memory for font\n");
-
-  FILE *f = mine_fopen(filename, "rb");
-  if (!f)
-    die("Failed to open ttf file %s\n", filename);
-  fread(ttf_mem, 1, BUFFER_SIZE, f);
-
-  int res = stbtt_BakeFontBitmap(ttf_mem, 0, height, bitmap, tex_w, tex_h, first_char, last_char - first_char, (stbtt_bakedchar*) state.glyphs);
-  if (res <= 0)
-    die("Failed to bake font: %i\n", res);
-
-  glGenTextures(1, &state.gl_text_texture);
-
-  glBindTexture(GL_TEXTURE_2D, state.gl_text_texture);
-  glTexImage2D(GL_TEXTURE_2D, 0, GL_RED, tex_w, tex_h, 0, GL_RED, GL_UNSIGNED_BYTE, bitmap);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-  gl_ok_or_die;
-
-  fclose(f);
-  free(ttf_mem);
-  free(bitmap);
-
-  state.gl_text_offset_uniform = glGetUniformLocation(state.gl_text_shader, "utextoffset");
-  state.gl_text_color_uniform = glGetUniformLocation(state.gl_text_shader, "utextcolor");
-  // glUniform2f(state.gl_text_offset_uniform, 0.01f, 0.01f);
-}
-
-static void blocktype_to_texpos(BlockType t, u16 *x, u16 *y, u16 *w, u16 *h) {
-  *x = 0;
-  *y = UINT16_MAX/(BLOCKTYPES_MAX-1) * (BLOCKTYPES_MAX-t-1);
-  *w = UINT16_MAX;
-  *h = UINT16_MAX/(BLOCKTYPES_MAX-1);
+static void blocktype_to_texpos_bottom(BlockType t, u16 *x0, u16 *y0, u16 *x1, u16 *y1) {
+  *x0 = 2*UINT16_MAX/3;
+  *y0 = UINT16_MAX/(BLOCKTYPES_MAX-1) * (BLOCKTYPES_MAX-t-1);
+  *x1 = UINT16_MAX;
+  *y1 = UINT16_MAX*(BLOCKTYPES_MAX-t)/(BLOCKTYPES_MAX-1);
 }
 
 static void blocktype_to_texpos(BlockType t, float *x, float *y, float *w, float *h) {
@@ -1269,12 +1153,10 @@ static void push_block_face(Block block, BlockType type, Direction dir) {
   const BlockVertexPos p2 = {(i16)(block.x+1), (i16)(block.y+1), (i16)(block.z+1)};
 
   const u16 row = tysize * (BLOCKTYPES_MAX-type-1);
-  const BlockVertexTexPos ttop = {0, row};
-  const BlockVertexTexPos ttop2 = {txsize, (u16)(row+tysize)};
-  const BlockVertexTexPos tside = {txsize, row};
-  const BlockVertexTexPos tside2 = {2*txsize, (u16)(row+tysize)};
-  const BlockVertexTexPos tbot = {2*txsize, row};
-  const BlockVertexTexPos tbot2 = {3*txsize, (u16)(row+tysize)};
+  BlockVertexTexPos ttop, ttop2,  tside, tside2,  tbot, tbot2;
+  blocktype_to_texpos_top(type, &ttop.x, &ttop.y, &ttop2.x, &ttop2.y);
+  blocktype_to_texpos_side(type, &tside.x, &tside.y, &tside2.x, &tside2.y);
+  blocktype_to_texpos_bottom(type, &tbot.x, &tbot.y, &tbot2.x, &tbot2.y);
 
   int v, el;
   // check if there are any free vertex slots
@@ -1367,12 +1249,14 @@ static BlockType get_blocktype(Block b) {
   const float groundlevel = perlin(b.x*ground_freq*0.7f, b.y*ground_freq*0.7f, 0) * 30.0f + crazy_hills; //50.0f;
   static const float stone_freq = 0.13f;
   const float stonelevel = 10.0f + perlin(b.x*stone_freq, b.y*stone_freq, 0) * 5.0f; // 20.0f;
-  const int waterlevel = 15;
+  const int waterlevel = 13;
 
   if (b.z < groundlevel && b.z < stonelevel)
     return BLOCKTYPE_STONE;
   if (b.z < groundlevel)
     return BLOCKTYPE_DIRT;
+  if (b.z < waterlevel)
+    return BLOCKTYPE_WATER;
   // flying blocks clusters
   if (perlin(b.x*0.05f, b.y*0.05f, b.z*0.05f) > 0.8)
     return BLOCKTYPE_CLOUD;
@@ -1455,9 +1339,19 @@ static void show_block(Block b, bool hide_adjacent_faces = true) {
       remove_blockface(get_adjacent_block(b, (Direction)d), invert_direction((Direction)d));
   }
 
-  for (int d = 0; d < 6; ++d)
-    if (get_blocktype(get_adjacent_block(b, (Direction)d)) == BLOCKTYPE_AIR)
-      push_block_face(b, t, (Direction)d);
+  // draw sides that face transparent blocks
+  for (int d = 0; d < 6; ++d) {
+    BlockType tt = get_blocktype(get_adjacent_block(b, (Direction)d));
+
+    // no need to draw faces against opaque blocks
+    if (!blocktype_is_transparent(tt))
+      continue;
+    // we don't want to draw every side of adjacent water blocks
+    if (t == BLOCKTYPE_WATER && tt == BLOCKTYPE_WATER)
+      continue;
+
+    push_block_face(b, t, (Direction)d);
+  }
   state.block_vertices_dirty = true;
 }
 
@@ -1692,6 +1586,175 @@ static void push_text(const char *str, v2 pos, float height, bool center) {
   }
 }
 
+static GLuint texture_load(const char *filename) {
+  int w,h,n;
+
+  // load image
+  stbi_set_flip_vertically_on_load(1);
+  unsigned char *data = stbi_load(filename, &w, &h, &n, 3);
+  if (!data) die("Could not load texture %s", filename);
+  if (n != 3) die("Texture %s must only be rgb, but had %i channels\n", filename, n);
+
+  // create texture
+  GLuint tex;
+  glGenTextures(1, &tex);
+  glBindTexture(GL_TEXTURE_2D, tex);
+
+  // load texture
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, w, h, 0, GL_RGB, GL_UNSIGNED_BYTE, data);
+
+  stbi_image_free(data);
+
+  state.water_texture_pos.x0 = 0;
+  state.water_texture_pos.y0 = h * (BLOCKTYPES_MAX- BLOCKTYPE_WATER - 1)/(BLOCKTYPES_MAX - 1);
+  state.water_texture_pos.x1 = w;
+  state.water_texture_pos.y1 = h*(BLOCKTYPES_MAX - BLOCKTYPE_WATER)/(BLOCKTYPES_MAX - 1);
+  int water_texture_size = (state.water_texture_pos.x1 - state.water_texture_pos.x0) * (state.water_texture_pos.y1 - state.water_texture_pos.y0);
+  if (water_texture_size*3 != ARRAY_LEN(state.water_texture_buffer))
+    die("Maths went wrong, expected %lu but got %i", ARRAY_LEN(state.water_texture_buffer), water_texture_size);
+
+  return tex;
+}
+
+static void block_gl_buffer_create() {
+  GLuint vao, ebo, vbo;
+  glGenVertexArrays(1, &vao);
+  glGenBuffers(1, &vbo);
+  glGenBuffers(1, &ebo);
+
+  glBindVertexArray(vao);
+
+  glBindBuffer(GL_ARRAY_BUFFER, vbo);
+  glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
+
+  glEnableVertexAttribArray(0);
+  glEnableVertexAttribArray(1);
+  glEnableVertexAttribArray(2);
+  glVertexAttribIPointer(0, 3, GL_SHORT, sizeof(BlockVertex), (GLvoid*)0);
+  glVertexAttribPointer(1, 2, GL_UNSIGNED_SHORT, GL_TRUE, sizeof(BlockVertex), (GLvoid*)offsetof(BlockVertex, tex));
+  glVertexAttribIPointer(2, 1, GL_UNSIGNED_BYTE, sizeof(BlockVertex), (GLvoid*)offsetof(BlockVertex, direction));
+  gl_ok_or_die;
+
+  state.gl_block_vao = vao;
+  state.gl_block_vbo = vbo;
+  state.gl_block_ebo = ebo;
+
+  state.gl_block_shader  = shader_create(block_vertex_shader, block_fragment_shader);
+  state.gl_camera_uniform  = glGetUniformLocation(state.gl_block_shader, "ucamera");
+  state.gl_block_texture_uniform = glGetUniformLocation(state.gl_block_shader, "utexture");
+  if (state.gl_block_texture_uniform == -1) die("Failed to find uniform location of 'utexture'");
+
+  // load block textures
+  state.gl_block_texture = texture_load("textures.bmp");
+  if (!state.gl_block_texture) die("Failed to load texture");
+  glBindTexture(GL_TEXTURE_2D, state.gl_block_texture);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_MIRRORED_REPEAT);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_MIRRORED_REPEAT);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+}
+
+static void ui_gl_buffer_create() {
+  GLuint vao, ebo, vbo;
+  glGenVertexArrays(1, &vao);
+  glGenBuffers(1, &vbo);
+  glGenBuffers(1, &ebo);
+
+  glBindVertexArray(vao);
+
+  glBindBuffer(GL_ARRAY_BUFFER, vbo);
+  glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
+
+  glEnableVertexAttribArray(0);
+  glEnableVertexAttribArray(1);
+  glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(UIVertex), (GLvoid*)0);
+  glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(UIVertex), (GLvoid*)offsetof(UIVertex, tx));
+  gl_ok_or_die;
+
+  state.gl_ui_vao = vao;
+  state.gl_ui_vbo = vbo;
+  state.gl_ui_ebo = ebo;
+
+  state.gl_ui_shader = shader_create(ui_vertex_shader, ui_fragment_shader);
+  state.gl_ui_texture_uniform = glGetUniformLocation(state.gl_ui_shader, "utexture");
+  if (state.gl_ui_texture_uniform == -1) die("Failed to find uniform location of 'utexture'");
+
+  // load ui textures
+  state.gl_ui_texture = state.gl_block_texture;
+  glBindTexture(GL_TEXTURE_2D, state.gl_ui_texture);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_MIRRORED_REPEAT);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_MIRRORED_REPEAT);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+}
+
+static void text_gl_buffer_create() {
+  glGenVertexArrays(1, &state.gl_text_vao);
+  glGenBuffers(1, &state.gl_text_vbo);
+  glBindVertexArray(state.gl_text_vao);
+  glBindBuffer(GL_ARRAY_BUFFER, state.gl_text_vbo);
+  glEnableVertexAttribArray(0);
+  glEnableVertexAttribArray(1);
+  glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(UIVertex), (GLvoid*)0);
+  glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(UIVertex), (GLvoid*)offsetof(UIVertex, tx));
+
+  state.gl_text_shader = shader_create(text_vertex_shader, text_fragment_shader);
+
+  // load font from file and create texture
+  state.text_atlas_size.x = 512;
+  state.text_atlas_size.y = 512;
+  const char *filename = "UbuntuMono-R.ttf";
+  const int BUFFER_SIZE = 1024*1024;
+  const int tex_w = state.text_atlas_size.x;
+  const int tex_h = state.text_atlas_size.y;
+  const int first_char = RENDERER_FIRST_CHAR;
+  const int last_char = RENDERER_LAST_CHAR;
+  const float height = RENDERER_FONT_SIZE;
+
+  unsigned char *ttf_mem = (unsigned char*)malloc(BUFFER_SIZE);
+  unsigned char *bitmap = (unsigned char*)malloc(tex_w * tex_h);
+  if (!ttf_mem || !bitmap)
+    die("Failed to allocate memory for font\n");
+
+  FILE *f = mine_fopen(filename, "rb");
+  if (!f)
+    die("Failed to open ttf file %s\n", filename);
+  fread(ttf_mem, 1, BUFFER_SIZE, f);
+
+  int res = stbtt_BakeFontBitmap(ttf_mem, 0, height, bitmap, tex_w, tex_h, first_char, last_char - first_char, (stbtt_bakedchar*) state.glyphs);
+  if (res <= 0)
+    die("Failed to bake font: %i\n", res);
+
+  glGenTextures(1, &state.gl_text_texture);
+
+  glBindTexture(GL_TEXTURE_2D, state.gl_text_texture);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RED, tex_w, tex_h, 0, GL_RED, GL_UNSIGNED_BYTE, bitmap);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+  gl_ok_or_die;
+
+  fclose(f);
+  free(ttf_mem);
+  free(bitmap);
+
+  state.gl_text_offset_uniform = glGetUniformLocation(state.gl_text_shader, "utextoffset");
+  state.gl_text_color_uniform = glGetUniformLocation(state.gl_text_shader, "utextcolor");
+}
+
+static void push_ui_quad(v2 x, v2 w, v2 t, v2 tw) {
+  const int e = state.num_ui_vertices;
+  state.ui_vertices[state.num_ui_vertices++] = {x.x,     x.y,     t.x,      t.y};
+  state.ui_vertices[state.num_ui_vertices++] = {x.x+w.x, x.y,     t.x+tw.x, t.y};
+  state.ui_vertices[state.num_ui_vertices++] = {x.x+w.x, x.y+w.y, t.x+tw.x, t.y+tw.y};
+  state.ui_vertices[state.num_ui_vertices++] = {x.x,     x.y+w.y, t.x,      t.y+tw.y};
+  state.ui_elements[state.num_ui_elements++] = e+0;
+  state.ui_elements[state.num_ui_elements++] = e+1;
+  state.ui_elements[state.num_ui_elements++] = e+2;
+  state.ui_elements[state.num_ui_elements++] = e+0;
+  state.ui_elements[state.num_ui_elements++] = e+2;
+  state.ui_elements[state.num_ui_elements++] = e+3;
+}
+
 static void gamestate_init() {
   state.camera.look = {0.0f, 1.0f};
   state.player_pos = {10.0f, 10.0f, 50.0f};
@@ -1753,21 +1816,6 @@ static void read_input() {
   }
   if (state.clicked && state.clicked_right)
     state.clicked = false;
-}
-
-static void push_ui_quad(v2 x, v2 w, v2 t, v2 tw) {
-  const int e = state.num_ui_vertices;
-  state.ui_vertices[state.num_ui_vertices++] = {x.x,     x.y,     t.x,      t.y};
-  state.ui_vertices[state.num_ui_vertices++] = {x.x+w.x, x.y,     t.x+tw.x, t.y};
-  state.ui_vertices[state.num_ui_vertices++] = {x.x+w.x, x.y+w.y, t.x+tw.x, t.y+tw.y};
-  state.ui_vertices[state.num_ui_vertices++] = {x.x,     x.y+w.y, t.x,      t.y+tw.y};
-  state.ui_elements[state.num_ui_elements++] = e+0;
-  state.ui_elements[state.num_ui_elements++] = e+1;
-  state.ui_elements[state.num_ui_elements++] = e+2;
-  state.ui_elements[state.num_ui_elements++] = e+0;
-  state.ui_elements[state.num_ui_elements++] = e+2;
-  state.ui_elements[state.num_ui_elements++] = e+3;
-
 }
 
 static void update_player(float dt) {
@@ -1876,6 +1924,30 @@ static void update_player(float dt) {
   }
 }
 
+static void update_water_texture(float dt) {
+  static float offset;
+  offset += dt * 0.01f;
+
+  const int w = state.water_texture_pos.x1 - state.water_texture_pos.x0;
+  const int h = state.water_texture_pos.y1 - state.water_texture_pos.y0;
+
+  for (int sides = 0; sides < 3; ++sides) {
+    u8 *p = &state.water_texture_buffer[sides*(w/3)*3];
+    for (int x = 0; x < w; ++x) {
+      for (int y = 0; y < h; ++y) {
+        float f = perlin(offset + x*0.25f, y*0.10f, 0);
+        f = clamp(f, 0.0f, 1.0f);
+        *p++ = 0;
+        *p++ = UINT8_MAX * (0.5f + 0.5f*f);
+        *p++ = UINT8_MAX * (0.5f + 0.5f*f);
+      }
+      p += 3*2*w/3;
+    }
+  }
+  glBindTexture(GL_TEXTURE_2D, state.gl_block_texture);
+  glTexSubImage2D(GL_TEXTURE_2D, 0, state.water_texture_pos.x0, state.water_texture_pos.y0, w, h, GL_RGB, GL_UNSIGNED_BYTE, state.water_texture_buffer);
+}
+
 // int WINAPI wWinMain(HINSTANCE /*hInstance*/, HINSTANCE /*hPrevInstance*/, PWSTR /*pCmdLine*/, int /*nCmdShow*/) {
 #ifdef OS_WINDOWS
 int wmain(int, wchar_t *[], wchar_t *[] )
@@ -1951,6 +2023,8 @@ int main(int argc, const char **argv)
     if (state.keypressed[KEY_FLYDOWN])
       --state.selected_item;
     state.selected_item = clamp(state.selected_item, 0, (int)ARRAY_LEN(state.inventory)-1);
+
+    update_water_texture(dt);
 
     // update player
     v3 before = state.player_pos;
@@ -2129,7 +2203,7 @@ int main(int argc, const char **argv)
       glBindVertexArray(0);
     }
 
-    // @render_text
+    // @rendertext
     {
       glEnable(GL_BLEND);
       glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
