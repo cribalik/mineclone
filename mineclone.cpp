@@ -1343,6 +1343,10 @@ static void remove_blockface(Block b, BlockType type, Direction d) {
   else state.block_vertices_dirty = true;
 }
 
+static void remove_blockface(Block b, Direction d) {
+  remove_blockface(b, get_blocktype(b), d);
+}
+
 static void hide_block(Block b, bool create_new_faces = true) {
   BlockType t = get_blocktype(b);
 
@@ -1374,12 +1378,29 @@ static void show_block(Block b, bool hide_adjacent_faces = true) {
 
   // hide the faces of the adjacent blocks that no longer can be seen
   if (hide_adjacent_faces) {
-    for (int d = 0; d < DIRECTION_MAX; ++d)
-      remove_blockface(get_adjacent_block(b, (Direction)d), t, invert_direction((Direction)d));
+    // special case for water: if it is water, we only want to hide other water blocks
+    if (t == BLOCKTYPE_WATER) {
+      for (int d = 0; d < DIRECTION_MAX; ++d) {
+        Block adj = get_adjacent_block(b, (Direction)d);
+        BlockType tt = get_blocktype(adj);
+        if (tt == BLOCKTYPE_WATER)
+          remove_blockface(adj, tt, invert_direction((Direction)d));
+      }
+    }
+    // if it is transparent, we want to keep all adjacent block faces
+    else if (!blocktype_is_transparent(t)) {
+      for (int d = 0; d < DIRECTION_MAX; ++d) {
+        Block adj = get_adjacent_block(b, (Direction)d);
+        BlockType tt = get_blocktype(adj);
+        remove_blockface(adj, tt, invert_direction((Direction)d));
+      }
+    }
   }
 
+
+
   // draw sides that face transparent blocks
-  for (int d = 0; d < 6; ++d) {
+  for (int d = 0; d < DIRECTION_MAX; ++d) {
     BlockType tt = get_blocktype(get_adjacent_block(b, (Direction)d));
 
     // no need to draw faces against opaque blocks
