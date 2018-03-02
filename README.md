@@ -1,4 +1,6 @@
-# mineclone - a 7 day challenge
+# mineclone
+
+The Mineclone projekt is a 7-day challenge to implement a minecraft clone from scratch in C++.
 
 ![mineclone screenshot](screenshot.png)
 
