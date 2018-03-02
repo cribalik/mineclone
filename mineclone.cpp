@@ -1,6 +1,8 @@
 // TODO:
 //
-// * water
+// * water physics
+//
+// * more ui (menus, buttons, etc..)
 //
 // * transparent blocks (leaves etc)
 //
@@ -642,9 +644,10 @@ static const char *block_fragment_shader = R"FSHADER(
         shade = 0.1;
         break;
     }
-    vec3 c = texture(utexture, ftpos).xyz;
+    vec4 t = texture(utexture, ftpos);
+    vec3 c = t.xyz;
     c = c * shade;
-    fcolor = vec4(c, 1.0f);
+    fcolor = vec4(c, t.w);
   }
   )FSHADER";
 
@@ -967,20 +970,19 @@ static struct GameState {
     bool clicked_right;
   };
 
+  Camera camera;
+
   // block graphics data
   struct {
-    Camera camera;
-
     // block
     #define MAX_BLOCK_VERTICES 1024*1024
     #define MAX_BLOCK_ELEMENTS (MAX_BLOCK_VERTICES*2)
+
     bool block_vertices_dirty;
     BlockVertex block_vertices[MAX_BLOCK_VERTICES];
     int num_block_vertices;
-
-    unsigned int block_elements[MAX_BLOCK_VERTICES*2];
+    unsigned int block_elements[MAX_BLOCK_ELEMENTS];
     int num_block_elements;
-
     int free_faces[MAX_BLOCK_VERTICES];
     int num_free_faces;
 
@@ -993,9 +995,19 @@ static struct GameState {
     GLuint gl_block_texture_uniform;
     GLuint gl_block_texture;
 
+    // transparent blocks
+    bool transparent_block_vertices_dirty;
+    BlockVertex transparent_block_vertices[MAX_BLOCK_VERTICES];
+    int num_transparent_block_vertices;
+    unsigned int transparent_block_elements[MAX_BLOCK_ELEMENTS];
+    int num_transparent_block_elements;
+    int free_transparent_faces[MAX_BLOCK_VERTICES];
+    int num_free_transparent_faces;
+    GLuint gl_transparent_block_vao, gl_transparent_block_vbo, gl_transparent_block_ebo;
+
     // where in the texture buffer is the water texture, so we can manipulate it
     r2i water_texture_pos;
-    u8 water_texture_buffer[16*16*3*3];
+    u8 water_texture_buffer[16*16*4*3]; // 4 - rgba, 3 - 3 sides
   };
 
   // ui graphics data
@@ -1139,8 +1151,20 @@ static void blocktype_to_texpos(BlockType t, float *x, float *y, float *w, float
 }
 
 static void push_block_face(Block block, BlockType type, Direction dir) {
+  const bool transparent = blocktype_is_transparent(type);
+
+  BlockVertex *block_vertices = transparent ? state.transparent_block_vertices : state.block_vertices;
+  int &num_block_vertices = transparent ? state.num_transparent_block_vertices : state.num_block_vertices;
+  int *free_faces = transparent ? state.free_transparent_faces : state.free_faces;
+  int &num_free_faces = transparent ? state.num_free_transparent_faces : state.num_free_faces;
+  unsigned int *block_elements = transparent ? state.transparent_block_elements : state.block_elements;
+  int &num_block_elements = transparent ? state.num_transparent_block_elements : state.num_block_elements;
+
+  if (transparent) state.transparent_block_vertices_dirty = true;
+  else             state.block_vertices_dirty = true;
+
   // too many block_vertices?
-  if (state.num_block_vertices + 4 >= ARRAY_LEN(state.block_vertices) || state.num_block_elements + 6 > ARRAY_LEN(state.block_elements))
+  if (num_block_vertices + 4 >= MAX_BLOCK_VERTICES || num_block_elements + 6 > MAX_BLOCK_ELEMENTS)
     return;
   // does face already exist?
   int &vertex_pos = get_block_vertex_pos(block, dir);
@@ -1160,77 +1184,79 @@ static void push_block_face(Block block, BlockType type, Direction dir) {
 
   int v, el;
   // check if there are any free vertex slots
-  if (state.num_free_faces) {
-    int i = state.free_faces[--state.num_free_faces];
+  if (num_free_faces) {
+    int i = free_faces[--num_free_faces];
     v = i*4; // 4 block_vertices per face
     el = i*6; // 6 block_elements per face
   }
   else {
     // else push at the end
-    v = state.num_block_vertices;
-    state.num_block_vertices += 4;
-    el = state.num_block_elements;
-    state.num_block_elements += 6;
+    v = num_block_vertices;
+    num_block_vertices += 4;
+    el = num_block_elements;
+    num_block_elements += 6;
   }
   vertex_pos = v/4;
 
+
   switch (dir) {
     case DIRECTION_UP: {
-      state.block_vertices[v] = {p.x,      p.y,      p2.z, ttop.x, ttop.y, DIRECTION_UP};
-      state.block_vertices[v+1] = {p2.x, p.y,      p2.z, ttop2.x, ttop.y, DIRECTION_UP};
-      state.block_vertices[v+2] = {p2.x, p2.y, p2.z, ttop2.x, ttop2.y, DIRECTION_UP};
-      state.block_vertices[v+3] = {p.x,      p2.y, p2.z, ttop.x, ttop2.y, DIRECTION_UP};
+      block_vertices[v] = {p.x,      p.y,      p2.z, ttop.x, ttop.y, DIRECTION_UP};
+      block_vertices[v+1] = {p2.x, p.y,      p2.z, ttop2.x, ttop.y, DIRECTION_UP};
+      block_vertices[v+2] = {p2.x, p2.y, p2.z, ttop2.x, ttop2.y, DIRECTION_UP};
+      block_vertices[v+3] = {p.x,      p2.y, p2.z, ttop.x, ttop2.y, DIRECTION_UP};
     } break;
 
     case DIRECTION_DOWN: {
-      state.block_vertices[v] = {p2.x, p.y,      p.z, tbot.x, tbot.y, DIRECTION_DOWN};
-      state.block_vertices[v+1] = {p.x,      p.y,      p.z, tbot2.x, tbot.y, DIRECTION_DOWN};
-      state.block_vertices[v+2] = {p.x,      p2.y, p.z, tbot2.x, tbot2.y, DIRECTION_DOWN};
-      state.block_vertices[v+3] = {p2.x, p2.y, p.z, tbot.x, tbot2.y, DIRECTION_DOWN};
+      block_vertices[v] = {p2.x, p.y,      p.z, tbot.x, tbot.y, DIRECTION_DOWN};
+      block_vertices[v+1] = {p.x,      p.y,      p.z, tbot2.x, tbot.y, DIRECTION_DOWN};
+      block_vertices[v+2] = {p.x,      p2.y, p.z, tbot2.x, tbot2.y, DIRECTION_DOWN};
+      block_vertices[v+3] = {p2.x, p2.y, p.z, tbot.x, tbot2.y, DIRECTION_DOWN};
     } break;
 
     case DIRECTION_X: {
-      state.block_vertices[v] = {p2.x, p.y,      p.z,      tside.x, tside.y, DIRECTION_X};
-      state.block_vertices[v+1] = {p2.x, p2.y, p.z,      tside2.x, tside.y, DIRECTION_X};
-      state.block_vertices[v+2] = {p2.x, p2.y, p2.z, tside2.x, tside2.y, DIRECTION_X};
-      state.block_vertices[v+3] = {p2.x, p.y,      p2.z, tside.x, tside2.y, DIRECTION_X};
+      block_vertices[v] = {p2.x, p.y,      p.z,      tside.x, tside.y, DIRECTION_X};
+      block_vertices[v+1] = {p2.x, p2.y, p.z,      tside2.x, tside.y, DIRECTION_X};
+      block_vertices[v+2] = {p2.x, p2.y, p2.z, tside2.x, tside2.y, DIRECTION_X};
+      block_vertices[v+3] = {p2.x, p.y,      p2.z, tside.x, tside2.y, DIRECTION_X};
     } break;
 
     case DIRECTION_Y: {
-      state.block_vertices[v] = {p2.x, p2.y, p.z,      tside.x, tside.y, DIRECTION_Y};
-      state.block_vertices[v+1] = {p.x,      p2.y, p.z,      tside2.x, tside.y, DIRECTION_Y};
-      state.block_vertices[v+2] = {p.x,      p2.y, p2.z, tside2.x, tside2.y, DIRECTION_Y};
-      state.block_vertices[v+3] = {p2.x, p2.y, p2.z, tside.x, tside2.y, DIRECTION_Y};
+      block_vertices[v] = {p2.x, p2.y, p.z,      tside.x, tside.y, DIRECTION_Y};
+      block_vertices[v+1] = {p.x,      p2.y, p.z,      tside2.x, tside.y, DIRECTION_Y};
+      block_vertices[v+2] = {p.x,      p2.y, p2.z, tside2.x, tside2.y, DIRECTION_Y};
+      block_vertices[v+3] = {p2.x, p2.y, p2.z, tside.x, tside2.y, DIRECTION_Y};
     } break;
 
     case DIRECTION_MINUS_X: {
-      state.block_vertices[v] = {p.x, p2.y, p.z,      tside.x, tside.y, DIRECTION_MINUS_X};
-      state.block_vertices[v+1] = {p.x, p.y,      p.z,      tside2.x, tside.y, DIRECTION_MINUS_X};
-      state.block_vertices[v+2] = {p.x, p.y,      p2.z, tside2.x, tside2.y, DIRECTION_MINUS_X};
-      state.block_vertices[v+3] = {p.x, p2.y, p2.z, tside.x, tside2.y, DIRECTION_MINUS_X};
+      block_vertices[v] = {p.x, p2.y, p.z,      tside.x, tside.y, DIRECTION_MINUS_X};
+      block_vertices[v+1] = {p.x, p.y,      p.z,      tside2.x, tside.y, DIRECTION_MINUS_X};
+      block_vertices[v+2] = {p.x, p.y,      p2.z, tside2.x, tside2.y, DIRECTION_MINUS_X};
+      block_vertices[v+3] = {p.x, p2.y, p2.z, tside.x, tside2.y, DIRECTION_MINUS_X};
     } break;
 
     case DIRECTION_MINUS_Y: {
-      state.block_vertices[v] = {p.x,      p.y, p.z,      tside.x, tside.y, DIRECTION_MINUS_Y};
-      state.block_vertices[v+1] = {p2.x, p.y, p.z,      tside2.x, tside.y, DIRECTION_MINUS_Y};
-      state.block_vertices[v+2] = {p2.x, p.y, p2.z, tside2.x, tside2.y, DIRECTION_MINUS_Y};
-      state.block_vertices[v+3] = {p.x,      p.y, p2.z, tside.x, tside2.y, DIRECTION_MINUS_Y};
+      block_vertices[v] = {p.x,      p.y, p.z,      tside.x, tside.y, DIRECTION_MINUS_Y};
+      block_vertices[v+1] = {p2.x, p.y, p.z,      tside2.x, tside.y, DIRECTION_MINUS_Y};
+      block_vertices[v+2] = {p2.x, p.y, p2.z, tside2.x, tside2.y, DIRECTION_MINUS_Y};
+      block_vertices[v+3] = {p.x,      p.y, p2.z, tside.x, tside2.y, DIRECTION_MINUS_Y};
     } break;
 
     default: return;
   }
 
-  state.block_elements[el]   = v;
-  state.block_elements[el+1] = v+1;
-  state.block_elements[el+2] = v+2;
-  state.block_elements[el+3] = v;
-  state.block_elements[el+4] = v+2;
-  state.block_elements[el+5] = v+3;
+  block_elements[el]   = v;
+  block_elements[el+1] = v+1;
+  block_elements[el+2] = v+2;
+  block_elements[el+3] = v;
+  block_elements[el+4] = v+2;
+  block_elements[el+5] = v+3;
 }
 
 static void block_vertices_reset() {
   // make first 4 block_vertices contain the null block
   state.num_block_vertices = 4; state.num_block_elements = 6;
+  state.num_transparent_block_vertices = 4; state.num_transparent_block_elements = 6;
 }
 
 // TODO: maybe have a cache for these
@@ -1299,44 +1325,57 @@ static bool is_block_in_bounds(Block b) {
   return b.x - p.x < NUM_BLOCKS_x/2 && b.x - p.x >= -NUM_BLOCKS_x/2 && b.y - p.y < NUM_BLOCKS_y/2 && b.y - p.y >= -NUM_BLOCKS_y/2 && b.z - p.z < NUM_BLOCKS_z/2 && b.z - p.z >= -NUM_BLOCKS_z/2;
 }
 
-static void remove_blockface(Block b, Direction d) {
+static void remove_blockface(Block b, BlockType type, Direction d) {
   int &vertex_pos = get_block_vertex_pos(b, (Direction)d);
   if (!vertex_pos)
     return;
-  state.free_faces[state.num_free_faces++] = vertex_pos;
-  memset(state.block_vertices+(vertex_pos*4), 0, sizeof(*state.block_vertices)*4);
+
+  const bool transparent = blocktype_is_transparent(type);
+  BlockVertex *block_vertices = transparent ? state.transparent_block_vertices : state.block_vertices;
+  int *free_faces = transparent ? state.free_transparent_faces : state.free_faces;
+  int &num_free_faces = transparent ? state.num_free_transparent_faces : state.num_free_faces;
+
+  free_faces[num_free_faces++] = vertex_pos;
+  memset(block_vertices+(vertex_pos*4), 0, sizeof(*block_vertices)*4);
   vertex_pos = 0;
+
+  if (transparent) state.transparent_block_vertices_dirty = true;
+  else state.block_vertices_dirty = true;
 }
 
 static void hide_block(Block b, bool create_new_faces = true) {
+  BlockType t = get_blocktype(b);
+
   // remove the visible faces of this block
   if (is_block_in_bounds(b)) {
     for (int d = 0; d < DIRECTION_MAX; ++d)
-      remove_blockface(b, (Direction)d);
+      remove_blockface(b, t, (Direction)d);
   }
 
   // and add the newly visible faces of the adjacent blocks
-  if (create_new_faces) {
+  if (create_new_faces && (blocktype_is_transparent(t) == false || t == BLOCKTYPE_WATER)) {
     for (int d = 0; d < DIRECTION_MAX; ++d) {
       Block adj = get_adjacent_block(b, (Direction)d);
-      if (!is_block_in_bounds(adj)) continue;
-      BlockType t = get_blocktype(adj);
-      if (t != BLOCKTYPE_AIR)
-        push_block_face(adj, t, invert_direction((Direction)d));
+      if (!is_block_in_bounds(adj))
+        continue;
+
+      BlockType tt = get_blocktype(adj);
+      if (tt == BLOCKTYPE_AIR)
+        continue;
+      push_block_face(adj, tt, invert_direction((Direction)d));
     }
   }
-  state.block_vertices_dirty = true;
 }
 
 static void show_block(Block b, bool hide_adjacent_faces = true) {
   BlockType t = get_blocktype(b);
-  if (t == BLOCKTYPE_AIR) return;
+  if (t == BLOCKTYPE_AIR)
+    return;
 
   // hide the faces of the adjacent blocks that no longer can be seen
   if (hide_adjacent_faces) {
-    Block b;
     for (int d = 0; d < DIRECTION_MAX; ++d)
-      remove_blockface(get_adjacent_block(b, (Direction)d), invert_direction((Direction)d));
+      remove_blockface(get_adjacent_block(b, (Direction)d), t, invert_direction((Direction)d));
   }
 
   // draw sides that face transparent blocks
@@ -1601,7 +1640,7 @@ static GLuint texture_load(const char *filename) {
   glBindTexture(GL_TEXTURE_2D, tex);
 
   // load texture
-  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, w, h, 0, GL_RGB, GL_UNSIGNED_BYTE, data);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGB, GL_UNSIGNED_BYTE, data);
 
   stbi_image_free(data);
 
@@ -1610,7 +1649,7 @@ static GLuint texture_load(const char *filename) {
   state.water_texture_pos.x1 = w;
   state.water_texture_pos.y1 = h*(BLOCKTYPES_MAX - BLOCKTYPE_WATER)/(BLOCKTYPES_MAX - 1);
   int water_texture_size = (state.water_texture_pos.x1 - state.water_texture_pos.x0) * (state.water_texture_pos.y1 - state.water_texture_pos.y0);
-  if (water_texture_size*3 != ARRAY_LEN(state.water_texture_buffer))
+  if (water_texture_size*4 != ARRAY_LEN(state.water_texture_buffer))
     die("Maths went wrong, expected %lu but got %i", ARRAY_LEN(state.water_texture_buffer), water_texture_size);
 
   return tex;
@@ -1652,6 +1691,33 @@ static void block_gl_buffer_create() {
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_MIRRORED_REPEAT);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
+  glBindVertexArray(0);
+
+
+  // transparent buffer
+  glGenVertexArrays(1, &vao);
+  glGenBuffers(1, &vbo);
+  glGenBuffers(1, &ebo);
+
+  glBindVertexArray(vao);
+
+  glBindBuffer(GL_ARRAY_BUFFER, vbo);
+  glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
+
+  glEnableVertexAttribArray(0);
+  glEnableVertexAttribArray(1);
+  glEnableVertexAttribArray(2);
+  glVertexAttribIPointer(0, 3, GL_SHORT, sizeof(BlockVertex), (GLvoid*)0);
+  glVertexAttribPointer(1, 2, GL_UNSIGNED_SHORT, GL_TRUE, sizeof(BlockVertex), (GLvoid*)offsetof(BlockVertex, tex));
+  glVertexAttribIPointer(2, 1, GL_UNSIGNED_BYTE, sizeof(BlockVertex), (GLvoid*)offsetof(BlockVertex, direction));
+  gl_ok_or_die;
+
+  state.gl_transparent_block_vao = vao;
+  state.gl_transparent_block_vbo = vbo;
+  state.gl_transparent_block_ebo = ebo;
+
+  glBindVertexArray(0);
 }
 
 static void ui_gl_buffer_create() {
@@ -1686,6 +1752,8 @@ static void ui_gl_buffer_create() {
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_MIRRORED_REPEAT);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
+  glBindVertexArray(0);
 }
 
 static void text_gl_buffer_create() {
@@ -1739,6 +1807,8 @@ static void text_gl_buffer_create() {
 
   state.gl_text_offset_uniform = glGetUniformLocation(state.gl_text_shader, "utextoffset");
   state.gl_text_color_uniform = glGetUniformLocation(state.gl_text_shader, "utextcolor");
+
+  glBindVertexArray(0);
 }
 
 static void push_ui_quad(v2 x, v2 w, v2 t, v2 tw) {
@@ -1759,9 +1829,9 @@ static void gamestate_init() {
   state.camera.look = {0.0f, 1.0f};
   state.player_pos = {10.0f, 10.0f, 50.0f};
   state.block_vertices_dirty = true;
+  state.transparent_block_vertices_dirty = true;
   block_vertices_reset();
   generate_block_mesh(state.player_pos);
-
 }
 
 // fills out the input fields in GameState
@@ -1875,6 +1945,7 @@ static void update_player(float dt) {
       break;
     }
   }
+  // state.player_pos += state.player_vel * dt;
 
   // clicked - remove block
   if (state.clicked) {
@@ -1926,13 +1997,13 @@ static void update_player(float dt) {
 
 static void update_water_texture(float dt) {
   static float offset;
-  offset += dt * 0.01f;
+  offset += dt * 0.03f;
 
   const int w = state.water_texture_pos.x1 - state.water_texture_pos.x0;
   const int h = state.water_texture_pos.y1 - state.water_texture_pos.y0;
 
   for (int sides = 0; sides < 3; ++sides) {
-    u8 *p = &state.water_texture_buffer[sides*(w/3)*3];
+    u8 *p = &state.water_texture_buffer[sides*(w/3)*4];
     for (int x = 0; x < w; ++x) {
       for (int y = 0; y < h; ++y) {
         float f = perlin(offset + x*0.25f, y*0.10f, 0);
@@ -1940,12 +2011,13 @@ static void update_water_texture(float dt) {
         *p++ = 0;
         *p++ = UINT8_MAX * (0.5f + 0.5f*f);
         *p++ = UINT8_MAX * (0.5f + 0.5f*f);
+        *p++ = UINT8_MAX * 0.3f;
       }
-      p += 3*2*w/3;
+      p += 4*2*w/3;
     }
   }
   glBindTexture(GL_TEXTURE_2D, state.gl_block_texture);
-  glTexSubImage2D(GL_TEXTURE_2D, 0, state.water_texture_pos.x0, state.water_texture_pos.y0, w, h, GL_RGB, GL_UNSIGNED_BYTE, state.water_texture_buffer);
+  glTexSubImage2D(GL_TEXTURE_2D, 0, state.water_texture_pos.x0, state.water_texture_pos.y0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, state.water_texture_buffer);
 }
 
 // int WINAPI wWinMain(HINSTANCE /*hInstance*/, HINSTANCE /*hPrevInstance*/, PWSTR /*pCmdLine*/, int /*nCmdShow*/) {
@@ -2102,8 +2174,12 @@ int main(int argc, const char **argv)
 
     // @renderblocks
     {
+      glEnable(GL_BLEND);
+      glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
       glEnable(GL_CULL_FACE);
+      // glDisable(GL_CULL_FACE);
       glEnable(GL_DEPTH_TEST);
+      // glDisable(GL_DEPTH_TEST);
       glUseProgram(state.gl_block_shader);
 
       // camera
@@ -2140,6 +2216,23 @@ int main(int argc, const char **argv)
 
       // draw
       glDrawElements(GL_TRIANGLES, state.num_block_elements, GL_UNSIGNED_INT, 0);
+      glBindVertexArray(0);
+      gl_ok_or_die;
+
+
+      // @transparentblocks
+      glBindVertexArray(state.gl_transparent_block_vao);
+
+      if (state.transparent_block_vertices_dirty) {
+        // puts("resending block_vertices");
+        glBindBuffer(GL_ARRAY_BUFFER, state.gl_transparent_block_vbo);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, state.gl_transparent_block_ebo);
+        glBufferData(GL_ARRAY_BUFFER, state.num_transparent_block_vertices*sizeof(*state.transparent_block_vertices), state.transparent_block_vertices, GL_DYNAMIC_DRAW);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, state.num_transparent_block_elements*sizeof(*state.transparent_block_elements), state.transparent_block_elements, GL_DYNAMIC_DRAW);
+        state.transparent_block_vertices_dirty = false;
+      }
+
+      glDrawElements(GL_TRIANGLES, state.num_transparent_block_elements, GL_UNSIGNED_INT, 0);
       glBindVertexArray(0);
       gl_ok_or_die;
     }
@@ -2231,6 +2324,7 @@ int main(int argc, const char **argv)
       glUniform4f(state.gl_text_color_uniform, 0.99f, 0.99f, 0.99f, 1.0f);
       glUniform2f(state.gl_text_offset_uniform, 0.0f, 0.0f);
       glDrawArrays(GL_TRIANGLES, 0, state.num_text_vertices);
+      glBindVertexArray(0);
     }
 
     SDL_GL_SwapWindow(window);
