@@ -1,6 +1,12 @@
 // TODO:
 //
-// * water physics
+// * basic day cycle
+//
+// * shadows
+//
+// * water reflection
+//
+// * movement through water
 //
 // * more ui (menus, buttons, etc..)
 //
@@ -10,13 +16,15 @@
 //
 // * persist block changes to disk
 //
-// * crafting
+// * crafting ui
 //
 // * optimize loading blocks (data streaming in opengl for blocks + load new blocks in separate thread)
 //
 // * better terrain (different block types)
 //
-// * inventory
+// * inventory ui
+//
+// * skybox?
 //
 ////
 
@@ -358,11 +366,6 @@ static float perlin(float x, float y, float z) {
                          lerp(u, perlin__grad(p[AB+1], x  , y-1, z-1 ),
                                  perlin__grad(p[BB+1], x-1, y-1, z-1 )))) + 1.0f )/2.0f;
 }
-
-
-struct r2 {
-  float x0,y0,x1,y1;
-};
 
 struct r2i {
   int x0,y0,x1,y1;
@@ -1052,6 +1055,7 @@ static struct GameState {
   v3 player_pos;
   bool player_on_ground;
 
+  bool render_quickmenu;
   bool is_inventory_open;
   int selected_item;
   Item inventory[8];
@@ -1848,9 +1852,10 @@ static void push_ui_quad(v2 x, v2 w, v2 t, v2 tw) {
 
 static void gamestate_init() {
   state.camera.look = {0.0f, 1.0f};
-  state.player_pos = {10.0f, 10.0f, 50.0f};
+  state.player_pos = {300.0f, 300.0f, 50.0f};
   state.block_vertices_dirty = true;
   state.transparent_block_vertices_dirty = true;
+  state.render_quickmenu = true;
   block_vertices_reset();
   generate_block_mesh(state.player_pos);
 }
@@ -2259,7 +2264,7 @@ int main(int argc, const char **argv)
     }
 
     // @renderui
-    {
+    if (state.render_quickmenu) {
       glDisable(GL_DEPTH_TEST);
       state.num_ui_vertices = state.num_ui_elements = 0;
 
