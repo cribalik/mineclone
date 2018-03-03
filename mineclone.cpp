@@ -40,6 +40,7 @@
 #include <math.h>
 #include "array.hpp"
 #define STB_IMAGE_IMPLEMENTATION
+#define STB_IMAGE_STATIC
 #include "stb_image.h"
 #include "GL/gl3w.c"
 #include <stdint.h>
@@ -876,7 +877,7 @@ static T* next(ColonyIter<T,N> &iter) {
 #define For(container) decltype(container)::Iterator it; for(auto _iterator = iter(container); it = next(_iterator);)
 #endif
 
-static const int NUM_BLOCKS_x = 64, NUM_BLOCKS_y = 64, NUM_BLOCKS_z = 128;
+static const int NUM_BLOCKS_x = 256, NUM_BLOCKS_y = 256, NUM_BLOCKS_z = 128;
 
 struct BlockDiff {
   Block block;
@@ -964,6 +965,9 @@ struct Glyph {
 
 static const v3 CAMERA_OFFSET = v3{0.0f, 0.0f, 1.0f};
 static struct GameState {
+  SDL_Window *window;
+  float screen_ratio;
+
   // input, see read_input()
   struct {
     bool keyisdown[KEY_MAX];
@@ -1287,6 +1291,7 @@ static BlockType get_blocktype(Block b) {
     return BLOCKTYPE_DIRT;
   if (b.z < waterlevel)
     return BLOCKTYPE_WATER;
+
   // flying blocks clusters
   if (perlin(b.x*0.05f, b.y*0.05f, b.z*0.05f) > 0.8)
     return BLOCKTYPE_CLOUD;
@@ -1400,8 +1405,6 @@ static void show_block(Block b, bool hide_adjacent_faces = true) {
       }
     }
   }
-
-
 
   // draw sides that face transparent blocks
   for (int d = 0; d < DIRECTION_MAX; ++d) {
@@ -1554,24 +1557,26 @@ static Vec<Collision> collision(v3 p0, v3 p1, float dt, v3 size, OPTIONAL v3 *p_
     if (!did_hit) break;
 
     hits[num_hits++] = {which_block_was_hit, normal};
+
+
+    // go up against the wall
+    // dp is the movement vector
+    // a is the part that goes up to the wall
+    normal = normalize(normal);
+
+    v3 dp = p1 - p0;
+    float dot = dp*normal;
+
+    v3 a = (normal * dot) * time;
+    // back off a bit. TODO: we want to back off in the movement direction, not the normal direction :O
+    a = a + normal * 0.0001f;
+    p1 = p0 + a;
+
     if (glide) {
       /**
        * Glide along the wall
-       *
-       * dp is the movement vector
-       * a is the part that goes up to the wall
        * b is the part that glides beyond the wall
        */
-      normal = normalize(normal);
-
-      v3 dp = p1 - p0;
-      float dot = dp*normal;
-
-      // go up against the wall
-      v3 a = (normal * dot) * time;
-      // back off a bit. TODO: we want to back off in the movement direction, not the normal direction :O
-      a = a + normal * 0.0001f;
-      p1 = p0 + a;
 
       // remove the part that goes into the wall, and glide the rest
       v3 b = dp - dot * normal;
@@ -1580,7 +1585,10 @@ static Vec<Collision> collision(v3 p0, v3 p1, float dt, v3 size, OPTIONAL v3 *p_
 
       p1 = p1 + b;
     } else {
-      // TODO: implement
+      // TODO: implement properly.
+      // Good enough at the moment though since it's only used for rays
+      if (vel_out)
+        *vel_out = {};
       break;
     }
   }
@@ -1812,7 +1820,9 @@ static void text_gl_buffer_create() {
   FILE *f = mine_fopen(filename, "rb");
   if (!f)
     die("Failed to open ttf file %s\n", filename);
-  fread(ttf_mem, 1, BUFFER_SIZE, f);
+  int num_read = fread(ttf_mem, 1, BUFFER_SIZE, f);
+  if (num_read <= 0)
+    die("Failed to read from file %s\n", filename);
 
   int res = stbtt_BakeFontBitmap(ttf_mem, 0, height, bitmap, tex_w, tex_h, first_char, last_char - first_char, (stbtt_bakedchar*) state.glyphs);
   if (res <= 0)
@@ -1856,8 +1866,10 @@ static void gamestate_init() {
   state.block_vertices_dirty = true;
   state.transparent_block_vertices_dirty = true;
   state.render_quickmenu = true;
+  puts("generating block mesh...");
   block_vertices_reset();
   generate_block_mesh(state.player_pos);
+  puts("done");
 }
 
 // fills out the input fields in GameState
@@ -2005,7 +2017,6 @@ static void update_player(float dt) {
     debug(if (hits.size != 1) die("Multiple collisions when not gliding? Somethings wrong"));
 
     d = normal_to_direction(hits.items[0].normal);
-    printf("%f %f %f : %i\n", hits.items[0].normal.x, hits.items[0].normal.y, hits.items[0].normal.z, (int)d);
     b = get_adjacent_block(hits.items[0].block, d);
     if (state.inventory[state.selected_item].type != ITEM_BLOCK || state.inventory[state.selected_item].block.num == 0)
       goto skip_blockplace;
@@ -2046,13 +2057,7 @@ static void update_water_texture(float dt) {
   glTexSubImage2D(GL_TEXTURE_2D, 0, state.water_texture_pos.x0, state.water_texture_pos.y0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, state.water_texture_buffer);
 }
 
-// int WINAPI wWinMain(HINSTANCE /*hInstance*/, HINSTANCE /*hPrevInstance*/, PWSTR /*pCmdLine*/, int /*nCmdShow*/) {
-#ifdef OS_WINDOWS
-int wmain(int, wchar_t *[], wchar_t *[] )
-#else
-int main(int argc, const char **argv)
-#endif
-{
+static void sdl_init() {
   /* Fix for some builds of SDL 2.0.4, see https://bugs.gentoo.org/show_bug.cgi?id=610326 */
   #ifdef OS_LINUX
     setenv("XMODIFIERS", "@im=none", 1);
@@ -2061,7 +2066,6 @@ int main(int argc, const char **argv)
   // init sdl
   sdl_try(SDL_Init(SDL_INIT_EVERYTHING));
   atexit(SDL_Quit);
-
 
   SDL_LogSetAllPriority(SDL_LOG_PRIORITY_WARN); 
 
@@ -2074,18 +2078,28 @@ int main(int argc, const char **argv)
   sdl_try(SDL_SetRelativeMouseMode(SDL_TRUE));
 
   // create window
-  SDL_Window *window = SDL_CreateWindow("mineclone", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 800, 600, SDL_WINDOW_OPENGL);
+  state.window = SDL_CreateWindow("mineclone", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 800, 600, SDL_WINDOW_OPENGL);
   // SDL_Window *window = SDL_CreateWindow("mineclone", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1920, 1080, SDL_WINDOW_OPENGL | SDL_WINDOW_BORDERLESS | SDL_WINDOW_FULLSCREEN);
-  if (!window) sdl_die("Couldn't create window");
+  if (!state.window) sdl_die("Couldn't create window");
   int screenW, screenH;
-  SDL_GetWindowSize(window, &screenW, &screenH);
+  SDL_GetWindowSize(state.window, &screenW, &screenH);
   if (!screenW || !screenH) sdl_die("Invalid screen dimensions: %i,%i", screenW, screenH);
-  const float screen_ratio = (float)screenH / (float)screenW;
+  state.screen_ratio = (float)screenH / (float)screenW;
 
   // create glcontext
-  SDL_GLContext glcontext = SDL_GL_CreateContext(window);
+  SDL_GLContext glcontext = SDL_GL_CreateContext(state.window);
   if (!glcontext) die("Failed to create context");
+}
 
+// int WINAPI wWinMain(HINSTANCE /*hInstance*/, HINSTANCE /*hPrevInstance*/, PWSTR /*pCmdLine*/, int /*nCmdShow*/) {
+#ifdef OS_WINDOWS
+int wmain(int, wchar_t *[], wchar_t *[] )
+#else
+int main(int argc, const char **argv)
+#endif
+{
+  printf("%lu %lu %lu %lu %lu\n", sizeof(state)/1024/1024, sizeof(state.block_vertices)/1024/1024, sizeof(state.block_elements)/1024/1024, sizeof(state.transparent_block_vertices)/1024/1024, sizeof(state.transparent_block_elements)/1024/1024);
+  sdl_init();
   // get gl3w to fetch opengl function pointers
   gl3wInit();
 
@@ -2107,7 +2121,6 @@ int main(int argc, const char **argv)
     // time
     const float dt = clamp((SDL_GetTicks() - time)/(1000.0f/60.0f), 0.33f, 3.0f);
     time = SDL_GetTicks();
-    if (loopindex%100 == 0) printf("fps: %f\n", dt*60.0f);
 
     // read input
     read_input();
@@ -2181,6 +2194,8 @@ int main(int argc, const char **argv)
     #endif
 
     if (loopindex%20 == 0) {
+      if (loopindex%100 == 0)
+        printf("fps: %f\n", dt*60.0f);
       // printf("player pos: %f %f %f\n", state.player_pos.x, state.player_pos.y, state.player_pos.z);
       // printf("num_block_vertices: %lu\n", state.num_block_vertices*sizeof(state.block_vertices[0]));
       // printf("num free block faces: %i/%lu\n", state.num_free_faces, ARRAY_LEN(state.free_faces));
@@ -2212,7 +2227,7 @@ int main(int argc, const char **argv)
       const float fov = PI/3.0f;
       const float nearz = 0.3f;
       const float farz = 300.0f;
-      const m4 camera = camera__projection_matrix(&state.camera, state.player_pos + CAMERA_OFFSET, fov, nearz, farz, screen_ratio);
+      const m4 camera = camera__projection_matrix(&state.camera, state.player_pos + CAMERA_OFFSET, fov, nearz, farz, state.screen_ratio);
       glUniformMatrix4fv(state.gl_camera_uniform, 1, GL_TRUE, camera.d);
       glGetUniformLocation(state.gl_block_shader, "far");
       glGetUniformLocation(state.gl_block_shader, "nearsize");
@@ -2353,7 +2368,7 @@ int main(int argc, const char **argv)
       glBindVertexArray(0);
     }
 
-    SDL_GL_SwapWindow(window);
+    SDL_GL_SwapWindow(state.window);
   }
 
   return 0;
