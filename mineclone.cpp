@@ -877,7 +877,7 @@ static T* next(ColonyIter<T,N> &iter) {
 #define For(container) decltype(container)::Iterator it; for(auto _iterator = iter(container); it = next(_iterator);)
 #endif
 
-static const int NUM_BLOCKS_x = 256, NUM_BLOCKS_y = 256, NUM_BLOCKS_z = 128;
+static const int NUM_BLOCKS_x = 64, NUM_BLOCKS_y = 64, NUM_BLOCKS_z = 128;
 
 struct BlockDiff {
   Block block;
@@ -982,6 +982,7 @@ static struct GameState {
   // block graphics data
   struct {
     // block
+    #define NUM_BLOCK_SIDES 3
     #define MAX_BLOCK_VERTICES 1024*1024
     #define MAX_BLOCK_ELEMENTS (MAX_BLOCK_VERTICES*2)
 
@@ -1014,7 +1015,7 @@ static struct GameState {
 
     // where in the texture buffer is the water texture, so we can manipulate it
     r2i water_texture_pos;
-    u8 water_texture_buffer[16*16*4*3]; // 4 - rgba, 3 - 3 sides
+    u8 water_texture_buffer[16*16*4*NUM_BLOCK_SIDES]; // 4 - rgba
   };
 
   // ui graphics data
@@ -2034,11 +2035,11 @@ static void update_water_texture(float dt) {
   static float offset;
   offset += dt * 0.03f;
 
-  const int w = state.water_texture_pos.x1 - state.water_texture_pos.x0;
+  const int w = (state.water_texture_pos.x1 - state.water_texture_pos.x0)/NUM_BLOCK_SIDES;
   const int h = state.water_texture_pos.y1 - state.water_texture_pos.y0;
 
-  for (int sides = 0; sides < 3; ++sides) {
-    u8 *p = &state.water_texture_buffer[sides*(w/3)*4];
+  for (int block_sides = 0; block_sides < NUM_BLOCK_SIDES; ++block_sides) {
+    u8 *p = &state.water_texture_buffer[block_sides*w*4];
     for (int x = 0; x < w; ++x) {
       for (int y = 0; y < h; ++y) {
         float f = perlin(offset + x*0.25f, y*0.10f, 0);
@@ -2048,11 +2049,11 @@ static void update_water_texture(float dt) {
         *p++ = UINT8_MAX * (0.5f + 0.5f*f);
         *p++ = UINT8_MAX * 0.3f;
       }
-      p += 4*2*w/3;
+      p += 4*w*(NUM_BLOCK_SIDES-1);
     }
   }
   glBindTexture(GL_TEXTURE_2D, state.gl_block_texture);
-  glTexSubImage2D(GL_TEXTURE_2D, 0, state.water_texture_pos.x0, state.water_texture_pos.y0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, state.water_texture_buffer);
+  glTexSubImage2D(GL_TEXTURE_2D, 0, state.water_texture_pos.x0, state.water_texture_pos.y0, w*NUM_BLOCK_SIDES, h, GL_RGBA, GL_UNSIGNED_BYTE, state.water_texture_buffer);
 }
 
 static void sdl_init() {
