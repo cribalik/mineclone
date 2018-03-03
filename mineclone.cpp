@@ -1585,10 +1585,8 @@ static Vec<Collision> collision(v3 p0, v3 p1, float dt, v3 size, OPTIONAL v3 *p_
 
       p1 = p1 + b;
     } else {
-      // TODO: implement properly.
-      // Good enough at the moment though since it's only used for rays
       if (vel_out)
-        *vel_out = {};
+        *vel_out = (p1-p0)/dt;
       break;
     }
   }
