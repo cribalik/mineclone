@@ -532,7 +532,7 @@ static void camera_pitch(Camera *camera, float angle) {
   camera->up = clamp(camera->up + angle, -PI/2.0f, PI/2.0f);
 }
 
-static m4 camera__projection_matrix(Camera *camera, v3 pos, float fov, float nearz, float farz, float screen_ratio) {
+static m4 camera_viewprojection_matrix(Camera *camera, v3 pos, float fov, float nearz, float farz, float screen_ratio) {
   float cu = cosf(camera->up);
   float su = sinf(camera->up);
 
@@ -963,8 +963,9 @@ struct Glyph {
   float offset_x, offset_y, advance; /* Glyph offset info */
 };
 
-static const v3 CAMERA_OFFSET = v3{0.0f, 0.0f, 1.0f};
-static struct GameState {
+static const v3 CAMERA_OFFSET_FROM_PLAYER = v3{0.0f, 0.0f, 1.0f};
+
+struct GameState {
   SDL_Window *window;
   float screen_ratio;
 
@@ -982,28 +983,30 @@ static struct GameState {
   // block graphics data
   struct {
     // block
-    #define NUM_BLOCK_SIDES 3
+    #define NUM_BLOCK_SIDES 3 // the number of different textures we have per block. at the moment, it is top,side,bottom
     #define MAX_BLOCK_VERTICES 1024*1024
     #define MAX_BLOCK_ELEMENTS (MAX_BLOCK_VERTICES*2)
 
-    bool block_vertices_dirty;
     BlockVertex block_vertices[MAX_BLOCK_VERTICES];
     int num_block_vertices;
     unsigned int block_elements[MAX_BLOCK_ELEMENTS];
     int num_block_elements;
+    // a list of positions in the vertex array that are free
     int free_faces[MAX_BLOCK_VERTICES];
     int num_free_faces;
+    // flag so we know if we should resend the vertex data to the gl buffer at the end of the frame
+    bool block_vertices_dirty;
 
-    // use get_block_vertex_pos to get
+    // mapping from block face to the position in the vertex array, to optimize removal of blocks. use get_block_vertex_pos to get 
     int block_vertex_pos[NUM_BLOCKS_x][NUM_BLOCKS_y][NUM_BLOCKS_z][DIRECTION_MAX];
 
     GLuint gl_block_vao, gl_block_vbo, gl_block_ebo;
     GLuint gl_block_shader;
-    GLuint gl_camera_uniform;
+    GLuint gl_block_camera_uniform;
     GLuint gl_block_texture_uniform;
     GLuint gl_block_texture;
 
-    // transparent blocks
+    // same thing as above, but for transparent blocks! (since they need to be rendered separately, because they look weird otherwise)
     bool transparent_block_vertices_dirty;
     BlockVertex transparent_block_vertices[MAX_BLOCK_VERTICES];
     int num_transparent_block_vertices;
@@ -1013,9 +1016,10 @@ static struct GameState {
     int num_free_transparent_faces;
     GLuint gl_transparent_block_vao, gl_transparent_block_vbo, gl_transparent_block_ebo;
 
-    // where in the texture buffer is the water texture, so we can manipulate it
+    #define BLOCK_TEXTURE_SIZE 16
+    // where in the texture buffer is the water texture. We manipulate the texture every frame so we get moving water :)
     r2i water_texture_pos;
-    u8 water_texture_buffer[16*16*4*NUM_BLOCK_SIDES]; // 4 - rgba
+    u8 water_texture_buffer[BLOCK_TEXTURE_SIZE*BLOCK_TEXTURE_SIZE*NUM_BLOCK_SIDES*4]; // 4 because of rgba
   };
 
   // ui graphics data
@@ -1067,7 +1071,8 @@ static struct GameState {
 
   // commands from other threads of stuff for the main thread to do at end of frame
   // Array<EndOfFrameCommand> commands;
-} state;
+};
+static GameState state;
 
 static Glyph& glyph_get(char c) {
   return state.glyphs[c - RENDERER_FIRST_CHAR];
@@ -1711,7 +1716,7 @@ static void block_gl_buffer_create() {
   state.gl_block_ebo = ebo;
 
   state.gl_block_shader  = shader_create(block_vertex_shader, block_fragment_shader);
-  state.gl_camera_uniform  = glGetUniformLocation(state.gl_block_shader, "ucamera");
+  state.gl_block_camera_uniform  = glGetUniformLocation(state.gl_block_shader, "ucamera");
   state.gl_block_texture_uniform = glGetUniformLocation(state.gl_block_shader, "utexture");
   if (state.gl_block_texture_uniform == -1) die("Failed to find uniform location of 'utexture'");
 
@@ -1989,7 +1994,7 @@ static void update_player(float dt) {
     // find the block
     const float RAY_DISTANCE = 5.0f;
     v3 ray = camera_forward_fly(&state.camera, RAY_DISTANCE);
-    v3 p0 = state.player_pos + CAMERA_OFFSET;
+    v3 p0 = state.player_pos + CAMERA_OFFSET_FROM_PLAYER;
     v3 p1 = p0 + ray;
     Vec<Collision> hits = collision(p0, p1, dt, {0.01f, 0.01f, 0.01f}, 0, 0, false);
     if (hits.size) {
@@ -2007,7 +2012,7 @@ static void update_player(float dt) {
     Direction d;
     const float RAY_DISTANCE = 5.0f;
     v3 ray = camera_forward_fly(&state.camera, RAY_DISTANCE);
-    v3 p0 = state.player_pos + CAMERA_OFFSET;
+    v3 p0 = state.player_pos + CAMERA_OFFSET_FROM_PLAYER;
     v3 p1 = p0 + ray;
     Vec<Collision> hits = collision(p0, p1, dt, {0.01f, 0.01f, 0.01f}, 0, 0, false);
     if (!hits.size)
@@ -2028,6 +2033,74 @@ static void update_player(float dt) {
 
     puts("hit!");
     skip_blockplace:;
+  }
+}
+
+static void update_blocks(v3 before, v3 after) {
+  state.player_pos = before;
+
+  // TODO: hide first, then show
+  BlockRange r0 = pos_to_range(before);
+  BlockRange r1 = pos_to_range(after);
+  int x0 = min(r0.a.x, r1.a.x);
+  int y0 = min(r0.a.y, r1.a.y);
+  int z0 = min(r0.a.z, r1.a.z);
+  int x1 = max(r0.b.x, r1.b.x);
+  int y1 = max(r0.b.y, r1.b.y);
+  int z1 = max(r0.b.z, r1.b.z);
+
+  if (r0.a.x != r1.a.x || r0.a.y != r1.a.y || r0.a.z != r1.a.z)
+    state.block_vertices_dirty = true;
+
+  // hide blocks that went out of scope
+  // TODO:, FIXME: if we jump farther than NUM_BLOCKS_x this probably breaks
+  #if 1
+  #define HIDEBLOCK(A, B, C) \
+    for (int A = r0.a.A; A < r1.a.A; ++A) \
+    for (int B = B##0; B <= B##1; ++B) \
+    for (int C = C##0; C <= C##1; ++C) \
+        hide_block({x, y, z}, false); \
+    for (int A = r0.b.A; A > r1.b.A; --A) \
+    for (int B = B##0; B <= B##1; ++B) \
+    for (int C = C##0; C <= C##1; ++C) \
+        hide_block({x, y, z}, false);
+
+  HIDEBLOCK(x,y,z);
+  HIDEBLOCK(y,x,z);
+  HIDEBLOCK(z,x,y);
+  #endif
+
+  state.player_pos = after;
+
+  #if 1
+  #define SHOWBLOCK(A, B, C) \
+    for (int A = r0.b.A+1; A <= r1.b.A; ++A) \
+    FOR_BLOCKS_IN_RANGE_##B \
+    FOR_BLOCKS_IN_RANGE_##C \
+      show_block({x, y, z}, false); \
+    for (int A = r0.a.A-1; A >= r1.a.A; --A) \
+    FOR_BLOCKS_IN_RANGE_##B \
+    FOR_BLOCKS_IN_RANGE_##C \
+        show_block({x, y, z}, false);
+  SHOWBLOCK(x,y,z);
+  SHOWBLOCK(y,x,z);
+  SHOWBLOCK(z,x,y);
+  #endif
+}
+
+static void debug_prints(int loopindex, float dt) {
+  if (loopindex%20 == 0) {
+    if (loopindex%100 == 0)
+      printf("fps: %f\n", dt*60.0f);
+    // printf("player pos: %f %f %f\n", state.player_pos.x, state.player_pos.y, state.player_pos.z);
+    // printf("num_block_vertices: %lu\n", state.num_block_vertices*sizeof(state.block_vertices[0]));
+    // printf("num free block faces: %i/%lu\n", state.num_free_faces, ARRAY_LEN(state.free_faces));
+
+    // printf("items: ");
+    // for (int i = 0; i < ARRAY_LEN(state.inventory); ++i)
+    //   if (state.inventory[i].type == ITEM_BLOCK)
+    //     printf("%i ", state.inventory[i].block.num);
+    // putchar('\n');
   }
 }
 
@@ -2054,6 +2127,14 @@ static void update_water_texture(float dt) {
   }
   glBindTexture(GL_TEXTURE_2D, state.gl_block_texture);
   glTexSubImage2D(GL_TEXTURE_2D, 0, state.water_texture_pos.x0, state.water_texture_pos.y0, w*NUM_BLOCK_SIDES, h, GL_RGBA, GL_UNSIGNED_BYTE, state.water_texture_buffer);
+}
+
+static void update_inventory() {
+  if (state.keypressed[KEY_FLYUP])
+    ++state.selected_item;
+  if (state.keypressed[KEY_FLYDOWN])
+    --state.selected_item;
+  state.selected_item = clamp(state.selected_item, 0, (int)ARRAY_LEN(state.inventory)-1);
 }
 
 static void sdl_init() {
@@ -2090,13 +2171,169 @@ static void sdl_init() {
   if (!glcontext) die("Failed to create context");
 }
 
-// int WINAPI wWinMain(HINSTANCE /*hInstance*/, HINSTANCE /*hPrevInstance*/, PWSTR /*pCmdLine*/, int /*nCmdShow*/) {
+static void render_blocks() {
+  glEnable(GL_BLEND);
+  glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+  glEnable(GL_CULL_FACE);
+      // glDisable(GL_CULL_FACE);
+  glEnable(GL_DEPTH_TEST);
+      // glDisable(GL_DEPTH_TEST);
+  glUseProgram(state.gl_block_shader);
+
+      // camera
+  const float fov = PI/3.0f;
+  const float nearz = 0.3f;
+  const float farz = 300.0f;
+  const m4 camera = camera_viewprojection_matrix(&state.camera, state.player_pos + CAMERA_OFFSET_FROM_PLAYER, fov, nearz, farz, state.screen_ratio);
+  glUniformMatrix4fv(state.gl_block_camera_uniform, 1, GL_TRUE, camera.d);
+  glGetUniformLocation(state.gl_block_shader, "far");
+  glGetUniformLocation(state.gl_block_shader, "nearsize");
+
+      // texture
+  glUniform1i(state.gl_block_texture_uniform, 0);
+  glActiveTexture(GL_TEXTURE0);
+  glBindTexture(GL_TEXTURE_2D, state.gl_block_texture);
+
+  glBindVertexArray(state.gl_block_vao);
+
+  if (state.block_mesh_dirty) {
+        // puts("re-rendering :O");
+    block_vertices_reset();
+    generate_block_mesh(state.player_pos);
+    state.block_mesh_dirty = false;
+    state.block_vertices_dirty = true;
+  }
+  if (state.block_vertices_dirty) {
+        // puts("resending block_vertices");
+    glBindBuffer(GL_ARRAY_BUFFER, state.gl_block_vbo);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, state.gl_block_ebo);
+    glBufferData(GL_ARRAY_BUFFER, state.num_block_vertices*sizeof(*state.block_vertices), state.block_vertices, GL_DYNAMIC_DRAW);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, state.num_block_elements*sizeof(*state.block_elements), state.block_elements, GL_DYNAMIC_DRAW);
+    state.block_vertices_dirty = false;
+  }
+
+      // draw
+  glDrawElements(GL_TRIANGLES, state.num_block_elements, GL_UNSIGNED_INT, 0);
+  glBindVertexArray(0);
+  gl_ok_or_die;
+
+
+      // @transparentblocks
+  glBindVertexArray(state.gl_transparent_block_vao);
+
+  if (state.transparent_block_vertices_dirty) {
+        // puts("resending block_vertices");
+    glBindBuffer(GL_ARRAY_BUFFER, state.gl_transparent_block_vbo);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, state.gl_transparent_block_ebo);
+    glBufferData(GL_ARRAY_BUFFER, state.num_transparent_block_vertices*sizeof(*state.transparent_block_vertices), state.transparent_block_vertices, GL_DYNAMIC_DRAW);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, state.num_transparent_block_elements*sizeof(*state.transparent_block_elements), state.transparent_block_elements, GL_DYNAMIC_DRAW);
+    state.transparent_block_vertices_dirty = false;
+  }
+
+  glDrawElements(GL_TRIANGLES, state.num_transparent_block_elements, GL_UNSIGNED_INT, 0);
+  glBindVertexArray(0);
+  gl_ok_or_die;
+}
+
+static void render_ui() {
+  if (state.render_quickmenu) {
+    glDisable(GL_DEPTH_TEST);
+    state.num_ui_vertices = state.num_ui_elements = 0;
+
+    if (state.keypressed[KEY_INVENTORY])
+      state.is_inventory_open = !state.is_inventory_open;
+    if (state.is_inventory_open) {
+      const float inv_margin = 0.15f;
+      push_ui_quad({inv_margin, inv_margin}, {1.0f - 2*inv_margin, 1.0f - 2*inv_margin}, {0.0f, 0.0f}, {0.2f, 0.04f});
+    }
+      // draw background
+    const float inv_margin = 0.1f;
+    const float inv_width = 1.0f - 2*inv_margin;
+    const float inv_height = 0.1f;
+    push_ui_quad({inv_margin, 0.0f}, {inv_width, inv_height}, {0.0f, 0.0f}, {0.2f, 0.03f});
+
+      // draw boxes
+    float box_margin_y = 0.02f;
+    float box_size = inv_height - 2*box_margin_y;
+    int ni = ARRAY_LEN(state.inventory);
+    float box_margin_x = (inv_width - ni*box_size)/(ni+1);
+    float x = inv_margin + box_margin_x;
+    float y = box_margin_y;
+    for (int i = 0; i < ARRAY_LEN(state.inventory); ++i, x += box_margin_x + box_size) {
+      if (state.inventory[i].type != ITEM_BLOCK)
+        continue;
+
+      BlockType t = state.inventory[i].block.type;
+      float tx,ty,tw,th;
+      blocktype_to_texpos(t, &tx, &ty, &tw, &th);
+      tw = tw/3.0f, tx += tw; // get only side
+
+      float xx = x;
+      float yy = y;
+      float bs = box_size;
+      if (i == state.selected_item)
+        xx -= box_margin_y/2, yy -= box_margin_y/2, bs += box_margin_y;
+      push_ui_quad({xx, yy}, {bs, bs}, {tx, ty}, {tw, th});
+      push_text(int_to_str(state.inventory[i].block.num), {x + box_size - 0.01f, y + box_size - 0.01f}, 0.05f, true);
+    }
+    glUseProgram(state.gl_ui_shader);
+
+    // texture
+    glUniform1i(state.gl_ui_texture_uniform, 0);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, state.gl_ui_texture);
+
+    glBindBuffer(GL_ARRAY_BUFFER, state.gl_ui_vbo);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, state.gl_ui_ebo);
+    glBufferData(GL_ARRAY_BUFFER, state.num_ui_vertices*sizeof(*state.ui_vertices), state.ui_vertices, GL_DYNAMIC_DRAW);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, state.num_ui_elements*sizeof(*state.ui_elements), state.ui_elements, GL_DYNAMIC_DRAW);
+
+    glBindVertexArray(state.gl_ui_vao);
+
+    glDrawElements(GL_TRIANGLES, state.num_ui_elements, GL_UNSIGNED_INT, 0);
+    glBindVertexArray(0);
+  }
+}
+
+static void render_text() {
+  glEnable(GL_BLEND);
+  glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+  glDisable(GL_CULL_FACE);
+
+  glUseProgram(state.gl_text_shader);
+
+      // data
+  glBindVertexArray(state.gl_text_vao);
+  glBindBuffer(GL_ARRAY_BUFFER, state.gl_text_vbo);
+  glBufferData(GL_ARRAY_BUFFER, state.num_text_vertices*sizeof(*state.text_vertices), state.text_vertices, GL_DYNAMIC_DRAW);
+  glBindTexture(GL_TEXTURE_2D, state.gl_text_texture);
+
+      // shadow
+  glUniform4f(state.gl_text_color_uniform, 0.0f, 0.0f, 0.0f, 0.7f);
+  glUniform2f(state.gl_text_offset_uniform, 0.003f, -0.003f);
+  glDrawArrays(GL_TRIANGLES, 0, state.num_text_vertices);
+
+      // shadow
+  glUniform4f(state.gl_text_color_uniform, 0.0f, 0.0f, 0.0f, 0.5f);
+  glUniform2f(state.gl_text_offset_uniform, -0.003f, 0.003f);
+  glDrawArrays(GL_TRIANGLES, 0, state.num_text_vertices);
+
+      // text
+  glUniform4f(state.gl_text_color_uniform, 0.99f, 0.99f, 0.99f, 1.0f);
+  glUniform2f(state.gl_text_offset_uniform, 0.0f, 0.0f);
+  glDrawArrays(GL_TRIANGLES, 0, state.num_text_vertices);
+  glBindVertexArray(0);
+}
+
 #ifdef OS_WINDOWS
-int wmain(int, wchar_t *[], wchar_t *[] )
+  // int WINAPI wWinMain(HINSTANCE /*hInstance*/, HINSTANCE /*hPrevInstance*/, PWSTR /*pCmdLine*/, int /*nCmdShow*/) {
+  #define mine_main int wmain(int, wchar_t *[], wchar_t *[] )
 #else
-int main(int argc, const char **argv)
+  #define mine_main int main(int argc, const char **argv)
 #endif
-{
+
+
+mine_main {
   printf("%lu %lu %lu %lu %lu\n", sizeof(state)/1024/1024, sizeof(state.block_vertices)/1024/1024, sizeof(state.block_elements)/1024/1024, sizeof(state.transparent_block_vertices)/1024/1024, sizeof(state.transparent_block_elements)/1024/1024);
   sdl_init();
   // get gl3w to fetch opengl function pointers
@@ -2121,19 +2358,20 @@ int main(int argc, const char **argv)
     const float dt = clamp((SDL_GetTicks() - time)/(1000.0f/60.0f), 0.33f, 3.0f);
     time = SDL_GetTicks();
 
+    // reset some rendering
+    text_vertices_reset();
+
     // read input
     read_input();
 
+    // handle input
     if (state.keypressed[KEY_ESCAPE])
       exit(0);
 
     // @inventory input
-    if (state.keypressed[KEY_FLYUP])
-      ++state.selected_item;
-    if (state.keypressed[KEY_FLYDOWN])
-      --state.selected_item;
-    state.selected_item = clamp(state.selected_item, 0, (int)ARRAY_LEN(state.inventory)-1);
+    update_inventory();
 
+    // update water texture
     update_water_texture(dt);
 
     // update player
@@ -2142,231 +2380,22 @@ int main(int argc, const char **argv)
     v3 after = state.player_pos;
 
     // hide and show blocks that went in and out of scope
-    state.player_pos = before;
+    update_blocks(before, after);
 
-    // TODO: hide first, then show
-    BlockRange r0 = pos_to_range(before);
-    BlockRange r1 = pos_to_range(after);
-    int x0 = min(r0.a.x, r1.a.x);
-    int y0 = min(r0.a.y, r1.a.y);
-    int z0 = min(r0.a.z, r1.a.z);
-    int x1 = max(r0.b.x, r1.b.x);
-    int y1 = max(r0.b.y, r1.b.y);
-    int z1 = max(r0.b.z, r1.b.z);
-
-    if (r0.a.x != r1.a.x || r0.a.y != r1.a.y || r0.a.z != r1.a.z)
-      state.block_vertices_dirty = true;
-
-    // hide blocks that went out of scope
-    // TODO:, FIXME: if we jump farther than NUM_BLOCKS_x this probably breaks
-    #if 1
-    #define HIDEBLOCK(A, B, C) \
-      for (int A = r0.a.A; A < r1.a.A; ++A) \
-      for (int B = B##0; B <= B##1; ++B) \
-      for (int C = C##0; C <= C##1; ++C) \
-          hide_block({x, y, z}, false); \
-      for (int A = r0.b.A; A > r1.b.A; --A) \
-      for (int B = B##0; B <= B##1; ++B) \
-      for (int C = C##0; C <= C##1; ++C) \
-          hide_block({x, y, z}, false);
-
-    HIDEBLOCK(x,y,z);
-    HIDEBLOCK(y,x,z);
-    HIDEBLOCK(z,x,y);
-    #endif
-
-    state.player_pos = after;
-
-    #if 1
-    #define SHOWBLOCK(A, B, C) \
-      for (int A = r0.b.A+1; A <= r1.b.A; ++A) \
-      FOR_BLOCKS_IN_RANGE_##B \
-      FOR_BLOCKS_IN_RANGE_##C \
-        show_block({x, y, z}, false); \
-      for (int A = r0.a.A-1; A >= r1.a.A; --A) \
-      FOR_BLOCKS_IN_RANGE_##B \
-      FOR_BLOCKS_IN_RANGE_##C \
-          show_block({x, y, z}, false);
-    SHOWBLOCK(x,y,z);
-    SHOWBLOCK(y,x,z);
-    SHOWBLOCK(z,x,y);
-    #endif
-
-    if (loopindex%20 == 0) {
-      if (loopindex%100 == 0)
-        printf("fps: %f\n", dt*60.0f);
-      // printf("player pos: %f %f %f\n", state.player_pos.x, state.player_pos.y, state.player_pos.z);
-      // printf("num_block_vertices: %lu\n", state.num_block_vertices*sizeof(state.block_vertices[0]));
-      // printf("num free block faces: %i/%lu\n", state.num_free_faces, ARRAY_LEN(state.free_faces));
-
-      // printf("items: ");
-      // for (int i = 0; i < ARRAY_LEN(state.inventory); ++i)
-      //   if (state.inventory[i].type == ITEM_BLOCK)
-      //     printf("%i ", state.inventory[i].block.num);
-      // putchar('\n');
-    }
+    // debug prints
+    debug_prints(loopindex, dt);
 
     // @render
     glClearColor(0.0f, 0.8f, 0.6f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-    text_vertices_reset();
+    render_blocks();
 
-    // @renderblocks
-    {
-      glEnable(GL_BLEND);
-      glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-      glEnable(GL_CULL_FACE);
-      // glDisable(GL_CULL_FACE);
-      glEnable(GL_DEPTH_TEST);
-      // glDisable(GL_DEPTH_TEST);
-      glUseProgram(state.gl_block_shader);
+    render_ui();
 
-      // camera
-      const float fov = PI/3.0f;
-      const float nearz = 0.3f;
-      const float farz = 300.0f;
-      const m4 camera = camera__projection_matrix(&state.camera, state.player_pos + CAMERA_OFFSET, fov, nearz, farz, state.screen_ratio);
-      glUniformMatrix4fv(state.gl_camera_uniform, 1, GL_TRUE, camera.d);
-      glGetUniformLocation(state.gl_block_shader, "far");
-      glGetUniformLocation(state.gl_block_shader, "nearsize");
+    render_text();
 
-      // texture
-      glUniform1i(state.gl_block_texture_uniform, 0);
-      glActiveTexture(GL_TEXTURE0);
-      glBindTexture(GL_TEXTURE_2D, state.gl_block_texture);
-
-      glBindVertexArray(state.gl_block_vao);
-
-      if (state.block_mesh_dirty) {
-        // puts("re-rendering :O");
-        block_vertices_reset();
-        generate_block_mesh(state.player_pos);
-        state.block_mesh_dirty = false;
-        state.block_vertices_dirty = true;
-      }
-      if (state.block_vertices_dirty) {
-        // puts("resending block_vertices");
-        glBindBuffer(GL_ARRAY_BUFFER, state.gl_block_vbo);
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, state.gl_block_ebo);
-        glBufferData(GL_ARRAY_BUFFER, state.num_block_vertices*sizeof(*state.block_vertices), state.block_vertices, GL_DYNAMIC_DRAW);
-        glBufferData(GL_ELEMENT_ARRAY_BUFFER, state.num_block_elements*sizeof(*state.block_elements), state.block_elements, GL_DYNAMIC_DRAW);
-        state.block_vertices_dirty = false;
-      }
-
-      // draw
-      glDrawElements(GL_TRIANGLES, state.num_block_elements, GL_UNSIGNED_INT, 0);
-      glBindVertexArray(0);
-      gl_ok_or_die;
-
-
-      // @transparentblocks
-      glBindVertexArray(state.gl_transparent_block_vao);
-
-      if (state.transparent_block_vertices_dirty) {
-        // puts("resending block_vertices");
-        glBindBuffer(GL_ARRAY_BUFFER, state.gl_transparent_block_vbo);
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, state.gl_transparent_block_ebo);
-        glBufferData(GL_ARRAY_BUFFER, state.num_transparent_block_vertices*sizeof(*state.transparent_block_vertices), state.transparent_block_vertices, GL_DYNAMIC_DRAW);
-        glBufferData(GL_ELEMENT_ARRAY_BUFFER, state.num_transparent_block_elements*sizeof(*state.transparent_block_elements), state.transparent_block_elements, GL_DYNAMIC_DRAW);
-        state.transparent_block_vertices_dirty = false;
-      }
-
-      glDrawElements(GL_TRIANGLES, state.num_transparent_block_elements, GL_UNSIGNED_INT, 0);
-      glBindVertexArray(0);
-      gl_ok_or_die;
-    }
-
-    // @renderui
-    if (state.render_quickmenu) {
-      glDisable(GL_DEPTH_TEST);
-      state.num_ui_vertices = state.num_ui_elements = 0;
-
-      if (state.keypressed[KEY_INVENTORY])
-        state.is_inventory_open = !state.is_inventory_open;
-      if (state.is_inventory_open) {
-        const float inv_margin = 0.15f;
-        push_ui_quad({inv_margin, inv_margin}, {1.0f - 2*inv_margin, 1.0f - 2*inv_margin}, {0.0f, 0.0f}, {0.2f, 0.04f});
-      }
-      // draw background
-      const float inv_margin = 0.1f;
-      const float inv_width = 1.0f - 2*inv_margin;
-      const float inv_height = 0.1f;
-      push_ui_quad({inv_margin, 0.0f}, {inv_width, inv_height}, {0.0f, 0.0f}, {0.2f, 0.03f});
-
-      // draw boxes
-      float box_margin_y = 0.02f;
-      float box_size = inv_height - 2*box_margin_y;
-      int ni = ARRAY_LEN(state.inventory);
-      float box_margin_x = (inv_width - ni*box_size)/(ni+1);
-      float x = inv_margin + box_margin_x;
-      float y = box_margin_y;
-      for (int i = 0; i < ARRAY_LEN(state.inventory); ++i, x += box_margin_x + box_size) {
-        if (state.inventory[i].type != ITEM_BLOCK)
-          continue;
-
-        BlockType t = state.inventory[i].block.type;
-        float tx,ty,tw,th;
-        blocktype_to_texpos(t, &tx, &ty, &tw, &th);
-        tw = tw/3.0f, tx += tw; // get only side
-
-        float xx = x;
-        float yy = y;
-        float bs = box_size;
-        if (i == state.selected_item)
-          xx -= box_margin_y/2, yy -= box_margin_y/2, bs += box_margin_y;
-        push_ui_quad({xx, yy}, {bs, bs}, {tx, ty}, {tw, th});
-        push_text(int_to_str(state.inventory[i].block.num), {x + box_size - 0.01f, y + box_size - 0.01f}, 0.05f, true);
-      }
-      glUseProgram(state.gl_ui_shader);
-
-      // texture
-      glUniform1i(state.gl_ui_texture_uniform, 0);
-      glActiveTexture(GL_TEXTURE0);
-      glBindTexture(GL_TEXTURE_2D, state.gl_ui_texture);
-
-      glBindBuffer(GL_ARRAY_BUFFER, state.gl_ui_vbo);
-      glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, state.gl_ui_ebo);
-      glBufferData(GL_ARRAY_BUFFER, state.num_ui_vertices*sizeof(*state.ui_vertices), state.ui_vertices, GL_DYNAMIC_DRAW);
-      glBufferData(GL_ELEMENT_ARRAY_BUFFER, state.num_ui_elements*sizeof(*state.ui_elements), state.ui_elements, GL_DYNAMIC_DRAW);
-
-      glBindVertexArray(state.gl_ui_vao);
-
-      glDrawElements(GL_TRIANGLES, state.num_ui_elements, GL_UNSIGNED_INT, 0);
-      glBindVertexArray(0);
-    }
-
-    // @rendertext
-    {
-      glEnable(GL_BLEND);
-      glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-      glDisable(GL_CULL_FACE);
-
-      glUseProgram(state.gl_text_shader);
-
-      // data
-      glBindVertexArray(state.gl_text_vao);
-      glBindBuffer(GL_ARRAY_BUFFER, state.gl_text_vbo);
-      glBufferData(GL_ARRAY_BUFFER, state.num_text_vertices*sizeof(*state.text_vertices), state.text_vertices, GL_DYNAMIC_DRAW);
-      glBindTexture(GL_TEXTURE_2D, state.gl_text_texture);
-
-      // shadow
-      glUniform4f(state.gl_text_color_uniform, 0.0f, 0.0f, 0.0f, 0.7f);
-      glUniform2f(state.gl_text_offset_uniform, 0.003f, -0.003f);
-      glDrawArrays(GL_TRIANGLES, 0, state.num_text_vertices);
-
-      // shadow
-      glUniform4f(state.gl_text_color_uniform, 0.0f, 0.0f, 0.0f, 0.5f);
-      glUniform2f(state.gl_text_offset_uniform, -0.003f, 0.003f);
-      glDrawArrays(GL_TRIANGLES, 0, state.num_text_vertices);
-
-      // text
-      glUniform4f(state.gl_text_color_uniform, 0.99f, 0.99f, 0.99f, 1.0f);
-      glUniform2f(state.gl_text_offset_uniform, 0.0f, 0.0f);
-      glDrawArrays(GL_TRIANGLES, 0, state.num_text_vertices);
-      glBindVertexArray(0);
-    }
-
+    // swap back buffer so it shows up on the screen
     SDL_GL_SwapWindow(state.window);
   }
 
