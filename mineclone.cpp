@@ -764,7 +764,7 @@ static const char *skybox_vertex_shader = R"VSHADER(
 
   void main() {
     vec4 p = u_viewprojection * vec4(pos, 1.0f);
-    gl_Position = p.xyww;
+    gl_Position = p.xyww; // in order to use depth test to optimize drawing, we need to push this block into the back. This hack does that
     ftpos = vec3(pos.x, -pos.z, pos.y);
   }
   )VSHADER";
@@ -1901,16 +1901,16 @@ static void skybox_gl_buffer_create() {
   //   "back.jpg",
   // };
 
-  const float x_offset[] = {0.0f,  0.0f, -0.5f, 0.5f, 0.0f, 1.0f};
-  const float y_offset[] = {0.5f, -0.5f,  0.0f, 0.0f, 0.0f, 0.0f};
+  const float y_offset[] = {0.0f,  0.0f, -0.5f, 0.5f, 0.0f, 1.0f};
+  const float x_offset[] = {0.5f, -0.5f,  0.0f, 0.0f, 0.0f, 0.0f};
   const float r0 = 0.0f,
-              g0 = 0.0f,
-              b0 = 0.7f;
+              g0 = 0.1f,
+              b0 = 0.3f;
   const float r1 = 1.0f,
               g1 = 0.2f,
               b1 = 0.2f;
 
-  for (int i = 0; i < 6; ++i) {
+  for (int face = 0; face < 6; ++face) {
     u8 *out = state.skybox_texture_buffer;
     for (int x = 0; x < SKYBOX_TEXTURE_SIZE; ++x)
     for (int y = 0; y < SKYBOX_TEXTURE_SIZE; ++y) {
@@ -1919,8 +1919,8 @@ static void skybox_gl_buffer_create() {
       float lat = atan2f(((float)x - w)/w, 1.0f);
       float lng = atan2f(((float)y - w)/w, 1.0f);
       // now add distance from face to the 'front' face
-      lat += x_offset[i]*PI;
-      lng += y_offset[i]*PI;
+      lat += x_offset[face]*PI;
+      lng += y_offset[face]*PI;
       // now calculate the spherical distance to the sun (at angle (0,0)), see https://en.wikipedia.org/wiki/Great-circle_distance
       float d = acos(cos(lat) * cos(fabs(lng)));
       // normalize distance to (0,1), so we can lerp between colors
@@ -1928,22 +1928,45 @@ static void skybox_gl_buffer_create() {
       const u8 r = UINT8_MAX * lerp(t, r0, r1);
       const u8 g = UINT8_MAX * lerp(t, g0, g1);
       const u8 b = UINT8_MAX * lerp(t, b0, b1);
-      *out++ = r;
-      *out++ = g;
-      *out++ = b;
+
+      const int bi = (y*SKYBOX_TEXTURE_SIZE + x)*3;
+      state.skybox_texture_buffer[bi] = r;
+      state.skybox_texture_buffer[bi+1] = g;
+      state.skybox_texture_buffer[bi+2] = b;
+    }
+
+    // draw sun
+    if (face == 4) {
+      for (int x = SKYBOX_TEXTURE_SIZE*3/8; x < SKYBOX_TEXTURE_SIZE*5/8; ++x)
+      for (int y = SKYBOX_TEXTURE_SIZE*3/8; y < SKYBOX_TEXTURE_SIZE*5/8; ++y) {
+        const float dx = x - SKYBOX_TEXTURE_SIZE/2;
+        const float dy = y - SKYBOX_TEXTURE_SIZE/2;
+        const float d = sqrtf(dx*dx + dy*dy);
+        float t = d/SKYBOX_TEXTURE_SIZE*8;
+        t = clamp(t, 0.0f, 1.0f);
+        t = pow(t, 5);
+        const int bi = (y*SKYBOX_TEXTURE_SIZE + x)*3;
+        printf("%f\n", t);
+        const float r = 1.0f;
+        const float g = 0.9f;
+        const float b = 0.1f;
+        state.skybox_texture_buffer[bi] = UINT8_MAX * lerp(t, r, (float)state.skybox_texture_buffer[bi]/UINT8_MAX);
+        state.skybox_texture_buffer[bi+1] = UINT8_MAX * lerp(t, g, (float)state.skybox_texture_buffer[bi+1]/UINT8_MAX);
+        state.skybox_texture_buffer[bi+2] = UINT8_MAX * lerp(t, b, (float)state.skybox_texture_buffer[bi+2]/UINT8_MAX);
+      }
     }
 
     // int w,h,n;
     // stbi_set_flip_vertically_on_load(1);
-    // u8 *data = stbi_load(filenames[i], &w, &h, &n, 3);
-    // if (!data) die("Could not load texture %s", filenames[i]);
-    // if (n != 3) die("Texture %s must only be rgb, but had %i channels\n", filenames[i], n);
+    // u8 *data = stbi_load(filenames[face], &w, &h, &n, 3);
+    // if (!data) die("Could not load texture %s", filenames[face]);
+    // if (n != 3) die("Texture %s must only be rgb, but had %face channels\n", filenames[face], n);
 
-    // glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + i,
+    // glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + face,
     //              0, GL_RGB, w, h, 0, GL_RGB, GL_UNSIGNED_BYTE,
                  // data);
 
-    glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + i,
+    glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + face,
                  0, GL_RGB, SKYBOX_TEXTURE_SIZE, SKYBOX_TEXTURE_SIZE, 0, GL_RGB,
                  GL_UNSIGNED_BYTE,
                  state.skybox_texture_buffer);
