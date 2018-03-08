@@ -39,3 +39,7 @@
 include/SDL2
 *.sublime-workspace
 *.sublime-project
+
+# macOS specific
+info.plist
+.DS_Store
