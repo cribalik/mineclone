@@ -1,5 +1,6 @@
 // TODO:
 //
+// * do lighting in sRGB
 //
 // * optimize loading blocks:
 //   - cache block types for blocks in scope
@@ -617,11 +618,44 @@ static const char *block_vertex_shader = R"VSHADER(
   // out
   out vec2 ftpos;
   flat out uint fdir;
+  out vec3 f_light;
 
   // uniform
   uniform mat4 u_viewprojection;
+  uniform samplerCube u_skybox;
+  uniform float u_ambient;
+  uniform vec3 u_skylight_dir;
+  uniform vec3 u_skylight_color;
 
   void main() {
+
+    vec3 normal;
+    switch(dir) {
+      case 0u: // UP
+        normal = vec3(0, 0, 1);
+        break;
+      case 1u: // X
+        normal = vec3(1, 0, 0);
+        break;
+      case 2u: // Y
+        normal = vec3(0, 1, 0);
+        break;
+      case 3u: // -Y
+        normal = vec3(0, -1, 0);
+        break;
+      case 4u: // -X
+        normal = vec3(-1, 0, 0);
+        break;
+      case 5u: // DOWN
+        normal = vec3(0, 0, -1);
+        break;
+      default:
+        break;
+    }
+
+    f_light = u_skylight_color * max(dot(u_skylight_dir, normal), 0.0f);
+    f_light += u_ambient;
+
     vec4 p = u_viewprojection * vec4(pos, 1.0f);
     gl_Position = p;
     ftpos = tpos;
@@ -636,6 +670,7 @@ static const char *block_fragment_shader = R"FSHADER(
   // in
   in vec2 ftpos;
   flat in uint fdir;
+  in vec3 f_light;
 
   // out
   out vec4 fcolor;
@@ -644,34 +679,10 @@ static const char *block_fragment_shader = R"FSHADER(
   uniform sampler2D utexture;
 
   void main() {
-    float shade = 0.0;
-    switch(fdir) {
-      case 0u: // UP
-        shade = 0.95;
-        break;
-      case 1u: // X
-        shade = 0.85;
-        break;
-      case 2u: // Y
-        shade = 0.8;
-        break;
-      case 3u: // -Y
-        shade = 0.8;
-        break;
-      case 4u: // -X
-        shade = 0.7;
-        break;
-      case 5u: // DOWN
-        shade = 0.7;
-        break;
-      default:
-        shade = 0.1;
-        break;
-    }
-    vec4 t = texture(utexture, ftpos);
-    vec3 c = t.xyz;
-    c = c * shade;
-    fcolor = vec4(c, t.w);
+    vec3 light = f_light;
+    vec4 tex = texture(utexture, ftpos);
+    vec3 c = vec3(light.x*tex.x, light.y*tex.y, light.z*tex.z);
+    fcolor = vec4(c, tex.w);
   }
   )FSHADER";
 
@@ -1041,6 +1052,8 @@ struct GameState {
   float farz;
   Camera camera;
 
+  float sun_angle;
+
   // block graphics data
   struct {
     // block
@@ -1064,7 +1077,11 @@ struct GameState {
     GLuint gl_block_vao, gl_block_vbo, gl_block_ebo;
     GLuint gl_block_shader;
     GLuint gl_block_viewprojection_uniform;
+    GLuint gl_block_ambient_uniform;
+    GLuint gl_block_skybox_uniform;
     GLuint gl_block_texture_uniform;
+    GLuint gl_block_skylight_dir_uniform;
+    GLuint gl_block_skylight_color_uniform;
     GLuint gl_block_texture;
 
     // same thing as above, but for transparent blocks! (since they need to be rendered separately, because they look weird otherwise)
@@ -1112,6 +1129,7 @@ struct GameState {
     GLuint gl_text_vao, gl_text_vbo;
     GLuint gl_text_shader;
     GLuint gl_text_texture;
+    GLuint gl_text_texture_uniform;
     GLuint gl_text_offset_uniform;
     GLuint gl_text_color_uniform;
   };
@@ -1745,6 +1763,7 @@ static GLuint load_block_texture(const char *filename) {
   // create texture
   GLuint tex;
   glGenTextures(1, &tex);
+  glActiveTexture(GL_TEXTURE0);
   glBindTexture(GL_TEXTURE_2D, tex);
 
   // load texture
@@ -1787,13 +1806,21 @@ static void block_gl_buffer_create() {
   state.gl_block_ebo = ebo;
 
   state.gl_block_shader  = shader_create(block_vertex_shader, block_fragment_shader);
+  glUseProgram(state.gl_block_shader);
   state.gl_block_viewprojection_uniform  = glGetUniformLocation(state.gl_block_shader, "u_viewprojection");
+  state.gl_block_skybox_uniform  = glGetUniformLocation(state.gl_block_shader, "u_skybox");
+  state.gl_block_ambient_uniform  = glGetUniformLocation(state.gl_block_shader, "u_ambient");
   state.gl_block_texture_uniform = glGetUniformLocation(state.gl_block_shader, "utexture");
-  if (state.gl_block_texture_uniform == -1) die("Failed to find uniform location of 'utexture'");
+  state.gl_block_skylight_dir_uniform = glGetUniformLocation(state.gl_block_shader, "u_skylight_dir");
+  state.gl_block_skylight_color_uniform = glGetUniformLocation(state.gl_block_shader, "u_skylight_color");
+  glUniform1i(state.gl_block_texture_uniform, 0);
+  glUniform1i(state.gl_block_skybox_uniform, 1);
+  gl_ok_or_die;
 
   // load block textures
   state.gl_block_texture = load_block_texture("textures.bmp");
   if (!state.gl_block_texture) die("Failed to load texture");
+  glActiveTexture(GL_TEXTURE0);
   glBindTexture(GL_TEXTURE_2D, state.gl_block_texture);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_MIRRORED_REPEAT);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_MIRRORED_REPEAT);
@@ -1895,6 +1922,7 @@ static void skybox_gl_buffer_create() {
 
   // generate texture
   glGenTextures(1, &state.gl_skybox_texture);
+  glActiveTexture(GL_TEXTURE0);
   glBindTexture(GL_TEXTURE_CUBE_MAP, state.gl_skybox_texture);
   // const char *filenames[] = {
   //   "right.jpg",
@@ -2008,11 +2036,14 @@ static void ui_gl_buffer_create() {
   state.gl_ui_ebo = ebo;
 
   state.gl_ui_shader = shader_create(ui_vertex_shader, ui_fragment_shader);
+  glUseProgram(state.gl_ui_shader);
   state.gl_ui_texture_uniform = glGetUniformLocation(state.gl_ui_shader, "utexture");
   if (state.gl_ui_texture_uniform == -1) die("Failed to find uniform location of 'utexture'");
+  glUniform1i(state.gl_ui_texture_uniform, 0);
 
   // load ui textures
   state.gl_ui_texture = state.gl_block_texture;
+  glActiveTexture(GL_TEXTURE0);
   glBindTexture(GL_TEXTURE_2D, state.gl_ui_texture);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_MIRRORED_REPEAT);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_MIRRORED_REPEAT);
@@ -2033,6 +2064,10 @@ static void text_gl_buffer_create() {
   glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(UIVertex), (GLvoid*)offsetof(UIVertex, tx));
 
   state.gl_text_shader = shader_create(text_vertex_shader, text_fragment_shader);
+  glUseProgram(state.gl_text_shader);
+  state.gl_text_offset_uniform = glGetUniformLocation(state.gl_text_shader, "utextoffset");
+  state.gl_text_color_uniform = glGetUniformLocation(state.gl_text_shader, "utextcolor");
+  state.gl_text_texture_uniform = glGetUniformLocation(state.gl_text_shader, "utexture");
 
   // load font from file and create texture
   state.text_atlas_size.x = 512;
@@ -2063,7 +2098,9 @@ static void text_gl_buffer_create() {
 
   glGenTextures(1, &state.gl_text_texture);
 
+  glActiveTexture(GL_TEXTURE0);
   glBindTexture(GL_TEXTURE_2D, state.gl_text_texture);
+  glUniform1i(state.gl_text_texture_uniform, 0);
   glTexImage2D(GL_TEXTURE_2D, 0, GL_RED, tex_w, tex_h, 0, GL_RED, GL_UNSIGNED_BYTE, bitmap);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
@@ -2072,9 +2109,6 @@ static void text_gl_buffer_create() {
   fclose(f);
   free(ttf_mem);
   free(bitmap);
-
-  state.gl_text_offset_uniform = glGetUniformLocation(state.gl_text_shader, "utextoffset");
-  state.gl_text_color_uniform = glGetUniformLocation(state.gl_text_shader, "utextcolor");
 
   glBindVertexArray(0);
 }
@@ -2357,6 +2391,7 @@ static void update_water_texture(float dt) {
       p += 4*w*(NUM_BLOCK_SIDES-1);
     }
   }
+  glActiveTexture(GL_TEXTURE0);
   glBindTexture(GL_TEXTURE_2D, state.gl_block_texture);
   glTexSubImage2D(GL_TEXTURE_2D, 0, state.water_texture_pos.x0, state.water_texture_pos.y0, w*NUM_BLOCK_SIDES, h, GL_RGBA, GL_UNSIGNED_BYTE, state.water_texture_buffer);
 }
@@ -2411,11 +2446,11 @@ static void render_transparent_blocks(const m4 &viewprojection) {
   glEnable(GL_DEPTH_TEST);
   // glDisable(GL_DEPTH_TEST);
   glUseProgram(state.gl_block_shader);
-  glBindTexture(GL_TEXTURE_2D, state.gl_block_texture);
-  glBindVertexArray(state.gl_block_vao);
 
-  // @transparentblocks
   glBindVertexArray(state.gl_transparent_block_vao);
+  glActiveTexture(GL_TEXTURE0);
+  glBindTexture(GL_TEXTURE_2D, state.gl_block_texture);
+
 
   if (state.transparent_block_vertices_dirty) {
     // puts("resending block_vertices");
@@ -2442,12 +2477,18 @@ static void render_opaque_blocks(const m4 &viewprojection) {
 
   // camera
   glUniformMatrix4fv(state.gl_block_viewprojection_uniform, 1, GL_TRUE, viewprojection.d);
+  glUniform1f(state.gl_block_ambient_uniform, 0.7f);
+  v3 sun_direction = {0.0f, sinf(state.sun_angle), cosf(state.sun_angle)};
+  glUniform3f(state.gl_block_skylight_dir_uniform, sun_direction.x, sun_direction.y, sun_direction.z);
+  glUniform3f(state.gl_block_skylight_color_uniform, 0.2f, 0.2f, 0.2f);
 
   // texture
   // glUniform1i(state.gl_block_texture_uniform, 0);
-  glBindTexture(GL_TEXTURE_2D, state.gl_block_texture);
-
   glBindVertexArray(state.gl_block_vao);
+  glActiveTexture(GL_TEXTURE0);
+  glBindTexture(GL_TEXTURE_2D, state.gl_block_texture);
+  glActiveTexture(GL_TEXTURE1);
+  glBindTexture(GL_TEXTURE_CUBE_MAP, state.gl_skybox_texture);
 
   if (state.block_mesh_dirty) {
     // puts("re-rendering :O");
@@ -2481,6 +2522,7 @@ static void render_skybox(const m4 &view, const m4 &proj) {
   gl_ok_or_die;
 
   // remove translation from view matrix, since we want skybox to always be around us
+  // rotate to match the sky
   m4 v = view;
   v.d[3] = v.d[7] = v.d[11] = 0.0f;
   // v.d[12] = v.d[13] = v.d[14] = 0.0f;
@@ -2491,9 +2533,9 @@ static void render_skybox(const m4 &view, const m4 &proj) {
   gl_ok_or_die;
 
   glBindVertexArray(state.gl_skybox_vao);
-  glBindBuffer(GL_ARRAY_BUFFER, state.gl_skybox_vbo);
   glActiveTexture(GL_TEXTURE0);
   glBindTexture(GL_TEXTURE_CUBE_MAP, state.gl_skybox_texture);
+  glBindBuffer(GL_ARRAY_BUFFER, state.gl_skybox_vbo);
   gl_ok_or_die;
 
   glDrawArrays(GL_TRIANGLES, 0, 36);
@@ -2547,8 +2589,8 @@ static void render_ui() {
     }
     glUseProgram(state.gl_ui_shader);
 
+    glBindVertexArray(state.gl_ui_vao);
     // texture
-    glUniform1i(state.gl_ui_texture_uniform, 0);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, state.gl_ui_texture);
 
@@ -2556,8 +2598,6 @@ static void render_ui() {
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, state.gl_ui_ebo);
     glBufferData(GL_ARRAY_BUFFER, state.num_ui_vertices*sizeof(*state.ui_vertices), state.ui_vertices, GL_DYNAMIC_DRAW);
     glBufferData(GL_ELEMENT_ARRAY_BUFFER, state.num_ui_elements*sizeof(*state.ui_elements), state.ui_elements, GL_DYNAMIC_DRAW);
-
-    glBindVertexArray(state.gl_ui_vao);
 
     glDrawElements(GL_TRIANGLES, state.num_ui_elements, GL_UNSIGNED_INT, 0);
     glBindVertexArray(0);
@@ -2573,9 +2613,10 @@ static void render_text() {
 
   // data
   glBindVertexArray(state.gl_text_vao);
+  glActiveTexture(GL_TEXTURE0);
+  glBindTexture(GL_TEXTURE_2D, state.gl_text_texture);
   glBindBuffer(GL_ARRAY_BUFFER, state.gl_text_vbo);
   glBufferData(GL_ARRAY_BUFFER, state.num_text_vertices*sizeof(*state.text_vertices), state.text_vertices, GL_DYNAMIC_DRAW);
-  glBindTexture(GL_TEXTURE_2D, state.gl_text_texture);
 
   // shadow
   glUniform4f(state.gl_text_color_uniform, 0.0f, 0.0f, 0.0f, 0.7f);
@@ -2653,6 +2694,9 @@ mine_main {
 
     // hide and show blocks that went in and out of scope
     update_blocks(before, after);
+
+    // move sun a bit :)
+    state.sun_angle += 0.01f * dt;
 
     // debug prints
     debug_prints(loopindex, dt);
