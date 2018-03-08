@@ -171,7 +171,7 @@ static T* next(ArrayIter<T> &i) {
 
 
 #ifndef For
-#define For(container) decltype(container)::Iterator it; for(auto _iterator = iter(container); it = next(_iterator);)
+#define For(container) decltype(container)::Iterator it; for(auto _iterator = iter(container); (it = next(_iterator));)
 #endif
 
 #endif

@@ -943,7 +943,7 @@ static T* next(ColonyIter<T,N> &iter) {
 };
 
 #ifndef For
-#define For(container) decltype(container)::Iterator it; for(auto _iterator = iter(container); it = next(_iterator);)
+#define For(container) decltype(container)::Iterator it; for(auto _iterator = iter(container); (it = next(_iterator));)
 #endif
 
 static const int NUM_BLOCKS_x = 64, NUM_BLOCKS_y = 64, NUM_BLOCKS_z = 128;
@@ -2636,13 +2636,14 @@ static void render_text() {
   glBindVertexArray(0);
 }
 
+// on windows, you can't just use main for some reason.
+// instead, you need to use WinMain, or wmain, or wWinMain. pick your poison ;)
 #ifdef OS_WINDOWS
   // int WINAPI wWinMain(HINSTANCE /*hInstance*/, HINSTANCE /*hPrevInstance*/, PWSTR /*pCmdLine*/, int /*nCmdShow*/) {
   #define mine_main int wmain(int, wchar_t *[], wchar_t *[] )
 #else
   #define mine_main int main(int argc, const char **argv)
 #endif
-
 
 mine_main {
   sdl_init();
