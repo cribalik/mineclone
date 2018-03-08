@@ -655,6 +655,7 @@ static const char *block_vertex_shader = R"VSHADER(
 
     f_light = u_skylight_color * max(dot(-u_skylight_dir, normal), 0.0f);
     f_light += u_ambient;
+    f_light = min(f_light, 1);
 
     vec4 p = u_viewprojection * vec4(pos, 1.0f);
     gl_Position = p;
@@ -2136,6 +2137,7 @@ static void gamestate_init() {
   state.block_vertices_dirty = true;
   state.transparent_block_vertices_dirty = true;
   state.render_quickmenu = true;
+  state.sun_angle = PI/4.0f;
   puts("generating block mesh...");
   block_vertices_reset();
   generate_block_mesh(state.player_pos);
@@ -2478,10 +2480,10 @@ static void render_opaque_blocks(const m4 &viewprojection) {
   // camera
   glUniformMatrix4fv(state.gl_block_viewprojection_uniform, 1, GL_TRUE, viewprojection.d);
   v3 sun_direction = {0.0f, -cosf(state.sun_angle), -sinf(state.sun_angle)};
-  float ambient = clamp(sinf(state.sun_angle)/2.0f*0.6f + 0.5f, 0.2f, 0.8f);
+  float ambient = clamp(sinf(state.sun_angle)/2.0f*0.8f + 0.6f, 0.2f, 0.8f);
   glUniform1f(state.gl_block_ambient_uniform, ambient);
   glUniform3f(state.gl_block_skylight_dir_uniform, sun_direction.x, sun_direction.y, sun_direction.z);
-  glUniform3f(state.gl_block_skylight_color_uniform, 0.20f, 0.20f, 0.20f);
+  glUniform3f(state.gl_block_skylight_color_uniform, 0.30f, 0.30f, 0.30f);
 
   // texture
   // glUniform1i(state.gl_block_texture_uniform, 0);
@@ -2658,10 +2660,8 @@ mine_main {
   skybox_gl_buffer_create();
 
   // some gl settings
-  glEnable(GL_CULL_FACE);
   glCullFace(GL_BACK);
   glDepthFunc(GL_LEQUAL);
-  glActiveTexture(GL_TEXTURE0);
 
   // initialize game state
   gamestate_init();
@@ -2697,9 +2697,6 @@ mine_main {
     // hide and show blocks that went in and out of scope
     update_blocks(before, after);
 
-    // move sun a bit :)
-    state.sun_angle += 0.01f * dt;
-
     // debug prints
     debug_prints(loopindex, dt);
 
@@ -2709,9 +2706,9 @@ mine_main {
 
     const m4 view = camera_view_matrix(&state.camera, state.player_pos + CAMERA_OFFSET_FROM_PLAYER);
     const m4 proj = camera_projection_matrix(&state.camera, state.fov, state.nearz, state.farz, state.screen_ratio);
-    const m4 camera = proj * view;
+    const m4 viewprojection = proj * view;
 
-    render_opaque_blocks(camera);
+    render_opaque_blocks(viewprojection);
 
     render_ui();
 
@@ -2719,9 +2716,9 @@ mine_main {
 
     render_skybox(view, proj);
 
-    render_transparent_blocks(camera);
+    render_transparent_blocks(viewprojection);
 
-    // swap back buffer so it shows up on the screen
+    // swap back buffer
     SDL_GL_SwapWindow(state.window);
   }
 
