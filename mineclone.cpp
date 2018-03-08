@@ -1,10 +1,16 @@
 // TODO:
 //
-// * basic day cycle
+//
+// * optimize loading blocks:
+//   - cache block types for blocks in scope
+//   - data streaming in opengl for blocks
+//   - load new blocks in separate thread
+//
+// * reflect and refract lighting from skybox
+//
+// * basic day cycle (i.e. rotate skybox herpiderpi)
 //
 // * shadows
-//
-// * water reflection
 //
 // * movement through water
 //
@@ -17,8 +23,6 @@
 // * persist block changes to disk
 //
 // * crafting ui
-//
-// * optimize loading blocks (data streaming in opengl for blocks + load new blocks in separate thread)
 //
 // * better terrain (different block types)
 //
