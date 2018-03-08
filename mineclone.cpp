@@ -559,7 +559,7 @@ static m4 camera_rotation_matrix(Camera *camera) {
   return r;
 }
 
-static m4 camera_viewprojection_matrix(Camera *camera, v3 pos, float fov, float nearz, float farz, float screen_ratio) {
+static m4 camera_view_matrix(Camera *camera, v3 pos) {
   // translation
   m4 t = m4_iden();
   t.d[3] = -pos.x;
@@ -567,31 +567,35 @@ static m4 camera_viewprojection_matrix(Camera *camera, v3 pos, float fov, float 
   t.d[11] = -pos.z;
 
   // rotation
-  float cu = cosf(camera->up);
-  float su = sinf(camera->up);
-
-  // rotation
   m4 r = camera_rotation_matrix(camera);
 
-  // projection (http://www.songho.ca/opengl/gl_projectionmatrix.html)
-  m4 p = {};
-  {
-    const float n = nearz;
-    const float f = farz;
-    const float r = n * tanf(fov/2.0f);
-    const float t = r * screen_ratio;
-    p.d[0] = n/r;
-    p.d[5] = n/t;
-    p.d[10] = -(f+n)/(f-n);
-    p.d[11] = -2.0f*f*n/(f-n);
-    p.d[14] = -1.0f;
-  }
+  return r * t;
+}
 
+static m4 camera_projection_matrix(Camera *camera, float fov, float nearz, float farz, float screen_ratio) {
+  // projection (http://www.songho.ca/opengl/gl_projectionmatrix.html)
+  const float n = nearz;
+  const float f = farz;
+  const float r = n * tanf(fov/2.0f);
+  const float t = r * screen_ratio;
+  m4 p = {};
+  p.d[0] = n/r;
+  p.d[5] = n/t;
+  p.d[10] = -(f+n)/(f-n);
+  p.d[11] = -2.0f*f*n/(f-n);
+  p.d[14] = -1.0f;
+
+  return p;
+}
+
+static m4 camera_viewprojection_matrix(Camera *camera, v3 pos, float fov, float nearz, float farz, float screen_ratio) {
+  m4 v = camera_view_matrix(camera, pos);
+  m4 p = camera_projection_matrix(camera, fov, nearz, farz, screen_ratio);
   // printf("t,r,p:\n");
   // m4_print(t);
   // m4_print(r);
   // m4_print(p);
-  m4 result = p * (r * t);
+  m4 result = p * v;
   // m4_print(result);
   return (result);
 }
@@ -759,8 +763,9 @@ static const char *skybox_vertex_shader = R"VSHADER(
   uniform mat4 u_viewprojection;
 
   void main() {
-    gl_Position = u_viewprojection * vec4(pos, 1.0f);
-    ftpos = pos;
+    vec4 p = u_viewprojection * vec4(pos, 1.0f);
+    gl_Position = p.xyww;
+    ftpos = vec3(pos.x, -pos.z, pos.y);
   }
   )VSHADER";
 
@@ -778,7 +783,7 @@ static const char *skybox_fragment_shader = R"FSHADER(
   uniform samplerCube u_skybox;
 
   void main() {
-    fcolor = texture(u_skybox, ftpos);
+    fcolor = vec4(texture(u_skybox, ftpos).xyz, 1.0f);
   }
   )FSHADER";
 
@@ -1113,8 +1118,8 @@ struct GameState {
     GLuint gl_skybox_shader;
     GLuint gl_skybox_viewprojection_uniform;
     GLuint gl_skybox_texture;
-    #define SKYBOX_TEXTURE_SIZE BLOCK_TEXTURE_SIZE
-    u8 skybox_texture_buffer[SKYBOX_TEXTURE_SIZE * SKYBOX_TEXTURE_SIZE * 6 * 4]; // 4 because of rgba, and 6 sides of skybox
+    #define SKYBOX_TEXTURE_SIZE 128
+    u8 skybox_texture_buffer[SKYBOX_TEXTURE_SIZE * SKYBOX_TEXTURE_SIZE * 3]; // 3 because of rgb
   };
 
   // world data
@@ -1277,45 +1282,45 @@ static void push_block_face(Block block, BlockType type, Direction dir) {
 
   switch (dir) {
     case DIRECTION_UP: {
-      block_vertices[v] = {p.x,      p.y,      p2.z, ttop.x, ttop.y, DIRECTION_UP};
-      block_vertices[v+1] = {p2.x, p.y,      p2.z, ttop2.x, ttop.y, DIRECTION_UP};
+      block_vertices[v] =   {p.x,  p.y,  p2.z, ttop.x,  ttop.y,  DIRECTION_UP};
+      block_vertices[v+1] = {p2.x, p.y,  p2.z, ttop2.x, ttop.y,  DIRECTION_UP};
       block_vertices[v+2] = {p2.x, p2.y, p2.z, ttop2.x, ttop2.y, DIRECTION_UP};
-      block_vertices[v+3] = {p.x,      p2.y, p2.z, ttop.x, ttop2.y, DIRECTION_UP};
+      block_vertices[v+3] = {p.x,  p2.y, p2.z, ttop.x,  ttop2.y, DIRECTION_UP};
     } break;
 
     case DIRECTION_DOWN: {
-      block_vertices[v] = {p2.x, p.y,      p.z, tbot.x, tbot.y, DIRECTION_DOWN};
-      block_vertices[v+1] = {p.x,      p.y,      p.z, tbot2.x, tbot.y, DIRECTION_DOWN};
-      block_vertices[v+2] = {p.x,      p2.y, p.z, tbot2.x, tbot2.y, DIRECTION_DOWN};
-      block_vertices[v+3] = {p2.x, p2.y, p.z, tbot.x, tbot2.y, DIRECTION_DOWN};
+      block_vertices[v] =   {p2.x, p.y,  p.z, tbot.x,  tbot.y,  DIRECTION_DOWN};
+      block_vertices[v+1] = {p.x,  p.y,  p.z, tbot2.x, tbot.y,  DIRECTION_DOWN};
+      block_vertices[v+2] = {p.x,  p2.y, p.z, tbot2.x, tbot2.y, DIRECTION_DOWN};
+      block_vertices[v+3] = {p2.x, p2.y, p.z, tbot.x,  tbot2.y, DIRECTION_DOWN};
     } break;
 
     case DIRECTION_X: {
-      block_vertices[v] = {p2.x, p.y,      p.z,      tside.x, tside.y, DIRECTION_X};
-      block_vertices[v+1] = {p2.x, p2.y, p.z,      tside2.x, tside.y, DIRECTION_X};
+      block_vertices[v] =   {p2.x, p.y,  p.z,  tside.x,  tside.y,  DIRECTION_X};
+      block_vertices[v+1] = {p2.x, p2.y, p.z,  tside2.x, tside.y,  DIRECTION_X};
       block_vertices[v+2] = {p2.x, p2.y, p2.z, tside2.x, tside2.y, DIRECTION_X};
-      block_vertices[v+3] = {p2.x, p.y,      p2.z, tside.x, tside2.y, DIRECTION_X};
+      block_vertices[v+3] = {p2.x, p.y,  p2.z, tside.x,  tside2.y, DIRECTION_X};
     } break;
 
     case DIRECTION_Y: {
-      block_vertices[v] = {p2.x, p2.y, p.z,      tside.x, tside.y, DIRECTION_Y};
-      block_vertices[v+1] = {p.x,      p2.y, p.z,      tside2.x, tside.y, DIRECTION_Y};
-      block_vertices[v+2] = {p.x,      p2.y, p2.z, tside2.x, tside2.y, DIRECTION_Y};
-      block_vertices[v+3] = {p2.x, p2.y, p2.z, tside.x, tside2.y, DIRECTION_Y};
+      block_vertices[v] =   {p2.x, p2.y, p.z,  tside.x,  tside.y,  DIRECTION_Y};
+      block_vertices[v+1] = {p.x,  p2.y, p.z,  tside2.x, tside.y,  DIRECTION_Y};
+      block_vertices[v+2] = {p.x,  p2.y, p2.z, tside2.x, tside2.y, DIRECTION_Y};
+      block_vertices[v+3] = {p2.x, p2.y, p2.z, tside.x,  tside2.y, DIRECTION_Y};
     } break;
 
     case DIRECTION_MINUS_X: {
-      block_vertices[v] = {p.x, p2.y, p.z,      tside.x, tside.y, DIRECTION_MINUS_X};
-      block_vertices[v+1] = {p.x, p.y,      p.z,      tside2.x, tside.y, DIRECTION_MINUS_X};
-      block_vertices[v+2] = {p.x, p.y,      p2.z, tside2.x, tside2.y, DIRECTION_MINUS_X};
-      block_vertices[v+3] = {p.x, p2.y, p2.z, tside.x, tside2.y, DIRECTION_MINUS_X};
+      block_vertices[v] =   {p.x, p2.y, p.z,  tside.x,  tside.y,  DIRECTION_MINUS_X};
+      block_vertices[v+1] = {p.x, p.y,  p.z,  tside2.x, tside.y,  DIRECTION_MINUS_X};
+      block_vertices[v+2] = {p.x, p.y,  p2.z, tside2.x, tside2.y, DIRECTION_MINUS_X};
+      block_vertices[v+3] = {p.x, p2.y, p2.z, tside.x,  tside2.y, DIRECTION_MINUS_X};
     } break;
 
     case DIRECTION_MINUS_Y: {
-      block_vertices[v] = {p.x,      p.y, p.z,      tside.x, tside.y, DIRECTION_MINUS_Y};
-      block_vertices[v+1] = {p2.x, p.y, p.z,      tside2.x, tside.y, DIRECTION_MINUS_Y};
+      block_vertices[v] =   {p.x,  p.y, p.z,  tside.x,  tside.y,  DIRECTION_MINUS_Y};
+      block_vertices[v+1] = {p2.x, p.y, p.z,  tside2.x, tside.y,  DIRECTION_MINUS_Y};
       block_vertices[v+2] = {p2.x, p.y, p2.z, tside2.x, tside2.y, DIRECTION_MINUS_Y};
-      block_vertices[v+3] = {p.x,      p.y, p2.z, tside.x, tside2.y, DIRECTION_MINUS_Y};
+      block_vertices[v+3] = {p.x,  p.y, p2.z, tside.x,  tside2.y, DIRECTION_MINUS_Y};
     } break;
 
     default: return;
@@ -1821,7 +1826,6 @@ static void block_gl_buffer_create() {
 
 static void skybox_gl_buffer_create() {
   float vertices[] = {
-      // positions          
       -1.0f,  1.0f, -1.0f,
       -1.0f, -1.0f, -1.0f,
        1.0f, -1.0f, -1.0f,
@@ -1884,28 +1888,66 @@ static void skybox_gl_buffer_create() {
   state.gl_skybox_shader = shader_create(skybox_vertex_shader, skybox_fragment_shader);
   glUseProgram(state.gl_skybox_shader);
   state.gl_skybox_viewprojection_uniform = glGetUniformLocation(state.gl_skybox_shader, "u_viewprojection");
-  // if (state.gl_skybox_viewprojection_uniform == -1)
-    // die("Failed to find uniform location of 'u_viewprojection' in skybox shader");
-
 
   // generate texture
   glGenTextures(1, &state.gl_skybox_texture);
   glBindTexture(GL_TEXTURE_CUBE_MAP, state.gl_skybox_texture);
-  u8 *out = state.skybox_texture_buffer;
+  // const char *filenames[] = {
+  //   "right.jpg",
+  //   "left.jpg",
+  //   "bottom.jpg",
+  //   "top.jpg",
+  //   "front.jpg",
+  //   "back.jpg",
+  // };
+
+  const float x_offset[] = {0.0f,  0.0f, -0.5f, 0.5f, 0.0f, 1.0f};
+  const float y_offset[] = {0.5f, -0.5f,  0.0f, 0.0f, 0.0f, 0.0f};
+  const float r0 = 0.0f,
+              g0 = 0.0f,
+              b0 = 0.7f;
+  const float r1 = 1.0f,
+              g1 = 0.2f,
+              b1 = 0.2f;
+
   for (int i = 0; i < 6; ++i) {
-    const int RED = UINT8_MAX/(i+1);
-    for (int j = 0; j < ARRAY_LEN(state.skybox_texture_buffer)/6; j+=4) {
-      *out++ = RED;
-      *out++ = UINT8_MAX/3;
-      *out++ = UINT8_MAX/2;
-      *out++ = UINT8_MAX;
+    u8 *out = state.skybox_texture_buffer;
+    for (int x = 0; x < SKYBOX_TEXTURE_SIZE; ++x)
+    for (int y = 0; y < SKYBOX_TEXTURE_SIZE; ++y) {
+      // calculate distance to center of this face
+      float w = SKYBOX_TEXTURE_SIZE/2.0f;
+      float lat = atan2f(((float)x - w)/w, 1.0f);
+      float lng = atan2f(((float)y - w)/w, 1.0f);
+      // now add distance from face to the 'front' face
+      lat += x_offset[i]*PI;
+      lng += y_offset[i]*PI;
+      // now calculate the spherical distance to the sun (at angle (0,0)), see https://en.wikipedia.org/wiki/Great-circle_distance
+      float d = acos(cos(lat) * cos(fabs(lng)));
+      // normalize distance to (0,1), so we can lerp between colors
+      float t = 1.0f - d/PI;
+      const u8 r = UINT8_MAX * lerp(t, r0, r1);
+      const u8 g = UINT8_MAX * lerp(t, g0, g1);
+      const u8 b = UINT8_MAX * lerp(t, b0, b1);
+      *out++ = r;
+      *out++ = g;
+      *out++ = b;
     }
-  }
-  for (int i = 0; i < 6; ++i) {
+
+    // int w,h,n;
+    // stbi_set_flip_vertically_on_load(1);
+    // u8 *data = stbi_load(filenames[i], &w, &h, &n, 3);
+    // if (!data) die("Could not load texture %s", filenames[i]);
+    // if (n != 3) die("Texture %s must only be rgb, but had %i channels\n", filenames[i], n);
+
+    // glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + i,
+    //              0, GL_RGB, w, h, 0, GL_RGB, GL_UNSIGNED_BYTE,
+                 // data);
+
     glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + i,
-                 0, GL_RGB, SKYBOX_TEXTURE_SIZE, SKYBOX_TEXTURE_SIZE, 0, GL_RGBA,
+                 0, GL_RGB, SKYBOX_TEXTURE_SIZE, SKYBOX_TEXTURE_SIZE, 0, GL_RGB,
                  GL_UNSIGNED_BYTE,
-                 state.skybox_texture_buffer + ARRAY_LEN(state.skybox_texture_buffer)*i/6);
+                 state.skybox_texture_buffer);
+    // stbi_image_free(data);
   }
   glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
   glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -2334,7 +2376,35 @@ static void sdl_init() {
   if (!glcontext) die("Failed to create context");
 }
 
-static void render_blocks(const m4 &viewprojection) {
+static void render_transparent_blocks(const m4 &viewprojection) {
+  glEnable(GL_BLEND);
+  glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+  glEnable(GL_CULL_FACE);
+  // glDisable(GL_CULL_FACE);
+  glEnable(GL_DEPTH_TEST);
+  // glDisable(GL_DEPTH_TEST);
+  glUseProgram(state.gl_block_shader);
+  glBindTexture(GL_TEXTURE_2D, state.gl_block_texture);
+  glBindVertexArray(state.gl_block_vao);
+
+  // @transparentblocks
+  glBindVertexArray(state.gl_transparent_block_vao);
+
+  if (state.transparent_block_vertices_dirty) {
+    // puts("resending block_vertices");
+    glBindBuffer(GL_ARRAY_BUFFER, state.gl_transparent_block_vbo);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, state.gl_transparent_block_ebo);
+    glBufferData(GL_ARRAY_BUFFER, state.num_transparent_block_vertices*sizeof(*state.transparent_block_vertices), state.transparent_block_vertices, GL_DYNAMIC_DRAW);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, state.num_transparent_block_elements*sizeof(*state.transparent_block_elements), state.transparent_block_elements, GL_DYNAMIC_DRAW);
+    state.transparent_block_vertices_dirty = false;
+  }
+
+  glDrawElements(GL_TRIANGLES, state.num_transparent_block_elements, GL_UNSIGNED_INT, 0);
+  glBindVertexArray(0);
+  gl_ok_or_die;
+}
+
+static void render_opaque_blocks(const m4 &viewprojection) {
   glEnable(GL_BLEND);
   glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
   glEnable(GL_CULL_FACE);
@@ -2345,12 +2415,9 @@ static void render_blocks(const m4 &viewprojection) {
 
   // camera
   glUniformMatrix4fv(state.gl_block_viewprojection_uniform, 1, GL_TRUE, viewprojection.d);
-  glGetUniformLocation(state.gl_block_shader, "far");
-  glGetUniformLocation(state.gl_block_shader, "nearsize");
 
   // texture
-  glUniform1i(state.gl_block_texture_uniform, 0);
-  glActiveTexture(GL_TEXTURE0);
+  // glUniform1i(state.gl_block_texture_uniform, 0);
   glBindTexture(GL_TEXTURE_2D, state.gl_block_texture);
 
   glBindVertexArray(state.gl_block_vao);
@@ -2375,38 +2442,25 @@ static void render_blocks(const m4 &viewprojection) {
   glDrawElements(GL_TRIANGLES, state.num_block_elements, GL_UNSIGNED_INT, 0);
   glBindVertexArray(0);
   gl_ok_or_die;
-
-
-  // @transparentblocks
-  glBindVertexArray(state.gl_transparent_block_vao);
-
-  if (state.transparent_block_vertices_dirty) {
-    // puts("resending block_vertices");
-    glBindBuffer(GL_ARRAY_BUFFER, state.gl_transparent_block_vbo);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, state.gl_transparent_block_ebo);
-    glBufferData(GL_ARRAY_BUFFER, state.num_transparent_block_vertices*sizeof(*state.transparent_block_vertices), state.transparent_block_vertices, GL_DYNAMIC_DRAW);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, state.num_transparent_block_elements*sizeof(*state.transparent_block_elements), state.transparent_block_elements, GL_DYNAMIC_DRAW);
-    state.transparent_block_vertices_dirty = false;
-  }
-
-  glDrawElements(GL_TRIANGLES, state.num_transparent_block_elements, GL_UNSIGNED_INT, 0);
-  glBindVertexArray(0);
-  gl_ok_or_die;
 }
 
-static void render_skybox(const m4 &viewprojection) {
-  // glEnable(GL_DEPTH_TEST);
-  glDisable(GL_DEPTH_TEST);
+static void render_skybox(const m4 &view, const m4 &proj) {
+  glEnable(GL_DEPTH_TEST);
+  // glDisable(GL_DEPTH_TEST);
   glDisable(GL_CULL_FACE);
   gl_ok_or_die;
 
   glUseProgram(state.gl_skybox_shader);
   gl_ok_or_die;
 
-  m4 m = viewprojection;
-  m.d[3] = m.d[7] = m.d[11] = /*m.d[12] = m.d[13] = m.d[14] =*/ 0.0f;
-  m.d[15] = 1.0f;
-  glUniformMatrix4fv(state.gl_skybox_viewprojection_uniform, 1, GL_TRUE, m.d);
+  // remove translation from view matrix, since we want skybox to always be around us
+  m4 v = view;
+  v.d[3] = v.d[7] = v.d[11] = 0.0f;
+  // v.d[12] = v.d[13] = v.d[14] = 0.0f;
+  v.d[15] = 1.0f;
+
+  m4 vp = proj * v;
+  glUniformMatrix4fv(state.gl_skybox_viewprojection_uniform, 1, GL_TRUE, vp.d);
   gl_ok_or_die;
 
   glBindVertexArray(state.gl_skybox_vao);
@@ -2536,6 +2590,8 @@ mine_main {
   // some gl settings
   glEnable(GL_CULL_FACE);
   glCullFace(GL_BACK);
+  glDepthFunc(GL_LEQUAL);
+  glActiveTexture(GL_TEXTURE0);
 
   // initialize game state
   gamestate_init();
@@ -2578,15 +2634,19 @@ mine_main {
     glClearColor(0.0f, 0.8f, 0.6f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-    const m4 camera = camera_viewprojection_matrix(&state.camera, state.player_pos + CAMERA_OFFSET_FROM_PLAYER, state.fov, state.nearz, state.farz, state.screen_ratio);
+    const m4 view = camera_view_matrix(&state.camera, state.player_pos + CAMERA_OFFSET_FROM_PLAYER);
+    const m4 proj = camera_projection_matrix(&state.camera, state.fov, state.nearz, state.farz, state.screen_ratio);
+    const m4 camera = proj * view;
 
-    render_skybox(camera);
-
-    render_blocks(camera);
+    render_opaque_blocks(camera);
 
     render_ui();
 
     render_text();
+
+    render_skybox(view, proj);
+
+    render_transparent_blocks(camera);
 
     // swap back buffer so it shows up on the screen
     SDL_GL_SwapWindow(state.window);
