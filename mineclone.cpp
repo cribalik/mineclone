@@ -1946,7 +1946,6 @@ static void skybox_gl_buffer_create() {
         t = clamp(t, 0.0f, 1.0f);
         t = pow(t, 5);
         const int bi = (y*SKYBOX_TEXTURE_SIZE + x)*3;
-        printf("%f\n", t);
         const float r = 1.0f;
         const float g = 0.9f;
         const float b = 0.1f;
