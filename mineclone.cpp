@@ -1904,11 +1904,11 @@ static void skybox_gl_buffer_create() {
   const float y_offset[] = {0.0f,  0.0f, -0.5f, 0.5f, 0.0f, 1.0f};
   const float x_offset[] = {0.5f, -0.5f,  0.0f, 0.0f, 0.0f, 0.0f};
   const float r0 = 0.0f,
-              g0 = 0.1f,
-              b0 = 0.3f;
-  const float r1 = 1.0f,
-              g1 = 0.2f,
-              b1 = 0.2f;
+              g0 = 0.5f,
+              b0 = 1.0f;
+  const float r1 = 0.7f,
+              g1 = 0.5f,
+              b1 = 1.0f;
 
   for (int face = 0; face < 6; ++face) {
     u8 *out = state.skybox_texture_buffer;
@@ -1945,10 +1945,11 @@ static void skybox_gl_buffer_create() {
         float t = d/SKYBOX_TEXTURE_SIZE*8;
         t = clamp(t, 0.0f, 1.0f);
         t = pow(t, 5);
+        t = clamp(t, 0.2f, 1.0f);
         const int bi = (y*SKYBOX_TEXTURE_SIZE + x)*3;
         const float r = 1.0f;
-        const float g = 0.9f;
-        const float b = 0.1f;
+        const float g = 0.8f;
+        const float b = 0.4f;
         state.skybox_texture_buffer[bi] = UINT8_MAX * lerp(t, r, (float)state.skybox_texture_buffer[bi]/UINT8_MAX);
         state.skybox_texture_buffer[bi+1] = UINT8_MAX * lerp(t, g, (float)state.skybox_texture_buffer[bi+1]/UINT8_MAX);
         state.skybox_texture_buffer[bi+2] = UINT8_MAX * lerp(t, b, (float)state.skybox_texture_buffer[bi+2]/UINT8_MAX);
