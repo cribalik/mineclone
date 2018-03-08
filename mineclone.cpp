@@ -653,7 +653,7 @@ static const char *block_vertex_shader = R"VSHADER(
         break;
     }
 
-    f_light = u_skylight_color * max(dot(u_skylight_dir, normal), 0.0f);
+    f_light = u_skylight_color * max(dot(-u_skylight_dir, normal), 0.0f);
     f_light += u_ambient;
 
     vec4 p = u_viewprojection * vec4(pos, 1.0f);
@@ -2477,10 +2477,11 @@ static void render_opaque_blocks(const m4 &viewprojection) {
 
   // camera
   glUniformMatrix4fv(state.gl_block_viewprojection_uniform, 1, GL_TRUE, viewprojection.d);
-  glUniform1f(state.gl_block_ambient_uniform, 0.7f);
-  v3 sun_direction = {0.0f, sinf(state.sun_angle), cosf(state.sun_angle)};
+  v3 sun_direction = {0.0f, -cosf(state.sun_angle), -sinf(state.sun_angle)};
+  float ambient = clamp(sinf(state.sun_angle)/2.0f*0.6f + 0.5f, 0.2f, 0.8f);
+  glUniform1f(state.gl_block_ambient_uniform, ambient);
   glUniform3f(state.gl_block_skylight_dir_uniform, sun_direction.x, sun_direction.y, sun_direction.z);
-  glUniform3f(state.gl_block_skylight_color_uniform, 0.2f, 0.2f, 0.2f);
+  glUniform3f(state.gl_block_skylight_color_uniform, 0.20f, 0.20f, 0.20f);
 
   // texture
   // glUniform1i(state.gl_block_texture_uniform, 0);
