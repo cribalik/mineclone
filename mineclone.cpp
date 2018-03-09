@@ -2710,13 +2710,13 @@ mine_main {
 
     render_opaque_blocks(viewprojection);
 
-    render_ui();
-
-    render_text();
-
     render_skybox(view, proj);
 
     render_transparent_blocks(viewprojection);
+
+    render_ui();
+
+    render_text();
 
     // swap back buffer
     SDL_GL_SwapWindow(state.window);
