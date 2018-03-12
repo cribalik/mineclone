@@ -1,7 +1,5 @@
 // TODO:
 //
-// * do lighting in sRGB
-//
 // * optimize loading blocks:
 //   - cache block types for blocks in scope
 //   - data streaming in opengl for blocks
@@ -290,6 +288,8 @@ static v3i max(v3i a, v3i b) {
   return {max(a.x, b.x), max(a.y, b.y), max(a.z, b.z)};
 }
 
+#define at_most min
+#define at_least max
 
 // @perlin
 // good explanation of perlin noise: http://flafla2.github.io/2014/08/09/perlinnoise.html
@@ -653,9 +653,11 @@ static const char *block_vertex_shader = R"VSHADER(
         break;
     }
 
-    f_light = u_skylight_color * max(dot(-u_skylight_dir, normal), 0.0f);
+    f_light = vec3(0.0f);
+    if (u_skylight_dir.z < 0.7f)
+      f_light += u_skylight_color * max(dot(-u_skylight_dir, normal), 0.0f);
     f_light += u_ambient;
-    f_light = min(f_light, 1);
+    f_light = min(f_light, 1.0f);
 
     vec4 p = u_viewprojection * vec4(pos, 1.0f);
     gl_Position = p;
@@ -679,10 +681,28 @@ static const char *block_fragment_shader = R"FSHADER(
   // uniform
   uniform sampler2D utexture;
 
+  // see https://medium.com/game-dev-daily/the-srgb-learning-curve-773b7f68cf7a
+  // and https://learnopengl.com/Advanced-Lighting/Gamma-Correction
+  // for nice explanations of gamma
+
+  float to_srgbf(float val) {
+      if(val < 0.0031308f) {
+          val = val * 12.92f;
+      } else {
+          val = 1.055f * pow(val, 1.0f/2.4f) - 0.055f;
+      }
+      return val;
+  }
+
+  vec3 to_srgb(vec3 v) {
+    return vec3(to_srgbf(v.x), to_srgbf(v.y), to_srgbf(v.z));
+  }
+
   void main() {
     vec3 light = f_light;
     vec4 tex = texture(utexture, ftpos);
-    vec3 c = vec3(light.x*tex.x, light.y*tex.y, light.z*tex.z);
+    vec3 c = light * tex.xyz;
+    c = to_srgb(c);
     fcolor = vec4(c, tex.w);
   }
   )FSHADER";
@@ -797,9 +817,10 @@ static const char *skybox_fragment_shader = R"FSHADER(
 
   // uniform
   uniform samplerCube u_skybox;
+  uniform float u_ambient;
 
   void main() {
-    fcolor = vec4(texture(u_skybox, ftpos).xyz, 1.0f);
+    fcolor = vec4(u_ambient* texture(u_skybox, ftpos).xyz, 1.0f);
   }
   )FSHADER";
 
@@ -1056,6 +1077,7 @@ struct GameState {
   float sun_angle;
 
   // block graphics data
+  float ambient_light;
   struct {
     // block
     #define NUM_BLOCK_SIDES 3 // the number of different textures we have per block. at the moment, it is top,side,bottom
@@ -1140,6 +1162,7 @@ struct GameState {
     GLuint gl_skybox_vao, gl_skybox_vbo;
     GLuint gl_skybox_shader;
     GLuint gl_skybox_viewprojection_uniform;
+    GLuint gl_skybox_ambient_uniform;
     GLuint gl_skybox_texture;
     #define SKYBOX_TEXTURE_SIZE 128
     u8 skybox_texture_buffer[SKYBOX_TEXTURE_SIZE * SKYBOX_TEXTURE_SIZE * 3]; // 3 because of rgb
@@ -1768,7 +1791,7 @@ static GLuint load_block_texture(const char *filename) {
   glBindTexture(GL_TEXTURE_2D, tex);
 
   // load texture
-  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGB, GL_UNSIGNED_BYTE, data);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_SRGB_ALPHA, w, h, 0, GL_RGB, GL_UNSIGNED_BYTE, data);
 
   stbi_image_free(data);
 
@@ -1920,6 +1943,7 @@ static void skybox_gl_buffer_create() {
   state.gl_skybox_shader = shader_create(skybox_vertex_shader, skybox_fragment_shader);
   glUseProgram(state.gl_skybox_shader);
   state.gl_skybox_viewprojection_uniform = glGetUniformLocation(state.gl_skybox_shader, "u_viewprojection");
+  state.gl_skybox_ambient_uniform = glGetUniformLocation(state.gl_skybox_shader, "u_ambient");
 
   // generate texture
   glGenTextures(1, &state.gl_skybox_texture);
@@ -1969,6 +1993,7 @@ static void skybox_gl_buffer_create() {
     }
 
     // draw sun
+    #if 0
     if (face == 4) {
       for (int x = SKYBOX_TEXTURE_SIZE*3/8; x < SKYBOX_TEXTURE_SIZE*5/8; ++x)
       for (int y = SKYBOX_TEXTURE_SIZE*3/8; y < SKYBOX_TEXTURE_SIZE*5/8; ++y) {
@@ -1988,22 +2013,27 @@ static void skybox_gl_buffer_create() {
         state.skybox_texture_buffer[bi+2] = UINT8_MAX * lerp(t, b, (float)state.skybox_texture_buffer[bi+2]/UINT8_MAX);
       }
     }
-
-    // int w,h,n;
-    // stbi_set_flip_vertically_on_load(1);
-    // u8 *data = stbi_load(filenames[face], &w, &h, &n, 3);
-    // if (!data) die("Could not load texture %s", filenames[face]);
-    // if (n != 3) die("Texture %s must only be rgb, but had %face channels\n", filenames[face], n);
-
-    // glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + face,
-    //              0, GL_RGB, w, h, 0, GL_RGB, GL_UNSIGNED_BYTE,
-                 // data);
+    #endif
 
     glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + face,
                  0, GL_RGB, SKYBOX_TEXTURE_SIZE, SKYBOX_TEXTURE_SIZE, 0, GL_RGB,
                  GL_UNSIGNED_BYTE,
                  state.skybox_texture_buffer);
-    // stbi_image_free(data);
+
+    // in case we want to use an image texture instead, use this code
+    #if 0
+    int w,h,n;
+    stbi_set_flip_vertically_on_load(1);
+    u8 *data = stbi_load(filenames[face], &w, &h, &n, 3);
+    if (!data) die("Could not load texture %s", filenames[face]);
+    if (n != 3) die("Texture %s must only be rgb, but had %face channels\n", filenames[face], n);
+
+    glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + face,
+                 0, GL_RGB, w, h, 0, GL_RGB, GL_UNSIGNED_BYTE,
+                 data);
+
+    stbi_image_free(data);
+    #endif
   }
   glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
   glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -2422,7 +2452,6 @@ static void sdl_init() {
   sdl_try(SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE));
   sdl_try(SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3));
   sdl_try(SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3));
-
   // hide mouse
   sdl_try(SDL_SetRelativeMouseMode(SDL_TRUE));
 
@@ -2437,7 +2466,7 @@ static void sdl_init() {
 
   // create glcontext
   SDL_GLContext glcontext = SDL_GL_CreateContext(state.window);
-  if (!glcontext) die("Failed to create context");
+  if (!glcontext) die("Failed to create context: %s", SDL_GetError());
 }
 
 static void render_transparent_blocks(const m4 &viewprojection) {
@@ -2479,11 +2508,16 @@ static void render_opaque_blocks(const m4 &viewprojection) {
 
   // camera
   glUniformMatrix4fv(state.gl_block_viewprojection_uniform, 1, GL_TRUE, viewprojection.d);
+
+  // lighting from sun
   v3 sun_direction = {0.0f, -cosf(state.sun_angle), -sinf(state.sun_angle)};
-  float ambient = clamp(sinf(state.sun_angle)/2.0f*0.8f + 0.6f, 0.2f, 0.8f);
-  glUniform1f(state.gl_block_ambient_uniform, ambient);
+
+  float sun_height_normalized = sinf(state.sun_angle)/2.0f + 0.5f; // in range [0, 1]
+  state.ambient_light = at_most(sun_height_normalized + 0.2f, 1.0f);
+
+  glUniform1f(state.gl_block_ambient_uniform, state.ambient_light);
   glUniform3f(state.gl_block_skylight_dir_uniform, sun_direction.x, sun_direction.y, sun_direction.z);
-  glUniform3f(state.gl_block_skylight_color_uniform, 0.30f, 0.30f, 0.30f);
+  glUniform3f(state.gl_block_skylight_color_uniform, 0.50f, 0.50f, 0.50f);
 
   // texture
   // glUniform1i(state.gl_block_texture_uniform, 0);
@@ -2533,6 +2567,7 @@ static void render_skybox(const m4 &view, const m4 &proj) {
 
   m4 vp = proj * v;
   glUniformMatrix4fv(state.gl_skybox_viewprojection_uniform, 1, GL_TRUE, vp.d);
+  glUniform1f(state.gl_skybox_ambient_uniform, state.ambient_light);
   gl_ok_or_die;
 
   glBindVertexArray(state.gl_skybox_vao);
@@ -2662,6 +2697,11 @@ mine_main {
   // some gl settings
   glCullFace(GL_BACK);
   glDepthFunc(GL_LEQUAL);
+  // TODO: we want the hardware to do the sRGB encoding, and not in the shaders,
+  // But this doesn't seem to work on intel drivers on ubuntu,
+  // at least for the default framebuffer :'(
+  // When we change to deferred rendering, check if the intel drivers support that.
+  // glEnable(GL_FRAMEBUFFER_SRGB);
 
   // initialize game state
   gamestate_init();
@@ -2699,6 +2739,8 @@ mine_main {
 
     // debug prints
     debug_prints(loopindex, dt);
+
+    state.sun_angle += 0.01f;
 
     // @render
     glClearColor(0.0f, 0.8f, 0.6f, 1.0f);
