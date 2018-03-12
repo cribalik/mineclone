@@ -1,6 +1,6 @@
 // TODO:
 //
-// * shadows
+// * fix peter pan:ing of shadows
 //
 // * optimize loading blocks:
 //   - cache block types for blocks in scope
@@ -26,8 +26,6 @@
 // * better terrain (different block types)
 //
 // * inventory ui
-//
-// * skybox?
 //
 ////
 
@@ -148,6 +146,7 @@ static T clamp(T x, T a, T b) {
 }
 
 static const float PI = 3.141592651f;
+static const float SQRT2 = 1.4142135623f;
 
 struct v3i {
   int x,y,z;
@@ -175,8 +174,18 @@ static bool is_invalid(Block b) {
   return b.x == INT_MIN;
 }
 
-struct v3 {
-  float x,y,z;
+struct v2 {
+  float x,y;
+};
+
+union v3 {
+  struct {
+    float x,y,z;
+  };
+  struct {
+    v2 xy;
+    float _z;
+  };
 };
 
 static float operator*(v3 a, v3 b) {
@@ -232,10 +241,6 @@ static v3 normalize(v3 v) {
 
 struct v2i {
   int x,y;
-};
-
-struct v2 {
-  float x,y;
 };
 
 static void operator+=(v2& v, v2 x) {
@@ -537,7 +542,7 @@ static void camera_pitch(Camera *camera, float angle) {
   camera->up = clamp(camera->up + angle, -PI/2.0f, PI/2.0f);
 }
 
-static m4 camera_rotation_matrix(Camera *camera) {
+static m4 camera_rotation_matrix(const Camera *camera) {
   // rotation
   float cu = cosf(camera->up);
   float su = sinf(camera->up);
@@ -564,7 +569,7 @@ static m4 camera_rotation_matrix(Camera *camera) {
   return r;
 }
 
-static m4 camera_view_matrix(Camera *camera, v3 pos) {
+static m4 camera_view_matrix(const Camera *camera, v3 pos) {
   // translation
   m4 t = m4_iden();
   t.d[3] = -pos.x;
@@ -577,7 +582,7 @@ static m4 camera_view_matrix(Camera *camera, v3 pos) {
   return r * t;
 }
 
-static m4 camera_projection_matrix(Camera *camera, float fov, float nearz, float farz, float screen_ratio) {
+static m4 camera_projection_matrix(const Camera *camera, float fov, float nearz, float farz, float screen_ratio) {
   // projection (http://www.songho.ca/opengl/gl_projectionmatrix.html)
   const float n = nearz;
   const float f = farz;
@@ -593,7 +598,7 @@ static m4 camera_projection_matrix(Camera *camera, float fov, float nearz, float
   return p;
 }
 
-static m4 camera_viewprojection_matrix(Camera *camera, v3 pos, float fov, float nearz, float farz, float screen_ratio) {
+static m4 camera_viewprojection_matrix(const Camera *camera, v3 pos, float fov, float nearz, float farz, float screen_ratio) {
   m4 v = camera_view_matrix(camera, pos);
   m4 p = camera_projection_matrix(camera, fov, nearz, farz, screen_ratio);
   // printf("t,r,p:\n");
@@ -603,6 +608,29 @@ static m4 camera_viewprojection_matrix(Camera *camera, v3 pos, float fov, float 
   m4 result = p * v;
   // m4_print(result);
   return (result);
+}
+
+static void camera_lookat(Camera *camera, v3 from, v3 to) {
+  v3 d = to - from;
+  camera->look = normalize(d.xy);
+  d = normalize(d);
+  camera->up = asinf(d.z);
+}
+
+static m4 camera_ortho_matrix(const Camera *camera, float width, float height, float nearz, float farz) {
+  m4 o = {};
+  o.d[0] = 1.0f/width;
+  o.d[5] = 1.0f/height;
+  o.d[10] = -2.0f/(farz - nearz);
+  o.d[11] = -(farz + nearz)/(farz - nearz);
+  o.d[15] = 1.0f;
+  return o;
+}
+
+static m4 camera_viewortho_matrix(const Camera *camera, v3 pos, float width, float height, float nearz, float farz) {
+  m4 v = camera_view_matrix(camera, pos);
+  m4 o = camera_ortho_matrix(camera, width, height, nearz, farz);
+  return o * v;
 }
 
 
@@ -616,16 +644,17 @@ static const char *block_vertex_shader = R"VSHADER(
   layout(location = 2) in uint dir;
 
   // out
-  out vec2 ftpos;
-  flat out uint fdir;
-  out vec3 f_light;
+  out vec2 f_tpos;
+  out vec3 f_diffuse;
+  out vec3 f_ambient;
+  out vec4 f_shadowmap_pos;
 
   // uniform
   uniform mat4 u_viewprojection;
-  uniform samplerCube u_skybox;
   uniform float u_ambient;
   uniform vec3 u_skylight_dir;
   uniform vec3 u_skylight_color;
+  uniform mat4 u_shadowmap_viewprojection;
 
   void main() {
 
@@ -653,16 +682,13 @@ static const char *block_vertex_shader = R"VSHADER(
         break;
     }
 
-    f_light = vec3(0.0f);
-    if (u_skylight_dir.z < 0.7f)
-      f_light += u_skylight_color * max(dot(-u_skylight_dir, normal), 0.0f);
-    f_light += u_ambient;
-    f_light = min(f_light, 1.0f);
+    f_ambient = vec3(u_ambient);
+    f_diffuse = vec3(0.0f);
+    f_diffuse += u_skylight_color * max(dot(-u_skylight_dir, normal), 0.0f);
 
-    vec4 p = u_viewprojection * vec4(pos, 1.0f);
-    gl_Position = p;
-    ftpos = tpos;
-    fdir = dir;
+    gl_Position = u_viewprojection * vec4(pos, 1.0f);
+    f_shadowmap_pos = u_shadowmap_viewprojection * vec4(pos, 1.0f);
+    f_tpos = tpos;
   }
   )VSHADER";
 
@@ -671,15 +697,17 @@ static const char *block_fragment_shader = R"FSHADER(
   #version 330 core
 
   // in
-  in vec2 ftpos;
-  flat in uint fdir;
-  in vec3 f_light;
+  in vec2 f_tpos;
+  in vec3 f_diffuse;
+  in vec3 f_ambient;
+  in vec4 f_shadowmap_pos;
 
   // out
-  out vec4 fcolor;
+  out vec4 f_color;
 
   // uniform
-  uniform sampler2D utexture;
+  uniform sampler2D u_texture;
+  uniform sampler2D u_shadowmap;
 
   // see https://medium.com/game-dev-daily/the-srgb-learning-curve-773b7f68cf7a
   // and https://learnopengl.com/Advanced-Lighting/Gamma-Correction
@@ -698,14 +726,54 @@ static const char *block_fragment_shader = R"FSHADER(
     return vec3(to_srgbf(v.x), to_srgbf(v.y), to_srgbf(v.z));
   }
 
+  float calc_shadow(vec4 pos) {
+    // perspective divide
+    vec3 p = pos.xyz / pos.w;
+    // normalize to [0,1]
+    p = p*0.5 + 0.5;
+    float depth = texture(u_shadowmap, p.xy).r;
+    float shadow_bias = 0.001f;
+    return depth < p.z - shadow_bias ? 0.0f : 1.0f;
+  }
+
   void main() {
-    vec3 light = f_light;
-    vec4 tex = texture(utexture, ftpos);
+    vec3 light = vec3(0.0f);
+    float shadow = calc_shadow(f_shadowmap_pos);
+    light += f_ambient;
+    light += f_diffuse * shadow;
+    light = clamp(light, 0.0f, 1.0f);
+    vec4 tex = texture(u_texture, f_tpos);
     vec3 c = light * tex.xyz;
     c = to_srgb(c);
-    fcolor = vec4(c, tex.w);
+    f_color = vec4(c, tex.w);
   }
   )FSHADER";
+
+// @shadowmap_vertex_shader
+static const char *shadowmap_vertex_shader = R"VSHADER(
+  #version 330 core
+
+  // in
+  layout(location = 0) in ivec3 pos;
+  layout(location = 1) in vec2 tpos;
+  layout(location = 2) in uint dir;
+
+  // uniform
+  uniform mat4 u_viewprojection;
+
+  void main() {
+    gl_Position = u_viewprojection * vec4(pos, 1.0f);
+  }
+  )VSHADER";
+
+// @shadowmap_fragment_shader
+static const char *shadowmap_fragment_shader = R"VSHADER(
+  #version 330 core
+
+  void main() {
+    // do nothing
+  }
+  )VSHADER";
 
 // @ui_vertex_shader
 static const char *ui_vertex_shader = R"VSHADER(
@@ -716,11 +784,11 @@ static const char *ui_vertex_shader = R"VSHADER(
   layout(location = 1) in vec2 tpos;
 
   // out
-  out vec2 ftpos;
+  out vec2 f_tpos;
 
   void main() {
     gl_Position = vec4(pos.x*2 - 1, pos.y*2 - 1, 0.0f, 1.0f);
-    ftpos = tpos;
+    f_tpos = tpos;
   }
   )VSHADER";
 
@@ -729,18 +797,18 @@ static const char *ui_fragment_shader = R"FSHADER(
   #version 330 core
 
   // in
-  in vec2 ftpos;
+  in vec2 f_tpos;
 
   // out
-  out vec4 fcolor;
+  out vec4 f_color;
 
   // uniform
-  uniform sampler2D utexture;
+  uniform sampler2D u_texture;
 
   void main() {
-    fcolor = vec4(texture(utexture, ftpos));
-    // float c = texture(utexture, ftpos).x;
-    // fcolor = vec4(1, 1, c*0.001, 1);
+    f_color = vec4(texture(u_texture, f_tpos));
+    // float c = texture(u_texture, f_tpos).x;
+    // f_color = vec4(1, 1, c*0.001, 1);
   }
   )FSHADER";
 
@@ -753,7 +821,7 @@ static const char *text_vertex_shader = R"VSHADER(
   layout(location = 1) in vec2 tpos;
 
   // out
-  out vec2 ftpos;
+  out vec2 f_tpos;
 
   // uniform
   uniform vec2 utextoffset;
@@ -761,7 +829,7 @@ static const char *text_vertex_shader = R"VSHADER(
   void main() {
     vec2 p = vec2(pos.x*2-1, pos.y*2-1) + utextoffset;
     gl_Position = vec4(p, 0.0f, 1.0f);
-    ftpos = tpos;
+    f_tpos = tpos;
   }
   )VSHADER";
 
@@ -770,18 +838,18 @@ static const char *text_fragment_shader = R"FSHADER(
   #version 330 core
 
   // in
-  in vec2 ftpos;
+  in vec2 f_tpos;
 
   // out
-  out vec4 fcolor;
+  out vec4 f_color;
 
   // uniform
-  uniform sampler2D utexture;
+  uniform sampler2D u_texture;
   uniform vec4 utextcolor;
 
   void main() {
-    float alpha = texture(utexture, ftpos).x;
-    fcolor = vec4(utextcolor.xyz, utextcolor.w*alpha);
+    float alpha = texture(u_texture, f_tpos).x;
+    f_color = vec4(utextcolor.xyz, utextcolor.w*alpha);
   }
   )FSHADER";
 
@@ -793,7 +861,7 @@ static const char *skybox_vertex_shader = R"VSHADER(
   layout(location = 0) in vec3 pos;
 
   // out
-  out vec3 ftpos;
+  out vec3 f_tpos;
 
   // uniform
   uniform mat4 u_viewprojection;
@@ -801,7 +869,7 @@ static const char *skybox_vertex_shader = R"VSHADER(
   void main() {
     vec4 p = u_viewprojection * vec4(pos, 1.0f);
     gl_Position = p.xyww; // in order to use depth test to optimize drawing, we need to push this block into the back. This hack does that
-    ftpos = vec3(pos.x, -pos.z, pos.y);
+    f_tpos = vec3(pos.x, -pos.z, pos.y);
   }
   )VSHADER";
 
@@ -810,10 +878,10 @@ static const char *skybox_fragment_shader = R"FSHADER(
   #version 330 core
 
   // in
-  in vec3 ftpos;
+  in vec3 f_tpos;
 
   // out
-  out vec4 fcolor;
+  out vec4 f_color;
 
   // uniform
   uniform samplerCube u_skybox;
@@ -833,10 +901,10 @@ static const char *skybox_fragment_shader = R"FSHADER(
   }
 
   void main() {
-    vec3 c = texture(u_skybox, ftpos).xyz;
+    vec3 c = texture(u_skybox, f_tpos).xyz;
     c *= u_ambient;
     c = to_srgb(c);
-    fcolor = vec4(c, 1.0f);
+    f_color = vec4(c, 1.0f);
   }
   )FSHADER";
 
@@ -1116,15 +1184,16 @@ struct GameState {
 
     GLuint gl_block_vao, gl_block_vbo, gl_block_ebo;
     GLuint gl_block_shader;
-    GLuint gl_block_viewprojection_uniform;
-    GLuint gl_block_ambient_uniform;
-    GLuint gl_block_skybox_uniform;
-    GLuint gl_block_texture_uniform;
-    GLuint gl_block_skylight_dir_uniform;
-    GLuint gl_block_skylight_color_uniform;
     GLuint gl_block_texture;
+    // shadowmapping stuff, see https://learnopengl.com/Advanced-Lighting/Shadows/Shadow-Mapping for a great tutorial on shadowmapping
+    GLuint gl_shadowmap_shader;
+    GLuint gl_block_shadowmap_fbo;
+    GLuint gl_block_shadowmap;
+    #define SHADOWMAP_WIDTH 1024
+    #define SHADOWMAP_HEIGHT 1024
 
-    // same thing as above, but for transparent blocks! (since they need to be rendered separately, because they look weird otherwise)
+
+    // same thing as all of the above, but for transparent blocks! (since they need to be rendered separately, because they look weird otherwise)
     bool transparent_block_vertices_dirty;
     BlockVertex transparent_block_vertices[MAX_BLOCK_VERTICES];
     int num_transparent_block_vertices;
@@ -1187,7 +1256,6 @@ struct GameState {
 
   // world data
   Array<BlockDiff> block_diffs;
-  bool block_mesh_dirty;
 
   // player data
   v3 player_vel;
@@ -1405,7 +1473,8 @@ static void block_vertices_reset() {
 
 // TODO: maybe have a cache for these
 static BlockType get_blocktype(Block b) {
-  if (b.z < 0) return BLOCKTYPE_AIR;
+  if (b.z < 0)
+    return BLOCKTYPE_DIRT;
 
   // first check diffs
   For(state.block_diffs)
@@ -1840,7 +1909,6 @@ static void block_gl_buffer_create() {
   glVertexAttribIPointer(0, 3, GL_SHORT, sizeof(BlockVertex), (GLvoid*)0);
   glVertexAttribPointer(1, 2, GL_UNSIGNED_SHORT, GL_TRUE, sizeof(BlockVertex), (GLvoid*)offsetof(BlockVertex, tex));
   glVertexAttribIPointer(2, 1, GL_UNSIGNED_BYTE, sizeof(BlockVertex), (GLvoid*)offsetof(BlockVertex, direction));
-  gl_ok_or_die;
 
   state.gl_block_vao = vao;
   state.gl_block_vbo = vbo;
@@ -1848,15 +1916,6 @@ static void block_gl_buffer_create() {
 
   state.gl_block_shader  = shader_create(block_vertex_shader, block_fragment_shader);
   glUseProgram(state.gl_block_shader);
-  state.gl_block_viewprojection_uniform  = glGetUniformLocation(state.gl_block_shader, "u_viewprojection");
-  state.gl_block_skybox_uniform  = glGetUniformLocation(state.gl_block_shader, "u_skybox");
-  state.gl_block_ambient_uniform  = glGetUniformLocation(state.gl_block_shader, "u_ambient");
-  state.gl_block_texture_uniform = glGetUniformLocation(state.gl_block_shader, "utexture");
-  state.gl_block_skylight_dir_uniform = glGetUniformLocation(state.gl_block_shader, "u_skylight_dir");
-  state.gl_block_skylight_color_uniform = glGetUniformLocation(state.gl_block_shader, "u_skylight_color");
-  glUniform1i(state.gl_block_texture_uniform, 0);
-  glUniform1i(state.gl_block_skybox_uniform, 1);
-  gl_ok_or_die;
 
   // load block textures
   state.gl_block_texture = load_block_texture("textures.bmp");
@@ -1869,6 +1928,32 @@ static void block_gl_buffer_create() {
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 
   glBindVertexArray(0);
+
+
+  // shadowmap
+  state.gl_shadowmap_shader = shader_create(shadowmap_vertex_shader, shadowmap_fragment_shader);
+  GLuint fbo;
+  glGenFramebuffers(1, &fbo);
+  GLuint shadowmap;
+  glGenTextures(1, &shadowmap);
+  glBindTexture(GL_TEXTURE_2D, shadowmap);
+  glTexImage2D (GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT, SHADOWMAP_WIDTH, SHADOWMAP_HEIGHT, 0, GL_DEPTH_COMPONENT, GL_FLOAT, 0);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT); 
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);  
+
+  glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+  glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, shadowmap, 0);
+  glDrawBuffer(GL_NONE);
+  glReadBuffer(GL_NONE);
+  glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+  if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+    die("Framebuffer not complete!");
+
+  state.gl_block_shadowmap_fbo = fbo;
+  state.gl_block_shadowmap = shadowmap;
 
 
   // transparent buffer
@@ -1887,7 +1972,6 @@ static void block_gl_buffer_create() {
   glVertexAttribIPointer(0, 3, GL_SHORT, sizeof(BlockVertex), (GLvoid*)0);
   glVertexAttribPointer(1, 2, GL_UNSIGNED_SHORT, GL_TRUE, sizeof(BlockVertex), (GLvoid*)offsetof(BlockVertex, tex));
   glVertexAttribIPointer(2, 1, GL_UNSIGNED_BYTE, sizeof(BlockVertex), (GLvoid*)offsetof(BlockVertex, direction));
-  gl_ok_or_die;
 
   state.gl_transparent_block_vao = vao;
   state.gl_transparent_block_vbo = vbo;
@@ -2010,7 +2094,7 @@ static void skybox_gl_buffer_create() {
     }
 
     // draw sun
-    #if 0
+    #if 1
     if (face == 4) {
       for (int x = SKYBOX_TEXTURE_SIZE*3/8; x < SKYBOX_TEXTURE_SIZE*5/8; ++x)
       for (int y = SKYBOX_TEXTURE_SIZE*3/8; y < SKYBOX_TEXTURE_SIZE*5/8; ++y) {
@@ -2077,7 +2161,6 @@ static void ui_gl_buffer_create() {
   glEnableVertexAttribArray(1);
   glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(UIVertex), (GLvoid*)0);
   glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(UIVertex), (GLvoid*)offsetof(UIVertex, tx));
-  gl_ok_or_die;
 
   state.gl_ui_vao = vao;
   state.gl_ui_vbo = vbo;
@@ -2085,8 +2168,8 @@ static void ui_gl_buffer_create() {
 
   state.gl_ui_shader = shader_create(ui_vertex_shader, ui_fragment_shader);
   glUseProgram(state.gl_ui_shader);
-  state.gl_ui_texture_uniform = glGetUniformLocation(state.gl_ui_shader, "utexture");
-  if (state.gl_ui_texture_uniform == -1) die("Failed to find uniform location of 'utexture'");
+  state.gl_ui_texture_uniform = glGetUniformLocation(state.gl_ui_shader, "u_texture");
+  if (state.gl_ui_texture_uniform == -1) die("Failed to find uniform location of 'u_texture'");
   glUniform1i(state.gl_ui_texture_uniform, 0);
 
   // load ui textures
@@ -2115,7 +2198,7 @@ static void text_gl_buffer_create() {
   glUseProgram(state.gl_text_shader);
   state.gl_text_offset_uniform = glGetUniformLocation(state.gl_text_shader, "utextoffset");
   state.gl_text_color_uniform = glGetUniformLocation(state.gl_text_shader, "utextcolor");
-  state.gl_text_texture_uniform = glGetUniformLocation(state.gl_text_shader, "utexture");
+  state.gl_text_texture_uniform = glGetUniformLocation(state.gl_text_shader, "u_texture");
 
   // load font from file and create texture
   state.text_atlas_size.x = 512;
@@ -2152,7 +2235,6 @@ static void text_gl_buffer_create() {
   glTexImage2D(GL_TEXTURE_2D, 0, GL_RED, tex_w, tex_h, 0, GL_RED, GL_UNSIGNED_BYTE, bitmap);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-  gl_ok_or_die;
 
   fclose(f);
   free(ttf_mem);
@@ -2179,8 +2261,9 @@ static void gamestate_init() {
   state.fov = PI/3.0f;
   state.nearz = 0.3f;
   state.farz = 300.0f;
-  state.camera.look = {0.0f, 1.0f};
+  // state.camera.look = {0.0f, 1.0f};
   state.player_pos = {300.0f, 300.0f, 50.0f};
+  camera_lookat(&state.camera, state.player_pos, state.player_pos + v3{0.0f, SQRT2, SQRT2});
   state.block_vertices_dirty = true;
   state.transparent_block_vertices_dirty = true;
   state.render_quickmenu = true;
@@ -2513,48 +2596,11 @@ static void render_transparent_blocks(const m4 &viewprojection) {
 
   glDrawElements(GL_TRIANGLES, state.num_transparent_block_elements, GL_UNSIGNED_INT, 0);
   glBindVertexArray(0);
-  gl_ok_or_die;
 }
 
-static void render_opaque_blocks(const m4 &viewprojection) {
-  glEnable(GL_BLEND);
-  glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-  glEnable(GL_CULL_FACE);
-  // glDisable(GL_CULL_FACE);
-  glEnable(GL_DEPTH_TEST);
-  // glDisable(GL_DEPTH_TEST);
-  glUseProgram(state.gl_block_shader);
-
-  // camera
-  glUniformMatrix4fv(state.gl_block_viewprojection_uniform, 1, GL_TRUE, viewprojection.d);
-
-  // lighting from sun
-  v3 sun_direction = {0.0f, -cosf(state.sun_angle), -sinf(state.sun_angle)};
-
-  float sun_height_normalized = sinf(state.sun_angle)/2.0f + 0.5f; // in range [0, 1]
-  state.ambient_light = at_most(sun_height_normalized + 0.1f, 0.7f);
-
-  glUniform1f(state.gl_block_ambient_uniform, state.ambient_light);
-  glUniform3f(state.gl_block_skylight_dir_uniform, sun_direction.x, sun_direction.y, sun_direction.z);
-  glUniform3f(state.gl_block_skylight_color_uniform, 0.5f, 0.5f, 0.5f);
-
-  // texture
-  // glUniform1i(state.gl_block_texture_uniform, 0);
-  glBindVertexArray(state.gl_block_vao);
-  glActiveTexture(GL_TEXTURE0);
-  glBindTexture(GL_TEXTURE_2D, state.gl_block_texture);
-  glActiveTexture(GL_TEXTURE1);
-  glBindTexture(GL_TEXTURE_CUBE_MAP, state.gl_skybox_texture);
-
-  if (state.block_mesh_dirty) {
-    // puts("re-rendering :O");
-    block_vertices_reset();
-    generate_block_mesh(state.player_pos);
-    state.block_mesh_dirty = false;
-    state.block_vertices_dirty = true;
-  }
+static void render_opaque_blocks(m4 viewprojection) {
+  // update data if necessary
   if (state.block_vertices_dirty) {
-    // puts("resending block_vertices");
     glBindBuffer(GL_ARRAY_BUFFER, state.gl_block_vbo);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, state.gl_block_ebo);
     glBufferData(GL_ARRAY_BUFFER, state.num_block_vertices*sizeof(*state.block_vertices), state.block_vertices, GL_DYNAMIC_DRAW);
@@ -2562,20 +2608,76 @@ static void render_opaque_blocks(const m4 &viewprojection) {
     state.block_vertices_dirty = false;
   }
 
+  // create shadowmap
+  const v3 sun_direction = {0.0f, -cosf(state.sun_angle), -sinf(state.sun_angle)};
+  m4 shadowmap_viewprojection;
+  {
+    glUseProgram(state.gl_shadowmap_shader);
+    glViewport(0, 0, SHADOWMAP_WIDTH, SHADOWMAP_HEIGHT);
+    glBindFramebuffer(GL_FRAMEBUFFER, state.gl_block_shadowmap_fbo);
+    glEnable(GL_DEPTH_TEST);
+    glClear(GL_DEPTH_BUFFER_BIT);
+    glDisable(GL_CULL_FACE);
+
+    // calculate camera position and projection matrix
+    Camera sun = {};
+    const v3 sun_pos = state.player_pos - 100 * v3{0.0f, -cosf(state.sun_angle), -sinf(state.sun_angle)};
+    camera_lookat(&sun, sun_pos, state.player_pos);
+    shadowmap_viewprojection = camera_viewortho_matrix(&sun, sun_pos, 50, 50, 1.0f, 300.0f);
+    glUniformMatrix4fv(glGetUniformLocation(state.gl_shadowmap_shader, "u_viewprojection"), 1, GL_TRUE, shadowmap_viewprojection.d);
+
+    // draw
+    glBindVertexArray(state.gl_block_vao);
+    glDrawElements(GL_TRIANGLES, state.num_block_elements, GL_UNSIGNED_INT, 0);
+    glBindVertexArray(0);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, state.screen_width, state.screen_height);
+
+    glEnable(GL_CULL_FACE);
+  }
+
+  #if 0
+  viewprojection = shadowmap_viewprojection;
+  #endif
+
+  glUseProgram(state.gl_block_shader);
+  glEnable(GL_BLEND);
+  glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+  glEnable(GL_CULL_FACE);
+  glEnable(GL_DEPTH_TEST);
+
+  // camera
+  glUniformMatrix4fv(glGetUniformLocation(state.gl_block_shader, "u_viewprojection"), 1, GL_TRUE, viewprojection.d);
+  glUniformMatrix4fv(glGetUniformLocation(state.gl_block_shader, "u_shadowmap_viewprojection"), 1, GL_TRUE, shadowmap_viewprojection.d);
+
+  float sun_height_normalized = sinf(state.sun_angle)/2.0f + 0.5f; // in range [0, 1]
+  state.ambient_light = at_most(sun_height_normalized + 0.1f, 0.5f);
+
+  glUniform1f(glGetUniformLocation(state.gl_block_shader, "u_ambient"), state.ambient_light);
+  glUniform3f(glGetUniformLocation(state.gl_block_shader, "u_skylight_dir"), sun_direction.x, sun_direction.y, sun_direction.z);
+  glUniform3f(glGetUniformLocation(state.gl_block_shader, "u_skylight_color"), 0.5f, 0.5f, 0.5f);
+
+  // textures
+  glBindVertexArray(state.gl_block_vao);
+  glUniform1i(glGetUniformLocation(state.gl_block_shader, "u_texture"), 0);
+  glActiveTexture(GL_TEXTURE0);
+  glBindTexture(GL_TEXTURE_2D, state.gl_block_texture);
+  glUniform1i(glGetUniformLocation(state.gl_block_shader, "u_shadowmap"), 1);
+  glActiveTexture(GL_TEXTURE1);
+  glBindTexture(GL_TEXTURE_2D, state.gl_block_shadowmap);
+
   // draw
   glDrawElements(GL_TRIANGLES, state.num_block_elements, GL_UNSIGNED_INT, 0);
   glBindVertexArray(0);
-  gl_ok_or_die;
 }
 
 static void render_skybox(const m4 &view, const m4 &proj) {
   glEnable(GL_DEPTH_TEST);
   // glDisable(GL_DEPTH_TEST);
   glDisable(GL_CULL_FACE);
-  gl_ok_or_die;
 
   glUseProgram(state.gl_skybox_shader);
-  gl_ok_or_die;
 
   // remove translation from view matrix, since we want skybox to always be around us
   // rotate to match the sky
@@ -2587,20 +2689,16 @@ static void render_skybox(const m4 &view, const m4 &proj) {
   m4 vp = proj * v;
   glUniformMatrix4fv(state.gl_skybox_viewprojection_uniform, 1, GL_TRUE, vp.d);
   glUniform1f(state.gl_skybox_ambient_uniform, state.ambient_light);
-  gl_ok_or_die;
 
   glBindVertexArray(state.gl_skybox_vao);
   glActiveTexture(GL_TEXTURE0);
   glBindTexture(GL_TEXTURE_CUBE_MAP, state.gl_skybox_texture);
   glBindBuffer(GL_ARRAY_BUFFER, state.gl_skybox_vbo);
-  gl_ok_or_die;
 
   glDrawArrays(GL_TRIANGLES, 0, 36);
-  gl_ok_or_die;
 
   glBindVertexArray(0);
   glBindBuffer(GL_ARRAY_BUFFER, 0);
-  gl_ok_or_die;
 }
 
 static void render_ui() {
@@ -2644,12 +2742,18 @@ static void render_ui() {
       push_ui_quad({xx, yy}, {bs, bs}, {tx, ty}, {tw, th});
       push_text(int_to_str(state.inventory[i].block.num), {x + box_size - 0.01f, y + box_size - 0.01f}, 0.05f, true);
     }
+
+
     glUseProgram(state.gl_ui_shader);
 
     glBindVertexArray(state.gl_ui_vao);
     // texture
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, state.gl_ui_texture);
+    #if 1
+      glBindTexture(GL_TEXTURE_2D, state.gl_block_shadowmap);
+      push_ui_quad({0.0f, 0.0f}, {0.3f, 0.3f}, {0.0f, 0.0f}, {1.0f, 1.0f});
+    #endif
 
     glBindBuffer(GL_ARRAY_BUFFER, state.gl_ui_vbo);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, state.gl_ui_ebo);
@@ -2698,7 +2802,7 @@ static void render_text() {
   // int WINAPI wWinMain(HINSTANCE /*hInstance*/, HINSTANCE /*hPrevInstance*/, PWSTR /*pCmdLine*/, int /*nCmdShow*/) {
   #define mine_main int wmain(int, wchar_t *[], wchar_t *[] )
 #else
-  #define mine_main int main(int argc, const char **argv)
+  #define mine_main int main(int, const char *[])
 #endif
 
 mine_main {
@@ -2759,7 +2863,7 @@ mine_main {
     // debug prints
     debug_prints(loopindex, dt);
 
-    state.sun_angle += 0.01f;
+    state.sun_angle = fmodf(state.sun_angle + 0.004f, 2*PI);
 
     // @render
     glClearColor(0.0f, 0.8f, 0.6f, 1.0f);
@@ -2781,6 +2885,7 @@ mine_main {
 
     // swap back buffer
     SDL_GL_SwapWindow(state.window);
+    gl_ok_or_die;
   }
 
   return 0;
