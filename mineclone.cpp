@@ -1,5 +1,7 @@
 // TODO:
 //
+// * shadows
+//
 // * optimize loading blocks:
 //   - cache block types for blocks in scope
 //   - data streaming in opengl for blocks
@@ -8,8 +10,6 @@
 // * reflect and refract lighting from skybox
 //
 // * basic day cycle (i.e. rotate skybox herpiderpi)
-//
-// * shadows
 //
 // * movement through water
 //
@@ -819,8 +819,24 @@ static const char *skybox_fragment_shader = R"FSHADER(
   uniform samplerCube u_skybox;
   uniform float u_ambient;
 
+  float to_srgbf(float val) {
+      if(val < 0.0031308f) {
+          val = val * 12.92f;
+      } else {
+          val = 1.055f * pow(val, 1.0f/2.4f) - 0.055f;
+      }
+      return val;
+  }
+
+  vec3 to_srgb(vec3 v) {
+    return vec3(to_srgbf(v.x), to_srgbf(v.y), to_srgbf(v.z));
+  }
+
   void main() {
-    fcolor = vec4(u_ambient* texture(u_skybox, ftpos).xyz, 1.0f);
+    vec3 c = texture(u_skybox, ftpos).xyz;
+    c *= u_ambient;
+    c = to_srgb(c);
+    fcolor = vec4(c, 1.0f);
   }
   )FSHADER";
 
@@ -1059,6 +1075,7 @@ static const v3 CAMERA_OFFSET_FROM_PLAYER = v3{0.0f, 0.0f, 1.0f};
 struct GameState {
   SDL_Window *window;
   float screen_ratio;
+  int screen_width, screen_height;
 
   // input, see read_input()
   struct {
@@ -2458,11 +2475,13 @@ static void sdl_init() {
   // create window
   state.window = SDL_CreateWindow("mineclone", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 800, 600, SDL_WINDOW_OPENGL);
   // SDL_Window *window = SDL_CreateWindow("mineclone", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1920, 1080, SDL_WINDOW_OPENGL | SDL_WINDOW_BORDERLESS | SDL_WINDOW_FULLSCREEN);
-  if (!state.window) sdl_die("Couldn't create window");
-  int screenW, screenH;
-  SDL_GetWindowSize(state.window, &screenW, &screenH);
-  if (!screenW || !screenH) sdl_die("Invalid screen dimensions: %i,%i", screenW, screenH);
-  state.screen_ratio = (float)screenH / (float)screenW;
+  if (!state.window)
+    sdl_die("Couldn't create window");
+
+  SDL_GetWindowSize(state.window, &state.screen_width, &state.screen_height);
+  if (!state.screen_width || !state.screen_height)
+    sdl_die("Invalid screen dimensions: %i,%i", state.screen_width, state.screen_height);
+  state.screen_ratio = (float)state.screen_height / (float)state.screen_width;
 
   // create glcontext
   SDL_GLContext glcontext = SDL_GL_CreateContext(state.window);
@@ -2513,11 +2532,11 @@ static void render_opaque_blocks(const m4 &viewprojection) {
   v3 sun_direction = {0.0f, -cosf(state.sun_angle), -sinf(state.sun_angle)};
 
   float sun_height_normalized = sinf(state.sun_angle)/2.0f + 0.5f; // in range [0, 1]
-  state.ambient_light = at_most(sun_height_normalized + 0.2f, 1.0f);
+  state.ambient_light = at_most(sun_height_normalized + 0.1f, 0.7f);
 
   glUniform1f(state.gl_block_ambient_uniform, state.ambient_light);
   glUniform3f(state.gl_block_skylight_dir_uniform, sun_direction.x, sun_direction.y, sun_direction.z);
-  glUniform3f(state.gl_block_skylight_color_uniform, 0.50f, 0.50f, 0.50f);
+  glUniform3f(state.gl_block_skylight_color_uniform, 0.5f, 0.5f, 0.5f);
 
   // texture
   // glUniform1i(state.gl_block_texture_uniform, 0);
