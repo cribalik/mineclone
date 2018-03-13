@@ -1,7 +1,5 @@
 // TODO:
 //
-// * fix peter pan:ing of shadows
-//
 // * optimize loading blocks:
 //   - cache block types for blocks in scope
 //   - data streaming in opengl for blocks
@@ -26,6 +24,8 @@
 // * better terrain (different block types)
 //
 // * inventory ui
+//
+// * fix smoothing out sunlight as it goes behind horizon
 //
 ////
 
@@ -731,9 +731,30 @@ static const char *block_fragment_shader = R"FSHADER(
     vec3 p = pos.xyz / pos.w;
     // normalize to [0,1]
     p = p*0.5 + 0.5;
+
     float depth = texture(u_shadowmap, p.xy).r;
-    float shadow_bias = 0.001f;
-    return depth < p.z - shadow_bias ? 0.0f : 1.0f;
+    vec2 texelSize = 1.0 / textureSize(u_shadowmap, 0);
+    float bias = -0.0003f;
+
+    // change to 1 to enable (very rudamentary) pcf, see https://learnopengl.com/Advanced-Lighting/Shadows/Shadow-Mapping
+#if 0
+    float shadow = 0.0;
+    for(int x = -1; x <= 1; ++x)
+    {
+        for(int y = -1; y <= 1; ++y)
+        {
+            float pcfDepth = texture(u_shadowmap, p.xy + vec2(x, y) * texelSize).r; 
+            shadow += p.z - bias > pcfDepth ? 1.0 : 0.0;        
+        }    
+    }
+    shadow /= 9.0;
+    return 1.0 - shadow;
+
+#else
+
+    return depth < p.z - bias ? 0.0f : 1.0f;
+
+#endif
   }
 
   void main() {
@@ -1189,8 +1210,8 @@ struct GameState {
     GLuint gl_shadowmap_shader;
     GLuint gl_block_shadowmap_fbo;
     GLuint gl_block_shadowmap;
-    #define SHADOWMAP_WIDTH 1024
-    #define SHADOWMAP_HEIGHT 1024
+    #define SHADOWMAP_WIDTH (1024*3)
+    #define SHADOWMAP_HEIGHT (1024*3)
 
 
     // same thing as all of the above, but for transparent blocks! (since they need to be rendered separately, because they look weird otherwise)
@@ -1466,9 +1487,15 @@ static void push_block_face(Block block, BlockType type, Direction dir) {
 }
 
 static void block_vertices_reset() {
-  // make first 4 block_vertices contain the null block
+  // make first 4 block_vertices contain the null block, and another 4 for the bottom of the world (used for rendering shadows)
   state.num_block_vertices = 4; state.num_block_elements = 6;
+  // again, 4 vertices for null block
   state.num_transparent_block_vertices = 4; state.num_transparent_block_elements = 6;
+}
+
+static bool is_block_in_bounds(Block b) {
+  Block p = pos_to_block(state.player_pos);
+  return b.x - p.x < NUM_BLOCKS_x/2 && b.x - p.x >= -NUM_BLOCKS_x/2 && b.y - p.y < NUM_BLOCKS_y/2 && b.y - p.y >= -NUM_BLOCKS_y/2 && b.z - p.z < NUM_BLOCKS_z/2 && b.z - p.z >= -NUM_BLOCKS_z/2;
 }
 
 // TODO: maybe have a cache for these
@@ -1533,11 +1560,6 @@ static void push_blockdiff(Block b, BlockType t) {
   array_push(state.block_diffs, {b, t});
 }
 
-
-static bool is_block_in_bounds(Block b) {
-  Block p = pos_to_block(state.player_pos);
-  return b.x - p.x < NUM_BLOCKS_x/2 && b.x - p.x >= -NUM_BLOCKS_x/2 && b.y - p.y < NUM_BLOCKS_y/2 && b.y - p.y >= -NUM_BLOCKS_y/2 && b.z - p.z < NUM_BLOCKS_z/2 && b.z - p.z >= -NUM_BLOCKS_z/2;
-}
 
 static void remove_blockface(Block b, BlockType type, Direction d) {
   int &vertex_pos = get_block_vertex_pos(b, (Direction)d);
@@ -2266,14 +2288,34 @@ static void gamestate_init() {
   camera_lookat(&state.camera, state.player_pos, state.player_pos + v3{0.0f, SQRT2, SQRT2});
   state.block_vertices_dirty = true;
   state.transparent_block_vertices_dirty = true;
-  state.render_quickmenu = true;
+  state.render_quickmenu = false;
   state.sun_angle = PI/4.0f;
+
+  // update_world_floor();
+
   puts("generating block mesh...");
   block_vertices_reset();
   generate_block_mesh(state.player_pos);
   puts("done");
 }
 
+struct KeyFrame {
+  float at;
+  float value;
+};
+
+static float keyframe_value(KeyFrame keyframes[], int num_keyframes, float at) {
+  if (keyframes[0].at >= at)
+    return keyframes[0].value;
+
+  for (int i = 1; i < num_keyframes; ++i)
+    if (keyframes[i].at >= at) {
+      // TODO: we probably want something smoother than lerp here
+      float t = (at - keyframes[i-1].at) / (keyframes[i].at - keyframes[i-1].at);
+      return lerp(t, keyframes[i-1].value, keyframes[i].value);
+    }
+  return keyframes[num_keyframes-1].value;
+}
 // fills out the input fields in GameState
 static void read_input() {
   // clear earlier events
@@ -2447,8 +2489,12 @@ static void update_blocks(v3 before, v3 after) {
   int y1 = max(r0.b.y, r1.b.y);
   int z1 = max(r0.b.z, r1.b.z);
 
-  if (r0.a.x != r1.a.x || r0.a.y != r1.a.y || r0.a.z != r1.a.z)
-    state.block_vertices_dirty = true;
+  if (r0.a.x == r1.a.x && r0.a.y == r1.a.y && r0.a.z == r1.a.z) {
+    state.player_pos = after;
+    return;
+  }
+
+  state.block_vertices_dirty = true;
 
   // hide blocks that went out of scope
   // TODO:, FIXME: if we jump farther than NUM_BLOCKS_x this probably breaks
@@ -2610,6 +2656,24 @@ static void render_opaque_blocks(m4 viewprojection) {
 
   // create shadowmap
   const v3 sun_direction = {0.0f, -cosf(state.sun_angle), -sinf(state.sun_angle)};
+  const v3 moon_direction = {0.0f, -cosf(state.sun_angle + PI), -sinf(state.sun_angle + PI)};
+  const bool sun_is_visible = sinf(state.sun_angle) > 0;
+
+  // we want a sin-type curve for sun/moonlight, but we want it to spend more time at the extremes, so we make custom keyframes
+  const float highest_light = 0.5f;
+  const float lowest_light = 0.03f;
+  KeyFrame light_keyframes[] = {
+    -0.3f,        lowest_light,
+    0.3f,         highest_light,
+    PI-0.3f,      highest_light,
+    PI+0.3f,      lowest_light,
+    2.0f*PI-0.3f, lowest_light,
+    2.0f*PI+0.3f, highest_light,
+  };
+  state.ambient_light = keyframe_value(light_keyframes, ARRAY_LEN(light_keyframes), state.sun_angle);
+
+  float light_strength = sun_is_visible ? 0.5f : 0.03f;
+
   m4 shadowmap_viewprojection;
   {
     glUseProgram(state.gl_shadowmap_shader);
@@ -2617,24 +2681,31 @@ static void render_opaque_blocks(m4 viewprojection) {
     glBindFramebuffer(GL_FRAMEBUFFER, state.gl_block_shadowmap_fbo);
     glEnable(GL_DEPTH_TEST);
     glClear(GL_DEPTH_BUFFER_BIT);
-    glDisable(GL_CULL_FACE);
+    // glDisable(GL_CULL_FACE);
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_FRONT);
 
     // calculate camera position and projection matrix
-    Camera sun = {};
-    const v3 sun_pos = state.player_pos - 100 * v3{0.0f, -cosf(state.sun_angle), -sinf(state.sun_angle)};
-    camera_lookat(&sun, sun_pos, state.player_pos);
-    shadowmap_viewprojection = camera_viewortho_matrix(&sun, sun_pos, 50, 50, 1.0f, 300.0f);
+    Camera lightview = {};
+    v3 pos;
+    if (sun_is_visible)
+      pos = state.player_pos - 100 * sun_direction;
+    else
+      pos = state.player_pos - 100 * moon_direction;
+    camera_lookat(&lightview, pos, state.player_pos);
+    shadowmap_viewprojection = camera_viewortho_matrix(&lightview, pos, 50, 50, 30.0f, 200.0f);
     glUniformMatrix4fv(glGetUniformLocation(state.gl_shadowmap_shader, "u_viewprojection"), 1, GL_TRUE, shadowmap_viewprojection.d);
 
     // draw
     glBindVertexArray(state.gl_block_vao);
-    glDrawElements(GL_TRIANGLES, state.num_block_elements, GL_UNSIGNED_INT, 0);
+
+    glDrawElements(GL_TRIANGLES, state.num_block_elements+6, GL_UNSIGNED_INT, 0);
     glBindVertexArray(0);
 
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glViewport(0, 0, state.screen_width, state.screen_height);
-
     glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
   }
 
   #if 0
@@ -2651,12 +2722,12 @@ static void render_opaque_blocks(m4 viewprojection) {
   glUniformMatrix4fv(glGetUniformLocation(state.gl_block_shader, "u_viewprojection"), 1, GL_TRUE, viewprojection.d);
   glUniformMatrix4fv(glGetUniformLocation(state.gl_block_shader, "u_shadowmap_viewprojection"), 1, GL_TRUE, shadowmap_viewprojection.d);
 
-  float sun_height_normalized = sinf(state.sun_angle)/2.0f + 0.5f; // in range [0, 1]
-  state.ambient_light = at_most(sun_height_normalized + 0.1f, 0.5f);
-
   glUniform1f(glGetUniformLocation(state.gl_block_shader, "u_ambient"), state.ambient_light);
-  glUniform3f(glGetUniformLocation(state.gl_block_shader, "u_skylight_dir"), sun_direction.x, sun_direction.y, sun_direction.z);
-  glUniform3f(glGetUniformLocation(state.gl_block_shader, "u_skylight_color"), 0.5f, 0.5f, 0.5f);
+  if (sun_is_visible)
+    glUniform3f(glGetUniformLocation(state.gl_block_shader, "u_skylight_dir"), sun_direction.x, sun_direction.y, sun_direction.z);
+  else
+    glUniform3f(glGetUniformLocation(state.gl_block_shader, "u_skylight_dir"), moon_direction.x, moon_direction.y, moon_direction.z);
+  glUniform3f(glGetUniformLocation(state.gl_block_shader, "u_skylight_color"), light_strength, light_strength, light_strength);
 
   // textures
   glBindVertexArray(state.gl_block_vao);
@@ -2702,23 +2773,24 @@ static void render_skybox(const m4 &view, const m4 &proj) {
 }
 
 static void render_ui() {
-  if (state.render_quickmenu) {
-    glDisable(GL_DEPTH_TEST);
-    state.num_ui_vertices = state.num_ui_elements = 0;
+  state.num_ui_vertices = state.num_ui_elements = 0;
+  glDisable(GL_DEPTH_TEST);
 
-    if (state.keypressed[KEY_INVENTORY])
-      state.is_inventory_open = !state.is_inventory_open;
-    if (state.is_inventory_open) {
-      const float inv_margin = 0.15f;
-      push_ui_quad({inv_margin, inv_margin}, {1.0f - 2*inv_margin, 1.0f - 2*inv_margin}, {0.0f, 0.0f}, {0.2f, 0.04f});
-    }
-      // draw background
+  if (state.keypressed[KEY_INVENTORY])
+    state.is_inventory_open = !state.is_inventory_open;
+  if (state.is_inventory_open) {
+    const float inv_margin = 0.15f;
+    push_ui_quad({inv_margin, inv_margin}, {1.0f - 2*inv_margin, 1.0f - 2*inv_margin}, {0.0f, 0.0f}, {0.2f, 0.04f});
+  }
+
+  if (state.render_quickmenu) {
+    // draw background
     const float inv_margin = 0.1f;
     const float inv_width = 1.0f - 2*inv_margin;
     const float inv_height = 0.1f;
     push_ui_quad({inv_margin, 0.0f}, {inv_width, inv_height}, {0.0f, 0.0f}, {0.2f, 0.03f});
 
-      // draw boxes
+    // draw boxes
     float box_margin_y = 0.02f;
     float box_size = inv_height - 2*box_margin_y;
     int ni = ARRAY_LEN(state.inventory);
@@ -2742,27 +2814,28 @@ static void render_ui() {
       push_ui_quad({xx, yy}, {bs, bs}, {tx, ty}, {tw, th});
       push_text(int_to_str(state.inventory[i].block.num), {x + box_size - 0.01f, y + box_size - 0.01f}, 0.05f, true);
     }
-
-
-    glUseProgram(state.gl_ui_shader);
-
-    glBindVertexArray(state.gl_ui_vao);
-    // texture
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, state.gl_ui_texture);
-    #if 1
-      glBindTexture(GL_TEXTURE_2D, state.gl_block_shadowmap);
-      push_ui_quad({0.0f, 0.0f}, {0.3f, 0.3f}, {0.0f, 0.0f}, {1.0f, 1.0f});
-    #endif
-
-    glBindBuffer(GL_ARRAY_BUFFER, state.gl_ui_vbo);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, state.gl_ui_ebo);
-    glBufferData(GL_ARRAY_BUFFER, state.num_ui_vertices*sizeof(*state.ui_vertices), state.ui_vertices, GL_DYNAMIC_DRAW);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, state.num_ui_elements*sizeof(*state.ui_elements), state.ui_elements, GL_DYNAMIC_DRAW);
-
-    glDrawElements(GL_TRIANGLES, state.num_ui_elements, GL_UNSIGNED_INT, 0);
-    glBindVertexArray(0);
   }
+
+  glUseProgram(state.gl_ui_shader);
+
+  glBindVertexArray(state.gl_ui_vao);
+  // texture
+  glActiveTexture(GL_TEXTURE0);
+  glBindTexture(GL_TEXTURE_2D, state.gl_ui_texture);
+
+  // debug: draw the shadowmap instead :3
+  #if 1
+    glBindTexture(GL_TEXTURE_2D, state.gl_block_shadowmap);
+    push_ui_quad({0.0f, 0.0f}, {0.3f, 0.3f}, {0.0f, 0.0f}, {1.0f, 1.0f});
+  #endif
+
+  glBindBuffer(GL_ARRAY_BUFFER, state.gl_ui_vbo);
+  glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, state.gl_ui_ebo);
+  glBufferData(GL_ARRAY_BUFFER, state.num_ui_vertices*sizeof(*state.ui_vertices), state.ui_vertices, GL_DYNAMIC_DRAW);
+  glBufferData(GL_ELEMENT_ARRAY_BUFFER, state.num_ui_elements*sizeof(*state.ui_elements), state.ui_elements, GL_DYNAMIC_DRAW);
+
+  glDrawElements(GL_TRIANGLES, state.num_ui_elements, GL_UNSIGNED_INT, 0);
+  glBindVertexArray(0);
 }
 
 static void render_text() {
