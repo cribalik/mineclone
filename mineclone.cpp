@@ -734,7 +734,7 @@ static const char *block_fragment_shader = R"FSHADER(
 
     float depth = texture(u_shadowmap, p.xy).r;
     vec2 texelSize = 1.0 / textureSize(u_shadowmap, 0);
-    float bias = -0.0003f;
+    float bias = 0.0f;
 
     // change to 1 to enable (very rudamentary) pcf, see https://learnopengl.com/Advanced-Lighting/Shadows/Shadow-Mapping
 #if 0
