@@ -5,6 +5,8 @@
 //   - data streaming in opengl for blocks
 //   - load new blocks in separate thread
 //
+// * don't limit number of vertices to a fixed amount
+//
 // * reflect and refract lighting from skybox
 //
 // * basic day cycle (i.e. rotate skybox herpiderpi)
@@ -27,6 +29,9 @@
 //
 // * fix smoothing out sunlight as it goes behind horizon
 //
+// * distance fog
+//
+// * view distance in water?
 ////
 
 #ifdef _MSC_VER
@@ -1386,6 +1391,7 @@ static void blocktype_to_texpos(BlockType t, float *x, float *y, float *w, float
 static void push_block_face(Block block, BlockType type, Direction dir) {
   const bool transparent = blocktype_is_transparent(type);
 
+  // pick transparent or opaque vertices
   BlockVertex *block_vertices = transparent ? state.transparent_block_vertices : state.block_vertices;
   int &num_block_vertices = transparent ? state.num_transparent_block_vertices : state.num_block_vertices;
   int *free_faces = transparent ? state.free_transparent_faces : state.free_faces;
@@ -1393,15 +1399,21 @@ static void push_block_face(Block block, BlockType type, Direction dir) {
   unsigned int *block_elements = transparent ? state.transparent_block_elements : state.block_elements;
   int &num_block_elements = transparent ? state.num_transparent_block_elements : state.num_block_elements;
 
+  // does face already exist?
+  int &vertex_pos = get_block_vertex_pos(block, dir);
+  if (vertex_pos)
+    return;
+
+
+  // too many block_vertices?
+  if (num_block_vertices + 4 >= MAX_BLOCK_VERTICES || num_block_elements + 6 > MAX_BLOCK_ELEMENTS) {
+    vertex_pos = 0;
+    return;
+  }
+
   if (transparent) state.transparent_block_vertices_dirty = true;
   else             state.block_vertices_dirty = true;
 
-  // too many block_vertices?
-  if (num_block_vertices + 4 >= MAX_BLOCK_VERTICES || num_block_elements + 6 > MAX_BLOCK_ELEMENTS)
-    return;
-  // does face already exist?
-  int &vertex_pos = get_block_vertex_pos(block, dir);
-  if (vertex_pos) return;
 
   const int tex_max = UINT16_MAX;
   const int txsize = tex_max/3;
@@ -1525,7 +1537,7 @@ static BlockType get_blocktype(Block b) {
     return BLOCKTYPE_WATER;
 
   // flying blocks clusters
-  if (perlin(b.x*0.05f, b.y*0.05f, b.z*0.05f) > 0.8)
+  if (b.z >= 35 && b.z <= 40 && perlin(b.x*0.05f, b.y*0.05f, b.z*0.2f) > 0.8)
     return BLOCKTYPE_CLOUD;
   return BLOCKTYPE_AIR;
 }
@@ -2288,7 +2300,7 @@ static void gamestate_init() {
   camera_lookat(&state.camera, state.player_pos, state.player_pos + v3{0.0f, SQRT2, SQRT2});
   state.block_vertices_dirty = true;
   state.transparent_block_vertices_dirty = true;
-  state.render_quickmenu = false;
+  state.render_quickmenu = true;
   state.sun_angle = PI/4.0f;
 
   // update_world_floor();
@@ -2297,6 +2309,13 @@ static void gamestate_init() {
   block_vertices_reset();
   generate_block_mesh(state.player_pos);
   puts("done");
+
+  // fill your inventory
+  for (int i = 0; i < min(BLOCKTYPES_MAX-1, (int)ARRAY_LEN(state.inventory)); ++i) {
+    state.inventory[i].type = ITEM_BLOCK;
+    state.inventory[i].block.num = 64;
+    state.inventory[i].block.type = (BlockType)(BLOCKTYPE_AIR + 1 + i);
+  }
 }
 
 struct KeyFrame {
@@ -2603,7 +2622,7 @@ static void sdl_init() {
 
   // create window
   state.window = SDL_CreateWindow("mineclone", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 800, 600, SDL_WINDOW_OPENGL);
-  // SDL_Window *window = SDL_CreateWindow("mineclone", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1920, 1080, SDL_WINDOW_OPENGL | SDL_WINDOW_BORDERLESS | SDL_WINDOW_FULLSCREEN);
+  // state.window = SDL_CreateWindow("mineclone", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1920, 1080, SDL_WINDOW_OPENGL | SDL_WINDOW_BORDERLESS | SDL_WINDOW_FULLSCREEN);
   if (!state.window)
     sdl_die("Couldn't create window");
 
@@ -2824,7 +2843,7 @@ static void render_ui() {
   glBindTexture(GL_TEXTURE_2D, state.gl_ui_texture);
 
   // debug: draw the shadowmap instead :3
-  #if 1
+  #if 0
     glBindTexture(GL_TEXTURE_2D, state.gl_block_shadowmap);
     push_ui_quad({0.0f, 0.0f}, {0.3f, 0.3f}, {0.0f, 0.0f}, {1.0f, 1.0f});
   #endif
