@@ -1,10 +1,11 @@
 // TODO:
 //
-// * optimize loading blocks:
+// * optimize loading blocks & persist block changes to disk:
 //   - data streaming in opengl for blocks
 //   - load new blocks in separate thread
+//   - good datastructure for storing block changes
 //
-// * give the shadowmap higher precision closer to the player
+// * give the shadowmap higher precision closer to the player (like a fishbowl kind of thing)
 //
 // * don't limit number of vertices to a fixed amount
 //
@@ -19,8 +20,6 @@
 // * transparent blocks (leaves etc)
 //
 // * complex transparent blocks (arbitrary meshes)
-//
-// * persist block changes to disk
 //
 // * crafting ui
 //
@@ -1291,7 +1290,7 @@ struct GameState {
   };
 
   // world data
-  // Array<BlockDiff> block_diffs; // TODO: see push_blockdiff :)
+  // Array<BlockDiff> block_changes; // TODO: see push_blockdiff :)
   u8 block_types[NUM_BLOCKS_x][NUM_BLOCKS_y][NUM_BLOCKS_z];
 
   // player data
@@ -1566,9 +1565,9 @@ static BlockType calc_blocktype(Block b) {
   if (b.z < 0)
     return BLOCKTYPE_DIRT;
 
-  // first check diffs, which are set when someone removes or places a block
+  // first check changes, which are set when someone removes or places a block
   // TODO: find a better way to do this
-  // For(state.block_diffs)
+  // For(state.block_changes)
   //   if (it->block.x == b.x && it->block.y == b.y && it->block.z == b.z)
   //     return it->t;
 
@@ -1616,17 +1615,17 @@ static void push_blockdiff(Block b, BlockType t) {
   // for example we could have a dirty flag for blocks in scope
   // that changed, and when they go out of scope, i.e. when they leave
   // our blocktype cache, we then persist changes somewhere.
-  // that way we only need to query blockdiffs when moving
+  // that way we only need to query blockchanges when moving
 
   // if already exists, update
-  // For(state.block_diffs) {
+  // For(state.block_changes) {
   //   if (it->block == b) {
   //     it->t = t;
   //     return;
   //   }
   // }
   // // otherwise add
-  // array_push(state.block_diffs, {b, t});
+  // array_push(state.block_changes, {b, t});
   // update cache
   set_blocktype_cache(b, t);
 }
