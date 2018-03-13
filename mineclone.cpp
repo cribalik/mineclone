@@ -1291,7 +1291,7 @@ struct GameState {
   };
 
   // world data
-  Array<BlockDiff> block_diffs;
+  // Array<BlockDiff> block_diffs; // TODO: see push_blockdiff :)
   u8 block_types[NUM_BLOCKS_x][NUM_BLOCKS_y][NUM_BLOCKS_z];
 
   // player data
@@ -1567,9 +1567,10 @@ static BlockType calc_blocktype(Block b) {
     return BLOCKTYPE_DIRT;
 
   // first check diffs, which are set when someone removes or places a block
-  For(state.block_diffs)
-    if (it->block.x == b.x && it->block.y == b.y && it->block.z == b.z)
-      return it->t;
+  // TODO: find a better way to do this
+  // For(state.block_diffs)
+  //   if (it->block.x == b.x && it->block.y == b.y && it->block.z == b.z)
+  //     return it->t;
 
   // otherwise generate
   return generate_blocktype(b);
@@ -1611,15 +1612,23 @@ static bool operator==(Block a, Block b) {
 }
 
 static void push_blockdiff(Block b, BlockType t) {
+  // TODO: have some good way of doing this.
+  // for example we could have a dirty flag for blocks in scope
+  // that changed, and when they go out of scope, i.e. when they leave
+  // our blocktype cache, we then persist changes somewhere.
+  // that way we only need to query blockdiffs when moving
+
   // if already exists, update
-  For(state.block_diffs) {
-    if (it->block == b) {
-      it->t = t;
-      return;
-    }
-  }
-  // otherwise add
-  array_push(state.block_diffs, {b, t});
+  // For(state.block_diffs) {
+  //   if (it->block == b) {
+  //     it->t = t;
+  //     return;
+  //   }
+  // }
+  // // otherwise add
+  // array_push(state.block_diffs, {b, t});
+  // update cache
+  set_blocktype_cache(b, t);
 }
 
 
