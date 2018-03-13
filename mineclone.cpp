@@ -1,19 +1,20 @@
 // TODO:
 //
 // * optimize loading blocks:
-//   - cache block types for blocks in scope
 //   - data streaming in opengl for blocks
 //   - load new blocks in separate thread
 //
+// * give the shadowmap higher precision closer to the player
+//
 // * don't limit number of vertices to a fixed amount
-//
-// * reflect and refract lighting from skybox
-//
-// * basic day cycle (i.e. rotate skybox herpiderpi)
 //
 // * movement through water
 //
+// * ambient occlusion
+//
 // * more ui (menus, buttons, etc..)
+//
+// * better skybox texture, and rotate skybox depending on sun position
 //
 // * transparent blocks (leaves etc)
 //
@@ -29,9 +30,19 @@
 //
 // * fix smoothing out sunlight as it goes behind horizon
 //
-// * distance fog
+// * distant fog
 //
 // * view distance in water?
+//
+// * fix position precision limitations (player position and vertex position).
+//   - if possible, we would like vertices to be relative to player position so we can keep
+//     vertex size down. but that would mean we need to update all vertices each time the player moves
+//     is there a way to keep vertex sizes down by modding them somehow?
+//
+// * torches - voxel lighting vs screen space lighting?
+//
+// * reflect and refract lighting from skybox?
+//   
 ////
 
 #ifdef _MSC_VER
@@ -46,18 +57,17 @@
 #include <math.h>
 #include "array.hpp"
 #define STB_IMAGE_IMPLEMENTATION
-#define STB_IMAGE_STATIC
 #include "stb_image.h"
 #include "GL/gl3w.c"
 #include <stdint.h>
 
 #define STB_TRUETYPE_IMPLEMENTATION
-#define STBTT_STATIC
 #include "stb_truetype.h"
 
 typedef uint8_t u8;
 typedef uint16_t u16;
 typedef int16_t i16;
+typedef int32_t i32;
 typedef uint32_t u32;
 typedef uint64_t u64;
 
@@ -114,6 +124,9 @@ static void _gl_ok_or_die(const char* file, int line) {
 }
 
 // @utils
+
+#define STATIC_ASSERT(expr, name) typedef char static_assert_##name[expr?1:-1]
+
 static FILE* mine_fopen(const char *filename, const char *mode) {
 #ifdef OS_WINDOWS
   FILE *f;
@@ -125,21 +138,9 @@ static FILE* mine_fopen(const char *filename, const char *mode) {
 #endif
 }
 
-static const char* mine_strerror(int err) {
-#ifdef OS_WINDOWS
-  static char buf[128];
-  strerror_s(buf, sizeof(buf), err);
-  return buf;
-#else
-  return strerror(err);
-#endif
-}
-
 // @math
 
-static float sign(float f) {
-  return f < 0.0f ? -1.0f : 1.0f;
-}
+
 #define ARRAY_LEN(a) (sizeof(a)/sizeof(*a))
 #define ARRAY_LAST(a) ((a)[ARRAY_LEN(a)-1])
 
@@ -166,9 +167,6 @@ static v3i operator+(v3i a, v3i b) {
 }
 
 typedef v3i Block;
-static Block invalid_block() {
-  return {INT_MIN};
-}
 struct BlockIndex {
   int x: 16;
   int y: 16;
@@ -521,11 +519,11 @@ static v3 camera_backward_fly(const Camera *camera, float speed) {
   return camera_forward_fly(camera, -speed);
 }
 
-static v3 camera_up(const Camera *camera, float speed) {
+static v3 camera_up(const Camera *, float speed) {
   return v3{0.0f, 0.0f, speed};
 }
 
-static v3 camera_down(const Camera *camera, float speed) {
+static v3 camera_down(const Camera *, float speed) {
   return v3{0.0f, 0.0f, -speed};
 }
 
@@ -587,7 +585,7 @@ static m4 camera_view_matrix(const Camera *camera, v3 pos) {
   return r * t;
 }
 
-static m4 camera_projection_matrix(const Camera *camera, float fov, float nearz, float farz, float screen_ratio) {
+static m4 camera_projection_matrix(const Camera *, float fov, float nearz, float farz, float screen_ratio) {
   // projection (http://www.songho.ca/opengl/gl_projectionmatrix.html)
   const float n = nearz;
   const float f = farz;
@@ -622,7 +620,7 @@ static void camera_lookat(Camera *camera, v3 from, v3 to) {
   camera->up = asinf(d.z);
 }
 
-static m4 camera_ortho_matrix(const Camera *camera, float width, float height, float nearz, float farz) {
+static m4 camera_ortho_matrix(const Camera *, float width, float height, float nearz, float farz) {
   m4 o = {};
   o.d[0] = 1.0f/width;
   o.d[5] = 1.0f/height;
@@ -986,6 +984,7 @@ static GLuint shader_create(const char *vertex_shader_source, const char *fragme
 
 // game
 enum BlockType {
+  BLOCKTYPE_NULL,
   BLOCKTYPE_AIR,
   BLOCKTYPE_DIRT,
   BLOCKTYPE_STONE,
@@ -1078,7 +1077,7 @@ static T* next(ColonyIter<T,N> &iter) {
 #define For(container) decltype(container)::Iterator it; for(auto _iterator = iter(container); (it = next(_iterator));)
 #endif
 
-static const int NUM_BLOCKS_x = 64, NUM_BLOCKS_y = 64, NUM_BLOCKS_z = 128;
+static const int NUM_BLOCKS_x = 64, NUM_BLOCKS_y = 64, NUM_BLOCKS_z = 64;
 
 struct BlockDiff {
   Block block;
@@ -1101,7 +1100,7 @@ struct EndOfFrameCommand {
     struct {
       Block block;
       BlockType type;
-    } show_block;
+    } load_block;
     struct {
       int pos;
       Direction dir;
@@ -1166,7 +1165,16 @@ struct Glyph {
 
 static const v3 CAMERA_OFFSET_FROM_PLAYER = v3{0.0f, 0.0f, 1.0f};
 
+template<int N>
+struct BitArray {
+  unsigned char d[(N+7)/8];
+  bool get(int i) const {return d[i/8] & (1 << (i&7));}
+  void set(int i) {d[i/8] |= (1 << (i&7));}
+  void unset(int i) {d[i/8] &= ~(1 << (i&7));}
+};
+
 struct GameState {
+  // window stuff
   SDL_Window *window;
   float screen_ratio;
   int screen_width, screen_height;
@@ -1180,15 +1188,17 @@ struct GameState {
     bool clicked_right;
   };
 
+  // camera stuff
   float fov;
   float nearz;
   float farz;
   Camera camera;
 
+  // daycycle graphics stuff
   float sun_angle;
+  float ambient_light;
 
   // block graphics data
-  float ambient_light;
   struct {
     // block
     #define NUM_BLOCK_SIDES 3 // the number of different textures we have per block. at the moment, it is top,side,bottom
@@ -1206,7 +1216,7 @@ struct GameState {
     bool block_vertices_dirty;
 
     // mapping from block face to the position in the vertex array, to optimize removal of blocks. use get_block_vertex_pos to get 
-    int block_vertex_pos[NUM_BLOCKS_x][NUM_BLOCKS_y][NUM_BLOCKS_z][DIRECTION_MAX];
+    u32 block_vertex_pos[NUM_BLOCKS_x][NUM_BLOCKS_y][NUM_BLOCKS_z][DIRECTION_MAX];
 
     GLuint gl_block_vao, gl_block_vbo, gl_block_ebo;
     GLuint gl_block_shader;
@@ -1269,7 +1279,7 @@ struct GameState {
     GLuint gl_text_color_uniform;
   };
 
-  // skybox
+  // skybox graphics data
   struct {
     GLuint gl_skybox_vao, gl_skybox_vbo;
     GLuint gl_skybox_shader;
@@ -1282,12 +1292,14 @@ struct GameState {
 
   // world data
   Array<BlockDiff> block_diffs;
+  u8 block_types[NUM_BLOCKS_x][NUM_BLOCKS_y][NUM_BLOCKS_z];
 
   // player data
   v3 player_vel;
   v3 player_pos;
   bool player_on_ground;
 
+  // inventory stuff
   bool render_quickmenu;
   bool is_inventory_open;
   int selected_item;
@@ -1305,7 +1317,7 @@ static Glyph& glyph_get(char c) {
 static bool add_block_to_inventory(BlockType block_type) {
   const int STACK_SIZE = 64;
   // check if already exists
-  for (int i = 0; i < ARRAY_LEN(state.inventory); ++i) {
+  for (int i = 0; i < (int)ARRAY_LEN(state.inventory); ++i) {
     if (state.inventory[i].type == ITEM_BLOCK && state.inventory[i].block.type == block_type && state.inventory[i].block.num < STACK_SIZE) {
       ++state.inventory[i].block.num;
       return true;
@@ -1313,7 +1325,7 @@ static bool add_block_to_inventory(BlockType block_type) {
   }
 
   // otherwise find a free one
-  for (int i = 0; i < ARRAY_LEN(state.inventory); ++i) {
+  for (int i = 0; i < (int)ARRAY_LEN(state.inventory); ++i) {
     if (state.inventory[i].type == ITEM_NULL) {
       state.inventory[i].type = ITEM_BLOCK;
       state.inventory[i].block = {block_type, 1};
@@ -1352,40 +1364,58 @@ static BlockIndex block_to_blockindex(Block b) {
   return {b.x & (NUM_BLOCKS_x-1), b.y & (NUM_BLOCKS_y-1), b.z & (NUM_BLOCKS_z-1)};
 }
 
-static int& get_block_vertex_pos(BlockIndex b, Direction dir) {
+STATIC_ASSERT(BLOCKTYPES_MAX <= 255, blocktypes_fit_in_u8);
+
+static void set_blocktype_cache(BlockIndex b, BlockType t) {
+  state.block_types[b.x][b.y][b.z] = (u8)t;
+}
+
+static void set_blocktype_cache(Block b, BlockType t) {
+  set_blocktype_cache(block_to_blockindex(b), t);
+}
+
+static BlockType get_blocktype_cache(BlockIndex b) {
+  return (BlockType)state.block_types[b.x][b.y][b.z];
+}
+
+static BlockType get_blocktype_cache(Block b) {
+  return get_blocktype_cache(block_to_blockindex(b));
+}
+
+static u32& get_block_vertex_pos(BlockIndex b, Direction dir) {
   return state.block_vertex_pos[b.x][b.y][b.z][dir];
 }
 
-static int& get_block_vertex_pos(Block b, Direction dir) {
+static u32& get_block_vertex_pos(Block b, Direction dir) {
   return get_block_vertex_pos(block_to_blockindex(b), dir);
 }
 
 static void blocktype_to_texpos_top(BlockType t, u16 *x0, u16 *y0, u16 *x1, u16 *y1) {
   *x0 = 0;
-  *y0 = UINT16_MAX/(BLOCKTYPES_MAX-1) * (BLOCKTYPES_MAX-t-1);
+  *y0 = UINT16_MAX*(BLOCKTYPES_MAX-1-t)/(BLOCKTYPES_MAX-2);
   *x1 = UINT16_MAX/3;
-  *y1 = UINT16_MAX*(BLOCKTYPES_MAX-t)/(BLOCKTYPES_MAX-1);
+  *y1 = UINT16_MAX*(BLOCKTYPES_MAX-t)/(BLOCKTYPES_MAX-2);
 }
 
 static void blocktype_to_texpos_side(BlockType t, u16 *x0, u16 *y0, u16 *x1, u16 *y1) {
   *x0 = UINT16_MAX/3;
-  *y0 = UINT16_MAX/(BLOCKTYPES_MAX-1) * (BLOCKTYPES_MAX-t-1);
+  *y0 = UINT16_MAX*(BLOCKTYPES_MAX-1-t)/(BLOCKTYPES_MAX-2);
   *x1 = 2*UINT16_MAX/3;
-  *y1 = UINT16_MAX*(BLOCKTYPES_MAX-t)/(BLOCKTYPES_MAX-1);
+  *y1 = UINT16_MAX*(BLOCKTYPES_MAX-t)/(BLOCKTYPES_MAX-2);
 }
 
 static void blocktype_to_texpos_bottom(BlockType t, u16 *x0, u16 *y0, u16 *x1, u16 *y1) {
   *x0 = 2*UINT16_MAX/3;
-  *y0 = UINT16_MAX/(BLOCKTYPES_MAX-1) * (BLOCKTYPES_MAX-t-1);
+  *y0 = UINT16_MAX*(BLOCKTYPES_MAX-1-t)/(BLOCKTYPES_MAX-2);
   *x1 = UINT16_MAX;
-  *y1 = UINT16_MAX*(BLOCKTYPES_MAX-t)/(BLOCKTYPES_MAX-1);
+  *y1 = UINT16_MAX*(BLOCKTYPES_MAX-t)/(BLOCKTYPES_MAX-2);
 }
 
 static void blocktype_to_texpos(BlockType t, float *x, float *y, float *w, float *h) {
   *x = 0.0f;
-  *y = 1.0f/(BLOCKTYPES_MAX-1) * (BLOCKTYPES_MAX-t-1);
+  *y = 1.0f*(BLOCKTYPES_MAX-1-t)/(BLOCKTYPES_MAX-2);
   *w = 1.0f;
-  *h = 1.0f/(BLOCKTYPES_MAX-1);
+  *h = 1.0f/(BLOCKTYPES_MAX-2);
 }
 
 static void push_block_face(Block block, BlockType type, Direction dir) {
@@ -1400,10 +1430,9 @@ static void push_block_face(Block block, BlockType type, Direction dir) {
   int &num_block_elements = transparent ? state.num_transparent_block_elements : state.num_block_elements;
 
   // does face already exist?
-  int &vertex_pos = get_block_vertex_pos(block, dir);
+  u32 &vertex_pos = get_block_vertex_pos(block, dir);
   if (vertex_pos)
     return;
-
 
   // too many block_vertices?
   if (num_block_vertices + 4 >= MAX_BLOCK_VERTICES || num_block_elements + 6 > MAX_BLOCK_ELEMENTS) {
@@ -1414,14 +1443,9 @@ static void push_block_face(Block block, BlockType type, Direction dir) {
   if (transparent) state.transparent_block_vertices_dirty = true;
   else             state.block_vertices_dirty = true;
 
-
-  const int tex_max = UINT16_MAX;
-  const int txsize = tex_max/3;
-  const int tysize = tex_max/(BLOCKTYPES_MAX-1);
   const BlockVertexPos p =  {(i16)(block.x), (i16)(block.y), (i16)(block.z)};
   const BlockVertexPos p2 = {(i16)(block.x+1), (i16)(block.y+1), (i16)(block.z+1)};
 
-  const u16 row = tysize * (BLOCKTYPES_MAX-type-1);
   BlockVertexTexPos ttop, ttop2,  tside, tside2,  tbot, tbot2;
   blocktype_to_texpos_top(type, &ttop.x, &ttop.y, &ttop2.x, &ttop2.y);
   blocktype_to_texpos_side(type, &tside.x, &tside.y, &tside2.x, &tside2.y);
@@ -1442,7 +1466,6 @@ static void push_block_face(Block block, BlockType type, Direction dir) {
     num_block_elements += 6;
   }
   vertex_pos = v/4;
-
 
   switch (dir) {
     case DIRECTION_UP: {
@@ -1499,29 +1522,24 @@ static void push_block_face(Block block, BlockType type, Direction dir) {
 }
 
 static void block_vertices_reset() {
-  // make first 4 block_vertices contain the null block, and another 4 for the bottom of the world (used for rendering shadows)
+  // make first 4 block_vertices contain the null block
   state.num_block_vertices = 4; state.num_block_elements = 6;
   // again, 4 vertices for null block
   state.num_transparent_block_vertices = 4; state.num_transparent_block_elements = 6;
 }
 
-static bool is_block_in_bounds(Block b) {
+static bool is_block_in_range(Block b) {
   Block p = pos_to_block(state.player_pos);
-  return b.x - p.x < NUM_BLOCKS_x/2 && b.x - p.x >= -NUM_BLOCKS_x/2 && b.y - p.y < NUM_BLOCKS_y/2 && b.y - p.y >= -NUM_BLOCKS_y/2 && b.z - p.z < NUM_BLOCKS_z/2 && b.z - p.z >= -NUM_BLOCKS_z/2;
+  return
+    b.x - p.x <   NUM_BLOCKS_x/2 &&
+    b.x - p.x >= -NUM_BLOCKS_x/2 &&
+    b.y - p.y <   NUM_BLOCKS_y/2 &&
+    b.y - p.y >= -NUM_BLOCKS_y/2 &&
+    b.z - p.z <   NUM_BLOCKS_z/2 &&
+    b.z - p.z >= -NUM_BLOCKS_z/2;
 }
 
-// TODO: maybe have a cache for these
-static BlockType get_blocktype(Block b) {
-  if (b.z < 0)
-    return BLOCKTYPE_DIRT;
-
-  // first check diffs
-  For(state.block_diffs)
-    if (it->block.x == b.x && it->block.y == b.y && it->block.z == b.z)
-      return it->t;
-
-  // otherwise generate
-  // @terrain
+static BlockType generate_blocktype(Block b) {
   static const float ground_freq = 0.05f;
   const float crazy_hills = max(powf(perlin(b.x*ground_freq*1.0f, b.y*ground_freq*1.0f, 0) * 2.0f, 6), 0.0f);
   const float groundlevel = perlin(b.x*ground_freq*0.7f, b.y*ground_freq*0.7f, 0) * 30.0f + crazy_hills; //50.0f;
@@ -1537,9 +1555,41 @@ static BlockType get_blocktype(Block b) {
     return BLOCKTYPE_WATER;
 
   // flying blocks clusters
-  if (b.z >= 35 && b.z <= 40 && perlin(b.x*0.05f, b.y*0.05f, b.z*0.2f) > 0.8)
+  if (b.z >= 35 && b.z <= 40 && perlin(b.x*0.05f, b.y*0.05f, b.z*0.2f) > 0.75)
     return BLOCKTYPE_CLOUD;
+
   return BLOCKTYPE_AIR;
+}
+
+// WARNING: only call this if you explicitly want to bypass the cache, otherwise use get_blocktype
+static BlockType calc_blocktype(Block b) {
+  if (b.z < 0)
+    return BLOCKTYPE_DIRT;
+
+  // first check diffs, which are set when someone removes or places a block
+  For(state.block_diffs)
+    if (it->block.x == b.x && it->block.y == b.y && it->block.z == b.z)
+      return it->t;
+
+  // otherwise generate
+  return generate_blocktype(b);
+}
+
+static BlockType get_blocktype(Block b) {
+  BlockType t;
+  // check cache
+  bool in_range = is_block_in_range(b);
+  if (in_range) {
+    t = get_blocktype_cache(b);
+    // TODO: if we make sure to preload the cache, we should be able to skip this step
+    if (t != BLOCKTYPE_NULL)
+      return t;
+  }
+  // otherwise get value and update cache
+  t = calc_blocktype(b);
+  if (in_range)
+    set_blocktype_cache(b, t);
+  return t;
 }
 
 static Block get_adjacent_block(Block b, Direction dir) {
@@ -1574,7 +1624,7 @@ static void push_blockdiff(Block b, BlockType t) {
 
 
 static void remove_blockface(Block b, BlockType type, Direction d) {
-  int &vertex_pos = get_block_vertex_pos(b, (Direction)d);
+  u32 &vertex_pos = get_block_vertex_pos(b, (Direction)d);
   if (!vertex_pos)
     return;
 
@@ -1595,11 +1645,12 @@ static void remove_blockface(Block b, Direction d) {
   remove_blockface(b, get_blocktype(b), d);
 }
 
-static void hide_block(Block b, bool create_new_faces = true) {
+static void unload_block(Block b, bool create_new_faces = true) {
   BlockType t = get_blocktype(b);
+  set_blocktype_cache(b, BLOCKTYPE_NULL);
 
   // remove the visible faces of this block
-  if (is_block_in_bounds(b)) {
+  if (is_block_in_range(b)) {
     for (int d = 0; d < DIRECTION_MAX; ++d)
       remove_blockface(b, t, (Direction)d);
   }
@@ -1608,7 +1659,7 @@ static void hide_block(Block b, bool create_new_faces = true) {
   if (create_new_faces && (blocktype_is_transparent(t) == false || t == BLOCKTYPE_WATER)) {
     for (int d = 0; d < DIRECTION_MAX; ++d) {
       Block adj = get_adjacent_block(b, (Direction)d);
-      if (!is_block_in_bounds(adj))
+      if (!is_block_in_range(adj))
         continue;
 
       BlockType tt = get_blocktype(adj);
@@ -1619,8 +1670,9 @@ static void hide_block(Block b, bool create_new_faces = true) {
   }
 }
 
-static void show_block(Block b, bool hide_adjacent_faces = true) {
+static void load_block(Block b, bool hide_adjacent_faces = true) {
   BlockType t = get_blocktype(b);
+  assert(t != BLOCKTYPE_NULL);
   if (t == BLOCKTYPE_AIR)
     return;
 
@@ -1662,13 +1714,13 @@ static void show_block(Block b, bool hide_adjacent_faces = true) {
 }
 
 static void remove_block(Block b) {
-  hide_block(b);
+  unload_block(b);
   push_blockdiff(b, BLOCKTYPE_AIR);
 }
 
 static void add_block(Block b, BlockType t) {
   push_blockdiff(b, t);
-  show_block(b);
+  load_block(b);
 }
 
 /* in: line, plane, plane origin */
@@ -1730,13 +1782,22 @@ static T* next(VecIter<T> &i) {
   return i.t++;
 }
 
-static void generate_block_mesh(v3 player_pos) {
+static void generate_block_mesh() {
   block_vertices_reset();
+
+  // fill blocktype cache
+  // FOR_BLOCKS_IN_RANGE_x
+  // FOR_BLOCKS_IN_RANGE_y
+  // FOR_BLOCKS_IN_RANGE_z {
+  //   Block b = {x,y,z};
+  //   set_blocktype_cache(b, calc_blocktype(b));
+  // }
+
   // render block faces that face transparent blocks
   FOR_BLOCKS_IN_RANGE_x
   FOR_BLOCKS_IN_RANGE_y
   FOR_BLOCKS_IN_RANGE_z
-    show_block({x,y,z}, false);
+    load_block({x,y,z}, false);
 }
 
 struct Collision {
@@ -1767,7 +1828,8 @@ static Vec<Collision> collision(v3 p0, v3 p1, float dt, v3 size, OPTIONAL v3 *p_
     for (int x = b0.x; x <= b1.x; ++x)
     for (int y = b0.y; y <= b1.y; ++y)
     for (int z = b0.z; z <= b1.z; ++z) {
-      if (get_blocktype({x,y,z}) == BLOCKTYPE_AIR) continue;
+      if (get_blocktype({x,y,z}) == BLOCKTYPE_AIR)
+        continue;
 
       float t = 2.0f;
       v3 n;
@@ -1783,9 +1845,11 @@ static Vec<Collision> collision(v3 p0, v3 p1, float dt, v3 size, OPTIONAL v3 *p_
       collision_plane(p0, p1, {w0.x, w0.y, w1.z}, {w1.x, w0.y, w1.z}, {w0.x, w1.y, w1.z}, &t, &n);
 
       // if we hit something, t must have been set to [0,1]
-      if (t == 2.0f) continue;
+      if (t == 2.0f)
+        continue;
       // if previous blocks were closer, collide with them first
-      if (t > time) continue;
+      if (t > time)
+        continue;
       // remember which block we hit, if we want to check for lava, teleports etc
       which_block_was_hit = {x,y,z};
       did_hit = true;
@@ -1793,7 +1857,8 @@ static Vec<Collision> collision(v3 p0, v3 p1, float dt, v3 size, OPTIONAL v3 *p_
       normal = n;
       // TODO: we might want to be able to pass through some kinds of blocks
     }
-    if (!did_hit) break;
+    if (!did_hit)
+      break;
 
     hits[num_hits++] = {which_block_was_hit, normal};
 
@@ -1916,9 +1981,9 @@ static GLuint load_block_texture(const char *filename) {
   stbi_image_free(data);
 
   state.water_texture_pos.x0 = 0;
-  state.water_texture_pos.y0 = h * (BLOCKTYPES_MAX- BLOCKTYPE_WATER - 1)/(BLOCKTYPES_MAX - 1);
+  state.water_texture_pos.y0 = h / (BLOCKTYPES_MAX - 2) * (BLOCKTYPES_MAX - 1 - BLOCKTYPE_WATER);
   state.water_texture_pos.x1 = w;
-  state.water_texture_pos.y1 = h*(BLOCKTYPES_MAX - BLOCKTYPE_WATER)/(BLOCKTYPES_MAX - 1);
+  state.water_texture_pos.y1 = h / (BLOCKTYPES_MAX - 2) * (BLOCKTYPES_MAX - BLOCKTYPE_WATER);
   int water_texture_size = (state.water_texture_pos.x1 - state.water_texture_pos.x0) * (state.water_texture_pos.y1 - state.water_texture_pos.y0);
   if (water_texture_size*4 != ARRAY_LEN(state.water_texture_buffer))
     die("Maths went wrong, expected %lu but got %i", ARRAY_LEN(state.water_texture_buffer), water_texture_size);
@@ -2098,12 +2163,11 @@ static void skybox_gl_buffer_create() {
   const float r0 = 0.0f,
               g0 = 0.5f,
               b0 = 1.0f;
-  const float r1 = 0.7f,
-              g1 = 0.5f,
-              b1 = 1.0f;
+  const float r1 = 0.90196f,
+              g1 = 0.39216f,
+              b1 = 0.39608f;
 
   for (int face = 0; face < 6; ++face) {
-    u8 *out = state.skybox_texture_buffer;
     for (int x = 0; x < SKYBOX_TEXTURE_SIZE; ++x)
     for (int y = 0; y < SKYBOX_TEXTURE_SIZE; ++y) {
       // calculate distance to center of this face
@@ -2117,9 +2181,9 @@ static void skybox_gl_buffer_create() {
       float d = acos(cos(lat) * cos(fabs(lng)));
       // normalize distance to (0,1), so we can lerp between colors
       float t = 1.0f - d/PI;
-      const u8 r = UINT8_MAX * lerp(t, r0, r1);
-      const u8 g = UINT8_MAX * lerp(t, g0, g1);
-      const u8 b = UINT8_MAX * lerp(t, b0, b1);
+      const u8 r = UINT8_MAX * lerp(pow(t, 2.5), r0, r1);
+      const u8 g = UINT8_MAX * lerp(pow(t, 2.5), g0, g1);
+      const u8 b = UINT8_MAX * lerp(pow(t, 2.5), b0, b1);
 
       const int bi = (y*SKYBOX_TEXTURE_SIZE + x)*3;
       state.skybox_texture_buffer[bi] = r;
@@ -2128,7 +2192,7 @@ static void skybox_gl_buffer_create() {
     }
 
     // draw sun
-    #if 1
+    #if 0
     if (face == 4) {
       for (int x = SKYBOX_TEXTURE_SIZE*3/8; x < SKYBOX_TEXTURE_SIZE*5/8; ++x)
       for (int y = SKYBOX_TEXTURE_SIZE*3/8; y < SKYBOX_TEXTURE_SIZE*5/8; ++y) {
@@ -2140,9 +2204,10 @@ static void skybox_gl_buffer_create() {
         t = pow(t, 5);
         t = clamp(t, 0.2f, 1.0f);
         const int bi = (y*SKYBOX_TEXTURE_SIZE + x)*3;
-        const float r = 1.0f;
-        const float g = 0.8f;
-        const float b = 0.4f;
+        const float r = 0.9647f;
+        const float g = 0.82745f;
+        const float b = 0.396078f;
+        t = 0.0f;
         state.skybox_texture_buffer[bi] = UINT8_MAX * lerp(t, r, (float)state.skybox_texture_buffer[bi]/UINT8_MAX);
         state.skybox_texture_buffer[bi+1] = UINT8_MAX * lerp(t, g, (float)state.skybox_texture_buffer[bi+1]/UINT8_MAX);
         state.skybox_texture_buffer[bi+2] = UINT8_MAX * lerp(t, b, (float)state.skybox_texture_buffer[bi+2]/UINT8_MAX);
@@ -2203,7 +2268,7 @@ static void ui_gl_buffer_create() {
   state.gl_ui_shader = shader_create(ui_vertex_shader, ui_fragment_shader);
   glUseProgram(state.gl_ui_shader);
   state.gl_ui_texture_uniform = glGetUniformLocation(state.gl_ui_shader, "u_texture");
-  if (state.gl_ui_texture_uniform == -1) die("Failed to find uniform location of 'u_texture'");
+  if (state.gl_ui_texture_uniform == (GLuint)-1) die("Failed to find uniform location of 'u_texture'");
   glUniform1i(state.gl_ui_texture_uniform, 0);
 
   // load ui textures
@@ -2292,12 +2357,11 @@ static void push_ui_quad(v2 x, v2 w, v2 t, v2 tw) {
 }
 
 static void gamestate_init() {
-  state.fov = PI/3.0f;
+  state.fov = PI/2.0f;
   state.nearz = 0.3f;
   state.farz = 300.0f;
-  // state.camera.look = {0.0f, 1.0f};
-  state.player_pos = {300.0f, 300.0f, 50.0f};
-  camera_lookat(&state.camera, state.player_pos, state.player_pos + v3{0.0f, SQRT2, SQRT2});
+  state.player_pos = {300.0f, 300.0f, 18.1f};
+  camera_lookat(&state.camera, state.player_pos, state.player_pos + v3{0.0f, SQRT2, -SQRT2});
   state.block_vertices_dirty = true;
   state.transparent_block_vertices_dirty = true;
   state.render_quickmenu = true;
@@ -2307,11 +2371,11 @@ static void gamestate_init() {
 
   puts("generating block mesh...");
   block_vertices_reset();
-  generate_block_mesh(state.player_pos);
+  generate_block_mesh();
   puts("done");
 
-  // fill your inventory
-  for (int i = 0; i < min(BLOCKTYPES_MAX-1, (int)ARRAY_LEN(state.inventory)); ++i) {
+  // fill inventory with a bunch of blocks
+  for (int i = 0; i < min(BLOCKTYPES_MAX - 1 - BLOCKTYPE_AIR, (int)ARRAY_LEN(state.inventory)); ++i) {
     state.inventory[i].type = ITEM_BLOCK;
     state.inventory[i].block.num = 64;
     state.inventory[i].block.type = (BlockType)(BLOCKTYPE_AIR + 1 + i);
@@ -2338,7 +2402,7 @@ static float keyframe_value(KeyFrame keyframes[], int num_keyframes, float at) {
 // fills out the input fields in GameState
 static void read_input() {
   // clear earlier events
-  for (int i = 0; i < ARRAY_LEN(state.keypressed); ++i)
+  for (int i = 0; i < (int)ARRAY_LEN(state.keypressed); ++i)
     state.keypressed[i] = false;
   state.mouse_dx = state.mouse_dy = 0;
   state.clicked = false;
@@ -2402,7 +2466,7 @@ static void update_player(float dt) {
   const float GRAVITY = 0.015f;
   const float JUMPPOWER = 0.21f;
   v3 v = state.player_vel;
-  static bool flying;
+  static bool flying = true;
   if (flying) {
     if (state.keyisdown[KEY_FORWARD]) v += dt*camera_forward(&state.camera, ACCELERATION);
     if (state.keyisdown[KEY_BACKWARD]) v += dt*camera_backward(&state.camera, ACCELERATION);
@@ -2522,11 +2586,11 @@ static void update_blocks(v3 before, v3 after) {
     for (int A = r0.a.A; A < r1.a.A; ++A) \
     for (int B = B##0; B <= B##1; ++B) \
     for (int C = C##0; C <= C##1; ++C) \
-        hide_block({x, y, z}, false); \
+        unload_block({x, y, z}, false); \
     for (int A = r0.b.A; A > r1.b.A; --A) \
     for (int B = B##0; B <= B##1; ++B) \
     for (int C = C##0; C <= C##1; ++C) \
-        hide_block({x, y, z}, false);
+        unload_block({x, y, z}, false);
 
   HIDEBLOCK(x,y,z);
   HIDEBLOCK(y,x,z);
@@ -2540,11 +2604,11 @@ static void update_blocks(v3 before, v3 after) {
     for (int A = r0.b.A+1; A <= r1.b.A; ++A) \
     FOR_BLOCKS_IN_RANGE_##B \
     FOR_BLOCKS_IN_RANGE_##C \
-      show_block({x, y, z}, false); \
+      load_block({x, y, z}, false); \
     for (int A = r0.a.A-1; A >= r1.a.A; --A) \
     FOR_BLOCKS_IN_RANGE_##B \
     FOR_BLOCKS_IN_RANGE_##C \
-        show_block({x, y, z}, false);
+        load_block({x, y, z}, false);
   SHOWBLOCK(x,y,z);
   SHOWBLOCK(y,x,z);
   SHOWBLOCK(z,x,y);
@@ -2636,7 +2700,7 @@ static void sdl_init() {
   if (!glcontext) die("Failed to create context: %s", SDL_GetError());
 }
 
-static void render_transparent_blocks(const m4 &viewprojection) {
+static void render_transparent_blocks(const m4 &) {
   glEnable(GL_BLEND);
   glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
   glEnable(GL_CULL_FACE);
@@ -2816,7 +2880,7 @@ static void render_ui() {
     float box_margin_x = (inv_width - ni*box_size)/(ni+1);
     float x = inv_margin + box_margin_x;
     float y = box_margin_y;
-    for (int i = 0; i < ARRAY_LEN(state.inventory); ++i, x += box_margin_x + box_size) {
+    for (int i = 0; i < (int)ARRAY_LEN(state.inventory); ++i, x += box_margin_x + box_size) {
       if (state.inventory[i].type != ITEM_BLOCK)
         continue;
 
