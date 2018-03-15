@@ -39,6 +39,7 @@
 include/SDL2
 *.sublime-workspace
 *.sublime-project
+.idea
 
 # macOS specific
 info.plist
