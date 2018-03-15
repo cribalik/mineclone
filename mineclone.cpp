@@ -989,6 +989,7 @@ enum BlockType {
   BLOCKTYPE_STONE,
   BLOCKTYPE_CLOUD,
   BLOCKTYPE_WATER,
+  BLOCKTYPE_BEDROCK, // TODO: Make this unbreakable. Just like my heart. Dad?
   BLOCKTYPES_MAX
 };
 
@@ -1562,8 +1563,9 @@ static BlockType generate_blocktype(Block b) {
 
 // WARNING: only call this if you explicitly want to bypass the cache, otherwise use get_blocktype
 static BlockType calc_blocktype(Block b) {
-  if (b.z < 0)
-    return BLOCKTYPE_DIRT;
+	const int bottomLevel = 0;
+  if (b.z <= bottomLevel)
+    return BLOCKTYPE_BEDROCK;
 
   // first check changes, which are set when someone removes or places a block
   // TODO: find a better way to do this
