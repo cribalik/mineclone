@@ -1,6 +1,7 @@
 // TODO:
 //
 // * optimize loading blocks & persist block changes to disk:
+//   - hashmap for block face lookup
 //   - data streaming in opengl for blocks, or divide world into multiple buffer objects?
 //   - good datastructure for storing block changes
 //
@@ -92,6 +93,7 @@ static void _die(const char *file, int line, const char *fmt, ...) {
   va_end(args);
 
   fflush(stdout);
+  fflush(stderr);
   abort();
 }
 #define die(fmt, ...) _die(__FILE__, __LINE__, fmt, ##__VA_ARGS__)
@@ -156,6 +158,10 @@ static FILE* mine_fopen(const char *filename, const char *mode) {
 }
 
 // @math
+
+static bool is_power_of_2(int x) {
+  return (x & (x-1)) == 0;
+}
 
 #define ARRAY_LEN(a) (sizeof(a)/sizeof(*a))
 #define ARRAY_LAST(a) ((a)[ARRAY_LEN(a)-1])
@@ -1094,12 +1100,81 @@ static T* next(ColonyIter<T,N> &iter) {
 #define For(container) decltype(container)::Iterator it; for(auto _iterator = iter(container); (it = next(_iterator));)
 #endif
 
+// quadratically probed hashmap optimized for PODs and small values
+template<class Key, class Value, int N>
+struct HashMap {
+  struct Slot {
+    Key key;
+    Value value;
+  };
+
+  Key null;
+  Key tombstone;
+  Slot slots[N];
+
+  HashMap(Key null, Key tomstone): slots((Slot*)malloc(N*sizeof(*slots))) {
+    if (!is_power_of_2(N))
+      die("hashmap size must be power of 2");
+  }
+  ~HashMap() {
+    free(slots);
+  }
+
+  // return value may be null
+  Value* get(Key key) {
+    int offset = 1;
+    int i = hash(key) & (N-1);
+    while (offset < N) {
+      if (slots[i].key == key)
+        return &slots[i].value;
+      if (slots[i].key == null)
+        return 0;
+      i += offset;
+      offset *= 2;
+    }
+    return 0;
+  }
+
+  void set(Key key, Value value) {
+    int offset = 1;
+    int i = hash(key) & (N-1);
+    while (offset < N) {
+      if (slots[i].key == key) {
+        slots[i].value = value;
+        return;
+      }
+      if (slots[i].key == null || slots[i].key == tomstone) {
+        slots[i].key = key;
+        slots[i].value = value;
+        return;
+      }
+      i += offset;
+      offset *= 2;
+    }
+    die("Hashmap full");
+  }
+
+  void remove(Key key) {
+    int offset = 1;
+    int i = hash(key) & (N-1);
+    while (offset < N) {
+      if (slots[i].key == key) {
+        slots[i].key = tombstone;
+        return;
+      }
+      if (slots[i].key == null)
+        return;
+    }
+    return;
+  }
+};
+
 // how many blocks we keep in caches and stuff.
 // The reason these are less than NUM_VISIBLE_BLOCKS is to give room for the lazy block loader
 // to take its time :)
 static const int
-  NUM_VISIBLE_BLOCKS_x = 16,
-  NUM_VISIBLE_BLOCKS_y = 16,
+  NUM_VISIBLE_BLOCKS_x = 64,
+  NUM_VISIBLE_BLOCKS_y = 64,
   NUM_VISIBLE_BLOCKS_z = 64;
 static const int
   NUM_BLOCKS_x = (NUM_VISIBLE_BLOCKS_x*2),
@@ -1262,6 +1337,7 @@ struct GameState {
 
     // mapping from block face to the position in the vertex array, to optimize removal of blocks. use get_block_vertex_pos to get 
     u32 block_vertex_pos[NUM_BLOCKS_x][NUM_BLOCKS_y][NUM_BLOCKS_z][DIRECTION_MAX];
+    // HashMap<u32, u32> block_vertex_pos;
 
     GLuint gl_block_vao, gl_block_vbo, gl_block_ebo;
     GLuint gl_block_shader;
@@ -1270,8 +1346,8 @@ struct GameState {
     GLuint gl_shadowmap_shader;
     GLuint gl_block_shadowmap_fbo;
     GLuint gl_block_shadowmap;
-    #define SHADOWMAP_WIDTH (1024*3)
-    #define SHADOWMAP_HEIGHT (1024*3)
+    #define SHADOWMAP_WIDTH (1024*2)
+    #define SHADOWMAP_HEIGHT (1024*2)
 
 
     // same thing as all of the above, but for transparent blocks! (since they need to be rendered separately, because they look weird otherwise)
@@ -1604,17 +1680,16 @@ static BlockType generate_blocktype(Block b) {
   int stonelevel;
   const int waterlevel = 13;
 
-  // to not having to recalculate stuff like ground level and water level for every block in Z,
-  // we keep a cache of it :)
-  // get_world_xy_cache(bi, &groundlevel, &stonelevel);
-  // success = false;
-  // if (!success) {
+  // to not having to recalculate stuff that are the same for every (x,y),
+  // like ground level and water level, we keep a cache of it :)
+  bool success = get_world_xy_cache(bi, &groundlevel, &stonelevel);
+  if (!success) {
     static const float stone_freq = 0.13f;
     static const float ground_freq = 0.05f;
     float crazy_hills = max(powf(perlin(b.x*ground_freq*1.0f, b.y*ground_freq*1.0f, 0) * 2.0f, 6), 0.0f);
     groundlevel = (int)ceilf(perlin(b.x*ground_freq*0.7f, b.y*ground_freq*0.7f, 0) * 30.0f + crazy_hills); //50.0f;
     stonelevel = (int)ceilf(10.0f + perlin(b.x*stone_freq, b.y*stone_freq, 0) * 5.0f); // 20.0f;
-  // }
+  }
 
   if (b.z < groundlevel && b.z < stonelevel)
     return BLOCKTYPE_STONE;
@@ -1800,7 +1875,6 @@ static void push_block_loader_command(BlockLoaderCommand command) {
       load_block({x,y,z}, false);
   } else {
     assert(command.type == BlockLoaderCommand::UNLOAD_BLOCK);
-    printf("unload\n");
     for (int x = r.a.x; x <= r.b.x; ++x)
     for (int y = r.a.y; y <= r.b.y; ++y)
     for (int z = r.a.z; z <= r.b.z; ++z)
@@ -2496,8 +2570,6 @@ static void gamestate_init() {
   if (!state.block_loader.num_commands)
     sdl_die("Failed to initialize semaphores");
 
-  // update_world_floor();
-
   block_vertices_reset();
   generate_block_mesh();
 
@@ -2712,34 +2784,43 @@ static void update_blocks(v3 before, v3 after) {
   //               might wrap around and probably starts breaking stuff. (probably won't happen as long as
   //               we keep the command buffer as small as it is at the moment)
 
-  #define PUSH_BLOCK_UNLOAD(DIM) \
-    if (rr0.a.DIM != rr1.a.DIM) { \
-      BlockRange r = rr0; \
-      if (rr0.a.DIM < rr1.a.DIM) { \
-        r.b.DIM = rr1.a.DIM-1; \
-        rr0.a.DIM = rr1.a.DIM; \
+  // get blocks that went out of range
+  #define GET_EXITED_BLOCKS(DIM, r0, r1, result) \
+      (result) = (r0); \
+      if ((r0).a.DIM < (r1).a.DIM) { \
+        (result).b.DIM = (r1).a.DIM-1; \
+        (r0).a.DIM = (r1).a.DIM; \
       } else { \
-        r.a.DIM = rr1.b.DIM+1; \
-        rr0.b.DIM = rr1.b.DIM; \
-      } \
-      if (r.a.x <= r.b.x || r.a.y <= r.b.y || r.a.z <= r.b.z) \
+        (result).a.DIM = (r1).b.DIM+1; \
+        (r0).b.DIM = (r1).b.DIM; \
+      }
+
+  // get blocks that went into range
+  #define GET_ENTERED_BLOCKS(DIM, r0, r1, result) \
+    (result) = (r1); \
+    if ((r1).a.DIM < (r0).a.DIM) { \
+      (result).b.DIM = (r0).a.DIM-1; \
+      (r1).a.DIM = (r0).a.DIM; \
+    } else { \
+      (result).a.DIM = (r0).b.DIM+1; \
+      (r1).b.DIM = (r0).b.DIM; \
+    }
+
+  #define RANGE_IS_OK(r) ((r).a.x <= (r).b.x || (r).a.y <= (r).b.y || (r).a.z <= (r).b.z)
+
+  // unload blocks that went out of range
+  #define PUSH_BLOCK_UNLOAD(DIM) \
+    if (r0_tmp.a.DIM != r1_tmp.a.DIM) { \
+      GET_EXITED_BLOCKS(DIM, r0_tmp, r1_tmp, r); \
+      if (RANGE_IS_OK(r)) \
         push_block_loader_command({BlockLoaderCommand::UNLOAD_BLOCK, r}); \
     }
 
   {
-    BlockRange rr0 = r0;
-    BlockRange rr1 = r1;
+    BlockRange r0_tmp = r0;
+    BlockRange r1_tmp = r1;
+    BlockRange r;
 
-    // BlockRange r;
-    // GET_UNLOADED_BLOCKS(x, rr0, rr1, r);
-    // if (RANGE_IS_OK(r))
-    //   push_block_loader_command({BlockLoaderCommand::UNLOAD_BLOCK, r});
-    // GET_UNLOADED_BLOCKS(y, rr0, rr1, r);
-    // if (RANGE_IS_OK(r))
-    //   push_block_loader_command({BlockLoaderCommand::UNLOAD_BLOCK, r});
-    // GET_UNLOADED_BLOCKS(z, rr0, rr1, r);
-    // if (RANGE_IS_OK(r))
-    //   push_block_loader_command({BlockLoaderCommand::UNLOAD_BLOCK, r});
     PUSH_BLOCK_UNLOAD(x);
     PUSH_BLOCK_UNLOAD(y);
     PUSH_BLOCK_UNLOAD(z);
@@ -2747,22 +2828,16 @@ static void update_blocks(v3 before, v3 after) {
 
   // load the new blocks that went into scope
   #define PUSH_BLOCK_LOAD(DIM) \
-    if (rr1.a.DIM != rr0.a.DIM) { \
-      BlockRange r = rr1; \
-      if (rr1.a.DIM < rr0.a.DIM) { \
-        r.b.DIM = rr0.a.DIM-1; \
-        rr1.a.DIM = rr0.a.DIM; \
-      } else { \
-        r.a.DIM = rr0.b.DIM+1; \
-        rr1.b.DIM = rr0.b.DIM; \
-      } \
-      if (r.a.x <= r.b.x || r.a.y <= r.b.y || r.a.z <= r.b.z) \
+    if (r0_tmp.a.DIM != r1_tmp.a.DIM) { \
+      GET_ENTERED_BLOCKS(DIM, r0_tmp, r1_tmp, r); \
+      if (RANGE_IS_OK(r)) \
         push_block_loader_command({BlockLoaderCommand::LOAD_BLOCK, r}); \
     }
 
   {
-    BlockRange rr0 = r0;
-    BlockRange rr1 = r1;
+    BlockRange r0_tmp = r0;
+    BlockRange r1_tmp = r1;
+    BlockRange r;
 
     PUSH_BLOCK_LOAD(x);
     PUSH_BLOCK_LOAD(y);
@@ -2770,26 +2845,30 @@ static void update_blocks(v3 before, v3 after) {
   }
 
   // Reset world xy cache
-  #if 0
+  #if 1
   if (false) {
-    BlockRange rr0 = r0;
-    BlockRange rr1 = r1;
+    BlockRange r0_tmp = r0;
+    BlockRange r1_tmp = r1;
     BlockRange r;
 
     // x
-    GET_UNLOADED_BLOCKS(x, rr0, rr1, r);
-    if (RANGE_IS_OK(r)) {
-      for (int x = r0.a.x; x <= r1.b.x; ++x)
-      for (int y = r0.a.y; x <= r1.b.y; ++y)
-        clear_world_xy_cache(block_to_blockindex({x, y, 0}));
+    if (r0_tmp.a.x != r1_tmp.a.x) {
+      GET_EXITED_BLOCKS(x, r0_tmp, r1_tmp, r);
+      if (RANGE_IS_OK(r)) {
+        for (int x = r0.a.x; x <= r1.b.x; ++x)
+        for (int y = r0.a.y; x <= r1.b.y; ++y)
+          clear_world_xy_cache(block_to_blockindex({x, y, 0}));
+      }
     }
 
     // y
-    GET_UNLOADED_BLOCKS(y, rr0, rr1, r);
-    if (RANGE_IS_OK(r)) {
-      for (int x = r0.a.x; x <= r1.b.x; ++x)
-      for (int y = r0.a.y; x <= r1.b.y; ++y)
-        clear_world_xy_cache(block_to_blockindex({x, y, 0}));
+    if (r0_tmp.a.y != r1_tmp.a.y) {
+      GET_EXITED_BLOCKS(y, r0_tmp, r1_tmp, r);
+      if (RANGE_IS_OK(r)) {
+        for (int x = r0.a.x; x <= r1.b.x; ++x)
+        for (int y = r0.a.y; x <= r1.b.y; ++y)
+          clear_world_xy_cache(block_to_blockindex({x, y, 0}));
+      }
     }
   }
   #endif
@@ -3162,6 +3241,7 @@ static int blockloader_thread(void *data) {
 #endif
 
 mine_main {
+  printf("%lu %lu %lu %lu %lu\n", sizeof(state)/1024/1024, sizeof(state.block_vertex_pos)/1024/1024, sizeof(state.world.block_types)/1024/1024, sizeof(state.block_vertices)/1024/1024, sizeof(state.block_elements)/1024/1024);
   sdl_init();
 
   // get gl3w to fetch opengl function pointers
