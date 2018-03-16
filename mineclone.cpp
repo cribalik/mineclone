@@ -50,6 +50,11 @@
   #define OS_LINUX 1
 #endif
 
+#ifdef OS_WINDOWS
+  // windows.h defines max and min as macros, destroying all our code. remove it with this define :)
+  #define NOMINMAX
+#endif
+
 #include <stdarg.h>
 #include "GL/gl3w.h"
 #include "SDL2/SDL.h"
@@ -79,6 +84,8 @@ static void die(const char *fmt, ...) {
   va_start(args, fmt);
   SDL_LogMessageV(SDL_LOG_CATEGORY_APPLICATION, SDL_LOG_PRIORITY_ERROR, fmt, args);
   va_end(args);
+  fflush(stdout);
+  fflush(stderr);
   abort();
 }
 
@@ -95,6 +102,8 @@ static void sdl_die(const char *fmt, ...) {
   SDL_LogMessageV(SDL_LOG_CATEGORY_APPLICATION, SDL_LOG_PRIORITY_ERROR, fmt, args);
   SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, ": %s\n", SDL_GetError());
   va_end(args);
+  fflush(stdout);
+  fflush(stderr);
   abort();
 }
 
@@ -263,19 +272,19 @@ static v2 normalize(v2 v) {
 }
 
 template <class T>
-void swap(T &a, T &b) {
+static void swap(T &a, T &b) {
   T tmp = a;
   a = b;
   b = tmp;
 }
 
-template <class T>
-T max(T a, T b) {
+template<class T>
+static T max(T a, T b) {
   return a < b ? b : a;
 }
 
 template <class T>
-T min(T a, T b) {
+static T min(T a, T b) {
   return b < a ? b : a;
 }
 
@@ -1186,6 +1195,7 @@ struct GameState {
     int mouse_dx, mouse_dy;
     bool clicked;
     bool clicked_right;
+    int scrolled; // negative when scrolling down, positive when up
   };
 
   // camera stuff
@@ -1914,7 +1924,7 @@ static Vec<Collision> collision(v3 p0, v3 p1, float dt, v3 size, OPTIONAL v3 *p_
 }
 
 
-static int calc_string_width(const char *str) {
+static float calc_string_width(const char *str) {
   float result = 0.0f;
 
   for (; *str; ++str)
@@ -2188,12 +2198,12 @@ static void skybox_gl_buffer_create() {
       lat += x_offset[face]*PI;
       lng += y_offset[face]*PI;
       // now calculate the spherical distance to the sun (at angle (0,0)), see https://en.wikipedia.org/wiki/Great-circle_distance
-      float d = acos(cos(lat) * cos(fabs(lng)));
+      float d = acosf(cosf(lat) * cosf(fabsf(lng)));
       // normalize distance to (0,1), so we can lerp between colors
       float t = 1.0f - d/PI;
-      const u8 r = UINT8_MAX * lerp(pow(t, 2.5), r0, r1);
-      const u8 g = UINT8_MAX * lerp(pow(t, 2.5), g0, g1);
-      const u8 b = UINT8_MAX * lerp(pow(t, 2.5), b0, b1);
+      const u8 r = (u8)(UINT8_MAX * lerp(powf(t, 2.5), r0, r1));
+      const u8 g = (u8)(UINT8_MAX * lerp(powf(t, 2.5), g0, g1));
+      const u8 b = (u8)(UINT8_MAX * lerp(powf(t, 2.5), b0, b1));
 
       const int bi = (y*SKYBOX_TEXTURE_SIZE + x)*3;
       state.skybox_texture_buffer[bi] = r;
@@ -2312,7 +2322,7 @@ static void text_gl_buffer_create() {
   // load font from file and create texture
   state.text_atlas_size.x = 512;
   state.text_atlas_size.y = 512;
-  const char *filename = "UbuntuMono-R.ttf";
+  const char *filename = "font.ttf";
   const int BUFFER_SIZE = 1024*1024;
   const int tex_w = state.text_atlas_size.x;
   const int tex_h = state.text_atlas_size.y;
@@ -2409,6 +2419,7 @@ static float keyframe_value(KeyFrame keyframes[], int num_keyframes, float at) {
     }
   return keyframes[num_keyframes-1].value;
 }
+
 // fills out the input fields in GameState
 static void read_input() {
   // clear earlier events
@@ -2417,26 +2428,32 @@ static void read_input() {
   state.mouse_dx = state.mouse_dy = 0;
   state.clicked = false;
   state.clicked_right = false;
+  state.scrolled = 0;
 
   for (SDL_Event event; SDL_PollEvent(&event);) {
     switch (event.type) {
 
-      case SDL_WINDOWEVENT: {
+      case SDL_WINDOWEVENT:
         if (event.window.event == SDL_WINDOWEVENT_CLOSE)
           exit(0);
-      } break;
+        break;
 
-      case SDL_MOUSEBUTTONDOWN: {
+      case SDL_MOUSEBUTTONDOWN:
         if (event.button.button & SDL_BUTTON(SDL_BUTTON_LEFT))
           state.clicked = true;
         if (event.button.button & SDL_BUTTON(SDL_BUTTON_RIGHT))
           state.clicked_right = true;
         if (event.button.button & SDL_BUTTON(SDL_BUTTON_MIDDLE))
           state.clicked_right = true;
-      } break;
+        break;
+
+      case SDL_MOUSEWHEEL:
+        state.scrolled += event.wheel.y;
+        break;
 
       case SDL_KEYDOWN: {
-        if (event.key.repeat) break;
+        if (event.key.repeat)
+          break;
 
         Key k = keymapping(event.key.keysym.sym);
         if (k != KEY_NULL) {
@@ -2446,17 +2463,18 @@ static void read_input() {
       } break;
 
       case SDL_KEYUP: {
-        if (event.key.repeat) break;
+        if (event.key.repeat)
+          break;
 
         Key k = keymapping(event.key.keysym.sym);
         if (k != KEY_NULL)
           state.keyisdown[k] = false;
       } break;
 
-      case SDL_MOUSEMOTION: {
+      case SDL_MOUSEMOTION:
         state.mouse_dx = event.motion.xrel;
         state.mouse_dy = event.motion.yrel;
-      } break;
+        break;
     }
   }
   if (state.clicked && state.clicked_right)
@@ -2476,7 +2494,7 @@ static void update_player(float dt) {
   const float GRAVITY = 0.015f;
   const float JUMPPOWER = 0.21f;
   v3 v = state.player_vel;
-  static bool flying = true;
+  static bool flying = false;
   if (flying) {
     if (state.keyisdown[KEY_FORWARD]) v += dt*camera_forward(&state.camera, ACCELERATION);
     if (state.keyisdown[KEY_BACKWARD]) v += dt*camera_backward(&state.camera, ACCELERATION);
@@ -2500,13 +2518,13 @@ static void update_player(float dt) {
     }
     v.z += -dt*GRAVITY;
     // proportional drag (air resistance)
-    v.x *= powf(0.8, dt);
-    v.y *= powf(0.8, dt);
+    v.x *= powf(0.8f, dt);
+    v.y *= powf(0.8f, dt);
     // constant drag (friction)
     v3 n = normalize(v);
     v3 drag = -dt*v3{0.001f*n.x, 0.001f*n.y, 0.0f};
-    if (abs(drag.x) > abs(v.x)) drag.x = -v.x;
-    if (abs(drag.y) > abs(v.y)) drag.y = -v.y;
+    if (fabsf(drag.x) > fabsf(v.x)) drag.x = -v.x;
+    if (fabsf(drag.y) > fabsf(v.y)) drag.y = -v.y;
     v += drag;
   }
   state.player_vel = v;
@@ -2625,6 +2643,11 @@ static void update_blocks(v3 before, v3 after) {
   #endif
 }
 
+static void update_weather() {
+  state.sun_angle = PI/5;
+  // state.sun_angle = fmodf(state.sun_angle + 0.004f, 2*PI);
+}
+
 static void debug_prints(int loopindex, float dt) {
   if (loopindex%20 == 0) {
     if (loopindex%100 == 0)
@@ -2655,9 +2678,9 @@ static void update_water_texture(float dt) {
         float f = perlin(offset + x*0.25f, y*0.10f, 0);
         f = clamp(f, 0.0f, 1.0f);
         *p++ = 0;
-        *p++ = UINT8_MAX * (0.5f + 0.5f*f);
-        *p++ = UINT8_MAX * (0.5f + 0.5f*f);
-        *p++ = UINT8_MAX * 0.3f;
+        *p++ = (u8)(UINT8_MAX * (0.5f + 0.5f*f));
+        *p++ = (u8)(UINT8_MAX * (0.5f + 0.5f*f));
+        *p++ = (u8)(UINT8_MAX * 0.3f);
       }
       p += 4*w*(NUM_BLOCK_SIDES-1);
     }
@@ -2672,6 +2695,7 @@ static void update_inventory() {
     ++state.selected_item;
   if (state.keypressed[KEY_FLYDOWN])
     --state.selected_item;
+  state.selected_item -= state.scrolled;
   state.selected_item = clamp(state.selected_item, 0, (int)ARRAY_LEN(state.inventory)-1);
 }
 
@@ -3029,7 +3053,7 @@ mine_main {
     // debug prints
     debug_prints(loopindex, dt);
 
-    state.sun_angle = fmodf(state.sun_angle + 0.004f, 2*PI);
+    update_weather();
 
     // @render
     glClearColor(0.0f, 0.8f, 0.6f, 1.0f);
