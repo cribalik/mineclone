@@ -1193,8 +1193,8 @@ struct GameState {
     bool keyisdown[KEY_MAX];
     bool keypressed[KEY_MAX];
     int mouse_dx, mouse_dy;
-    bool clicked;
-    bool clicked_right;
+    bool mouse_clicked;
+    bool mouse_clicked_right;
     int scrolled; // negative when scrolling down, positive when up
   };
 
@@ -1785,6 +1785,9 @@ struct Vec {
   typedef T* Iterator;
   int size;
   T *items;
+
+  T& operator[](int i) {return items[i];}
+  const T& operator[](int i) const {return items[i];}
 };
 
 template<class T>
@@ -1857,6 +1860,9 @@ static Vec<Collision> collision(v3 p0, v3 p1, float dt, v3 size, OPTIONAL v3 *p_
       const v3 w0 = block - (size/2.0f);
       const v3 w1 = block + v3{1.0f, 1.0f, 1.0f} + (size/2.0f);
 
+      // TODO: we can optimize this a lot for blocks since we know the walls of blocks are always
+      //       aligned with x,y,z. If the day comes we might need two versions, a generic collision
+      //       routine and a block collision routine
       collision_plane(p0, p1, {w0.x, w0.y, w0.z}, {w0.x, w0.y, w1.z}, {w0.x, w1.y, w0.z}, &t, &n);
       collision_plane(p0, p1, {w1.x, w0.y, w0.z}, {w1.x, w1.y, w0.z}, {w1.x, w0.y, w1.z}, &t, &n);
       collision_plane(p0, p1, {w0.x, w0.y, w0.z}, {w1.x, w0.y, w0.z}, {w0.x, w0.y, w1.z}, &t, &n);
@@ -2426,8 +2432,8 @@ static void read_input() {
   for (int i = 0; i < (int)ARRAY_LEN(state.keypressed); ++i)
     state.keypressed[i] = false;
   state.mouse_dx = state.mouse_dy = 0;
-  state.clicked = false;
-  state.clicked_right = false;
+  state.mouse_clicked = false;
+  state.mouse_clicked_right = false;
   state.scrolled = 0;
 
   for (SDL_Event event; SDL_PollEvent(&event);) {
@@ -2440,11 +2446,11 @@ static void read_input() {
 
       case SDL_MOUSEBUTTONDOWN:
         if (event.button.button & SDL_BUTTON(SDL_BUTTON_LEFT))
-          state.clicked = true;
+          state.mouse_clicked = true;
         if (event.button.button & SDL_BUTTON(SDL_BUTTON_RIGHT))
-          state.clicked_right = true;
+          state.mouse_clicked_right = true;
         if (event.button.button & SDL_BUTTON(SDL_BUTTON_MIDDLE))
-          state.clicked_right = true;
+          state.mouse_clicked_right = true;
         break;
 
       case SDL_MOUSEWHEEL:
@@ -2477,19 +2483,21 @@ static void read_input() {
         break;
     }
   }
-  if (state.clicked && state.clicked_right)
-    state.clicked = false;
+
+  // had some problems on touchpad on linux where a rightclick also triggered a left click, this fixed it
+  if (state.mouse_clicked && state.mouse_clicked_right)
+    state.mouse_clicked = false;
 }
 
 static void update_player(float dt) {
 
-  // turn
+  // turn player depending on mouse movement
   const float turn_sensitivity =  dt*0.003f;
   const float pitch_sensitivity = dt*0.003f;
   if (state.mouse_dx) camera_turn(&state.camera, state.mouse_dx * turn_sensitivity * dt);
   if (state.mouse_dy) camera_pitch(&state.camera, -state.mouse_dy * pitch_sensitivity * dt);
 
-  // move player
+  // move player, accountng for drag and stuff, or if the player is flying
   const float ACCELERATION = 0.03f;
   const float GRAVITY = 0.015f;
   const float JUMPPOWER = 0.21f;
@@ -2520,7 +2528,7 @@ static void update_player(float dt) {
     // proportional drag (air resistance)
     v.x *= powf(0.8f, dt);
     v.y *= powf(0.8f, dt);
-    // constant drag (friction)
+    // constant drag (friction against ground kinda)
     v3 n = normalize(v);
     v3 drag = -dt*v3{0.001f*n.x, 0.001f*n.y, 0.0f};
     if (fabsf(drag.x) > fabsf(v.x)) drag.x = -v.x;
@@ -2528,6 +2536,7 @@ static void update_player(float dt) {
     v += drag;
   }
   state.player_vel = v;
+
   // collision
   Vec<Collision> hits = collision(state.player_pos, state.player_pos + state.player_vel*dt, dt, {0.8f, 0.8f, 1.5f}, &state.player_pos, &state.player_vel, true);
   state.player_on_ground = false;
@@ -2538,10 +2547,9 @@ static void update_player(float dt) {
       break;
     }
   }
-  // state.player_pos += state.player_vel * dt;
 
-  // clicked - remove block
-  if (state.clicked) {
+  // mouse clicked - remove block
+  if (state.mouse_clicked) {
     // find the block
     const float RAY_DISTANCE = 5.0f;
     v3 ray = camera_forward_fly(&state.camera, RAY_DISTANCE);
@@ -2550,14 +2558,15 @@ static void update_player(float dt) {
     Vec<Collision> hits = collision(p0, p1, dt, {0.01f, 0.01f, 0.01f}, 0, 0, false);
     if (hits.size) {
       debug(if (hits.size != 1) die("Multiple collisions when not gliding? Somethings wrong"));
-      if (add_block_to_inventory(get_blocktype(hits.items[0].block))) {
-        remove_block(hits.items[0].block);
+      if (add_block_to_inventory(get_blocktype(hits[0].block))) {
+        remove_block(hits[0].block);
       }
       puts("hit!");
     }
   }
-  // right clicked - add block
-  if (state.clicked_right) {
+
+  // right mouse clicked - add block
+  if (state.mouse_clicked_right) {
     // find the block
     Block b;
     Direction d;
