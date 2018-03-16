@@ -2,8 +2,9 @@
 //
 // * optimize loading blocks & persist block changes to disk:
 //   - data streaming in opengl for blocks, or divide world into multiple buffer objects?
-//   - load new blocks in separate thread
 //   - good datastructure for storing block changes
+//
+// * FIX: we can probably have some strange behavior if the block loader lags behind too much
 //
 // * give the shadowmap higher precision closer to the player (like a fishbowl kind of thing)
 //
@@ -12,6 +13,8 @@
 // * movement through water
 //
 // * ambient occlusion
+//
+// * antialiasing
 //
 // * more ui (menus, buttons, etc..)
 //
@@ -38,9 +41,9 @@
 //     vertex size down. but that would mean we need to update all vertices each time the player moves
 //     is there a way to keep vertex sizes down by modding them somehow?
 //
-// * torches - voxel lighting vs screen space lighting?
+// * torches - calculate lighting per block (voxel lighting)
 //
-// * reflect and refract lighting from skybox?
+// * reflect and refract lighting from skybox? or if skybox is not interesting enough, maybe we can do something cool using the surrounding blocks?
 //   
 ////
 
@@ -80,15 +83,18 @@ typedef uint64_t u64;
 #define OPTIONAL
 
 // @logging
-static void die(const char *fmt, ...) {
+static void _die(const char *file, int line, const char *fmt, ...) {
+  printf("%s:%i: ", file, line);
+
   va_list args;
   va_start(args, fmt);
-  SDL_LogMessageV(SDL_LOG_CATEGORY_APPLICATION, SDL_LOG_PRIORITY_ERROR, fmt, args);
+  vprintf(fmt, args);
   va_end(args);
+
   fflush(stdout);
-  fflush(stderr);
   abort();
 }
+#define die(fmt, ...) _die(__FILE__, __LINE__, fmt, ##__VA_ARGS__)
 
 #define DEBUG 1
 #ifdef DEBUG
@@ -97,16 +103,18 @@ static void die(const char *fmt, ...) {
   #define debug(stmt) 0
 #endif
 
-static void sdl_die(const char *fmt, ...) {
+static void _sdl_die(const char *file, int line, const char *fmt, ...) {
+  printf("%s:%i: ", file, line);
+
   va_list args;
   va_start(args, fmt);
-  SDL_LogMessageV(SDL_LOG_CATEGORY_APPLICATION, SDL_LOG_PRIORITY_ERROR, fmt, args);
-  SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, ": %s\n", SDL_GetError());
+  vprintf(fmt, args);
   va_end(args);
+  printf(": %s\n", SDL_GetError());
   fflush(stdout);
-  fflush(stderr);
   abort();
 }
+#define sdl_die(fmt, ...) _sdl_die(__FILE__, __LINE__, fmt, ## __VA_ARGS__)
 
 #define sdl_try(stmt) ((stmt) && (die("%s\n", SDL_GetError()),0))
 
@@ -1086,7 +1094,17 @@ static T* next(ColonyIter<T,N> &iter) {
 #define For(container) decltype(container)::Iterator it; for(auto _iterator = iter(container); (it = next(_iterator));)
 #endif
 
-static const int NUM_BLOCKS_x = 128, NUM_BLOCKS_y = 128, NUM_BLOCKS_z = 64;
+// how many blocks we keep in caches and stuff.
+// The reason these are less than NUM_VISIBLE_BLOCKS is to give room for the lazy block loader
+// to take its time :)
+static const int
+  NUM_VISIBLE_BLOCKS_x = 16,
+  NUM_VISIBLE_BLOCKS_y = 16,
+  NUM_VISIBLE_BLOCKS_z = 64;
+static const int
+  NUM_BLOCKS_x = (NUM_VISIBLE_BLOCKS_x*2),
+  NUM_BLOCKS_y = (NUM_VISIBLE_BLOCKS_y*2),
+  NUM_BLOCKS_z = (NUM_VISIBLE_BLOCKS_z*2);
 
 struct BlockDiff {
   Block block;
@@ -1164,6 +1182,11 @@ struct BlockLoaderCommand {
   BlockRange range;
 };
 
+// cache for world generation stuff that is the same over all Z
+struct WorldXYCache {
+  int groundlevel;
+  int stonelevel;
+};
 struct GameState {
   // window stuff
   struct {
@@ -1316,8 +1339,11 @@ struct GameState {
   struct {
     // cache of block types
     u8 block_types[NUM_BLOCKS_x][NUM_BLOCKS_y][NUM_BLOCKS_z];
+    // cache of the ground height (so we don't have to call perlin to calculate it all the time)
+    // 0 means it is unset
+    WorldXYCache xy_cache[NUM_BLOCKS_x][NUM_BLOCKS_y];
     // Array<BlockDiff> block_changes; // TODO: see push_blockdiff :)
-  };
+  } world;
 
   // player data
   struct {
@@ -1365,20 +1391,20 @@ static Block pos_to_block(v3 p) {
   return {(int)floorf(p.x), (int)floorf(p.y), (int)floorf(p.z)};
 }
 
-#define FOR_BLOCKS_IN_RANGE_x for (int x = (int)floorf(state.player_pos.x) - NUM_BLOCKS_x/2, x_end = (int)floorf(state.player_pos.x) + NUM_BLOCKS_x/2; x < x_end; ++x)
-#define FOR_BLOCKS_IN_RANGE_y for (int y = (int)floorf(state.player_pos.y) - NUM_BLOCKS_y/2, y_end = (int)floorf(state.player_pos.y) + NUM_BLOCKS_y/2; y < y_end; ++y)
-#define FOR_BLOCKS_IN_RANGE_z for (int z = (int)floorf(state.player_pos.z) - NUM_BLOCKS_z/2, z_end = (int)floorf(state.player_pos.z) + NUM_BLOCKS_z/2; z < z_end; ++z)
+#define FOR_BLOCKS_IN_RANGE_x for (int x = (int)floorf(state.player_pos.x) - NUM_VISIBLE_BLOCKS_x/2, x_end = (int)floorf(state.player_pos.x) + NUM_VISIBLE_BLOCKS_x/2; x < x_end; ++x)
+#define FOR_BLOCKS_IN_RANGE_y for (int y = (int)floorf(state.player_pos.y) - NUM_VISIBLE_BLOCKS_y/2, y_end = (int)floorf(state.player_pos.y) + NUM_VISIBLE_BLOCKS_y/2; y < y_end; ++y)
+#define FOR_BLOCKS_IN_RANGE_z for (int z = (int)floorf(state.player_pos.z) - NUM_VISIBLE_BLOCKS_z/2, z_end = (int)floorf(state.player_pos.z) + NUM_VISIBLE_BLOCKS_z/2; z < z_end; ++z)
 
 static Block range_get_bottom(Block b) {
-  return {b.x - NUM_BLOCKS_x/2, b.y - NUM_BLOCKS_y/2, b.z - NUM_BLOCKS_z/2, };
+  return {b.x - NUM_VISIBLE_BLOCKS_x/2, b.y - NUM_VISIBLE_BLOCKS_y/2, b.z - NUM_VISIBLE_BLOCKS_z/2, };
 }
 
 // returned range is inclusive
 static BlockRange pos_to_range(v3 p) {
   Block b = pos_to_block(p);
   return {
-    {b.x - NUM_BLOCKS_x/2, b.y - NUM_BLOCKS_y/2, b.z - NUM_BLOCKS_z/2, },
-    {b.x + NUM_BLOCKS_x/2 - 1, b.y + NUM_BLOCKS_y/2 - 1, b.z + NUM_BLOCKS_z/2 - 1}
+    {b.x - NUM_VISIBLE_BLOCKS_x/2, b.y - NUM_VISIBLE_BLOCKS_y/2, b.z - NUM_VISIBLE_BLOCKS_z/2, },
+    {b.x + NUM_VISIBLE_BLOCKS_x/2 - 1, b.y + NUM_VISIBLE_BLOCKS_y/2 - 1, b.z + NUM_VISIBLE_BLOCKS_z/2 - 1}
   };
 }
 
@@ -1389,15 +1415,25 @@ static BlockIndex block_to_blockindex(Block b) {
 STATIC_ASSERT(BLOCKTYPES_MAX <= 255, blocktypes_fit_in_u8);
 
 static void set_blocktype_cache(BlockIndex b, BlockType t) {
-  state.block_types[b.x][b.y][b.z] = (u8)t;
+  state.world.block_types[b.x][b.y][b.z] = (u8)t;
 }
 
 static void set_blocktype_cache(Block b, BlockType t) {
   set_blocktype_cache(block_to_blockindex(b), t);
 }
 
+static bool get_world_xy_cache(BlockIndex b, int *groundlevel, int *stonelevel) {
+  *groundlevel = state.world.xy_cache[b.x][b.y].groundlevel;
+  *stonelevel = state.world.xy_cache[b.x][b.y].stonelevel;
+  return *groundlevel; // groundlevel 0 means cache is not filled
+}
+
+static void clear_world_xy_cache(BlockIndex b) {
+  state.world.xy_cache[b.x][b.y].groundlevel = 0;
+}
+
 static BlockType get_blocktype_cache(BlockIndex b) {
-  return (BlockType)state.block_types[b.x][b.y][b.z];
+  return (BlockType)state.world.block_types[b.x][b.y][b.z];
 }
 
 static BlockType get_blocktype_cache(Block b) {
@@ -1553,21 +1589,32 @@ static void block_vertices_reset() {
 static bool is_block_in_range(Block b) {
   Block p = pos_to_block(state.player_pos);
   return
-    b.x - p.x <   NUM_BLOCKS_x/2 &&
-    b.x - p.x >= -NUM_BLOCKS_x/2 &&
-    b.y - p.y <   NUM_BLOCKS_y/2 &&
-    b.y - p.y >= -NUM_BLOCKS_y/2 &&
-    b.z - p.z <   NUM_BLOCKS_z/2 &&
-    b.z - p.z >= -NUM_BLOCKS_z/2;
+    b.x - p.x <   NUM_VISIBLE_BLOCKS_x/2 &&
+    b.x - p.x >= -NUM_VISIBLE_BLOCKS_x/2 &&
+    b.y - p.y <   NUM_VISIBLE_BLOCKS_y/2 &&
+    b.y - p.y >= -NUM_VISIBLE_BLOCKS_y/2 &&
+    b.z - p.z <   NUM_VISIBLE_BLOCKS_z/2 &&
+    b.z - p.z >= -NUM_VISIBLE_BLOCKS_z/2;
 }
 
 static BlockType generate_blocktype(Block b) {
-  static const float ground_freq = 0.05f;
-  const float crazy_hills = max(powf(perlin(b.x*ground_freq*1.0f, b.y*ground_freq*1.0f, 0) * 2.0f, 6), 0.0f);
-  const float groundlevel = perlin(b.x*ground_freq*0.7f, b.y*ground_freq*0.7f, 0) * 30.0f + crazy_hills; //50.0f;
-  static const float stone_freq = 0.13f;
-  const float stonelevel = 10.0f + perlin(b.x*stone_freq, b.y*stone_freq, 0) * 5.0f; // 20.0f;
+  const BlockIndex bi = block_to_blockindex(b);
+
+  // to not having to recalculate stuff like ground level and water level for every block in Z,
+  // we keep a cache of it :)
+  float groundlevel;
+  float stonelevel;
   const int waterlevel = 13;
+
+  // get_world_xy_cache(bi, &groundlevel, &stonelevel);
+  // success = false;
+  // if (!success) {
+    static const float stone_freq = 0.13f;
+    static const float ground_freq = 0.05f;
+    float crazy_hills = max(powf(perlin(b.x*ground_freq*1.0f, b.y*ground_freq*1.0f, 0) * 2.0f, 6), 0.0f);
+    groundlevel = roundf(perlin(b.x*ground_freq*0.7f, b.y*ground_freq*0.7f, 0) * 30.0f + crazy_hills); //50.0f;
+    stonelevel = roundf(10.0f + perlin(b.x*stone_freq, b.y*stone_freq, 0) * 5.0f); // 20.0f;
+  // }
 
   if (b.z < groundlevel && b.z < stonelevel)
     return BLOCKTYPE_STONE;
@@ -1673,26 +1720,20 @@ static void remove_blockface(Block b, BlockType type, Direction d) {
   else state.block_vertices_dirty = true;
 }
 
-static void remove_blockface(Block b, Direction d) {
-  remove_blockface(b, get_blocktype(b), d);
-}
-
 static void unload_block(Block b, bool create_new_faces = true) {
   BlockType t = get_blocktype(b);
+
+  // clear caches
   set_blocktype_cache(b, BLOCKTYPE_NULL);
 
   // remove the visible faces of this block
-  if (is_block_in_range(b)) {
-    for (int d = 0; d < DIRECTION_MAX; ++d)
-      remove_blockface(b, t, (Direction)d);
-  }
+  for (int d = 0; d < DIRECTION_MAX; ++d)
+    remove_blockface(b, t, (Direction)d);
 
   // and add the newly visible faces of the adjacent blocks
   if (create_new_faces && (blocktype_is_transparent(t) == false || t == BLOCKTYPE_WATER)) {
     for (int d = 0; d < DIRECTION_MAX; ++d) {
       Block adj = get_adjacent_block(b, (Direction)d);
-      if (!is_block_in_range(adj))
-        continue;
 
       BlockType tt = get_blocktype(adj);
       if (tt == BLOCKTYPE_AIR)
@@ -1751,41 +1792,47 @@ static void remove_block(Block b) {
 }
 
 static void push_block_loader_command(BlockLoaderCommand command) {
-  #if 1
-  if (command.type == BlockLoaderCommand::UNLOAD_BLOCK) {
-    for (int x = command.range.a.x; x <= command.range.b.x; ++x)
-    for (int y = command.range.a.y; y <= command.range.b.y; ++y)
-    for (int z = command.range.a.z; z <= command.range.b.z; ++z)
-      unload_block({x,y,z}, false);
-  } else {
-    assert(command.type == BlockLoaderCommand::LOAD_BLOCK);
-    for (int x = command.range.a.x; x <= command.range.b.x; ++x)
-    for (int y = command.range.a.y; y <= command.range.b.y; ++y)
-    for (int z = command.range.a.z; z <= command.range.b.z; ++z)
+  #if 0
+  BlockRange r = command.range;
+  if (command.type == BlockLoaderCommand::LOAD_BLOCK) {
+    for (int x = r.a.x; x <= r.b.x; ++x)
+    for (int y = r.a.y; y <= r.b.y; ++y)
+    for (int z = r.a.z; z <= r.b.z; ++z)
       load_block({x,y,z}, false);
+  } else {
+    assert(command.type == BlockLoaderCommand::UNLOAD_BLOCK);
+    printf("unload\n");
+    for (int x = r.a.x; x <= r.b.x; ++x)
+    for (int y = r.a.y; y <= r.b.y; ++y)
+    for (int z = r.a.z; z <= r.b.z; ++z)
+      unload_block({x,y,z}, false);
   }
+
   #else
-  SDL_SemWait(state.block_loader.num_commands_free);
+  if (SDL_SemWait(state.block_loader.num_commands_free))
+    sdl_die("Semaphore failure");
 
-  int tail = state.block_loader.commands_tail;
-  state.block_loader.commands[tail] = command;
-  state.block_loader.commands_tail = (tail + 1) & (MAX_BLOCK_LOADER_COMMANDS-1);
+  int head = state.block_loader.commands_head;
+  state.block_loader.commands[head] = command;
+  state.block_loader.commands_head = (head + 1) & (MAX_BLOCK_LOADER_COMMANDS-1);
 
-  SDL_SemPost(state.block_loader.num_commands);
+  if (SDL_SemPost(state.block_loader.num_commands))
+    sdl_die("Semaphore failure");
   #endif
 }
 
 static BlockLoaderCommand pop_block_loader_command() {
-  SDL_SemWait(state.block_loader.num_commands);
+  if (SDL_SemWait(state.block_loader.num_commands))
+    sdl_die("Semaphore failure");
 
-  int head = state.block_loader.commands_head;
-  BlockLoaderCommand command = state.block_loader.commands[head];
-  state.block_loader.commands_head = (head + 1) & (MAX_BLOCK_LOADER_COMMANDS-1);
+  int tail = state.block_loader.commands_tail;
+  BlockLoaderCommand command = state.block_loader.commands[tail];
+  state.block_loader.commands_tail = (tail + 1) & (MAX_BLOCK_LOADER_COMMANDS-1);
 
-  SDL_SemPost(state.block_loader.num_commands_free);
+  if (SDL_SemPost(state.block_loader.num_commands_free))
+    sdl_die("Semaphore failure");
   return command;
 }
-
 
 static void add_block(Block b, BlockType t) {
   push_blockdiff(b, t);
@@ -1857,13 +1904,14 @@ static T* next(VecIter<T> &i) {
 static void generate_block_mesh() {
   block_vertices_reset();
 
-  // fill blocktype cache
-  // FOR_BLOCKS_IN_RANGE_x
-  // FOR_BLOCKS_IN_RANGE_y
-  // FOR_BLOCKS_IN_RANGE_z {
-  //   Block b = {x,y,z};
-  //   set_blocktype_cache(b, calc_blocktype(b));
-  // }
+  #if 0
+  FOR_BLOCKS_IN_RANGE_x
+  FOR_BLOCKS_IN_RANGE_y
+  FOR_BLOCKS_IN_RANGE_z {
+    Block b = {x,y,z};
+    set_blocktype_cache(b, calc_blocktype(b));
+  }
+  #endif
 
   // render block faces that face transparent blocks
   FOR_BLOCKS_IN_RANGE_x
@@ -2444,14 +2492,15 @@ static void gamestate_init() {
 
   state.block_loader.num_commands_free = SDL_CreateSemaphore(MAX_BLOCK_LOADER_COMMANDS);
   if (!state.block_loader.num_commands_free)
-    die("Failed to intialize semaphores: %s", SDL_GetError());
+    sdl_die("Failed to intialize semaphores");
+  state.block_loader.num_commands = SDL_CreateSemaphore(0);
+  if (!state.block_loader.num_commands)
+    sdl_die("Failed to initialize semaphores");
 
   // update_world_floor();
 
-  puts("generating block mesh...");
   block_vertices_reset();
   generate_block_mesh();
-  puts("done");
 
   // fill inventory with a bunch of blocks
   for (int i = 0; i < min(BLOCKTYPES_MAX - 1 - BLOCKTYPE_AIR, (int)ARRAY_LEN(state.inventory)); ++i) {
@@ -2555,7 +2604,7 @@ static void update_player(float dt) {
   const float GRAVITY = 0.015f;
   const float JUMPPOWER = 0.21f;
   v3 v = state.player_vel;
-  static bool flying = false;
+  static bool flying = true;
   if (flying) {
     if (state.keyisdown[KEY_FORWARD]) v += dt*camera_forward(&state.camera, ACCELERATION);
     if (state.keyisdown[KEY_BACKWARD]) v += dt*camera_backward(&state.camera, ACCELERATION);
@@ -2650,63 +2699,102 @@ static void update_player(float dt) {
 }
 
 static void update_blocks(v3 before, v3 after) {
-  state.player_pos = before;
+  const BlockRange r0 = pos_to_range(before);
+  const BlockRange r1 = pos_to_range(after);
 
-  // TODO: hide first, then show
-  BlockRange r0 = pos_to_range(before);
-  BlockRange r1 = pos_to_range(after);
-  int x0 = min(r0.a.x, r1.a.x);
-  int y0 = min(r0.a.y, r1.a.y);
-  int z0 = min(r0.a.z, r1.a.z);
-  int x1 = max(r0.b.x, r1.b.x);
-  int y1 = max(r0.b.y, r1.b.y);
-  int z1 = max(r0.b.z, r1.b.z);
-
-  if (r0.a.x == r1.a.x && r0.a.y == r1.a.y && r0.a.z == r1.a.z) {
-    state.player_pos = after;
+  if (r0.a.x == r1.a.x && r0.a.y == r1.a.y && r0.a.z == r1.a.z)
     return;
-  }
 
   state.block_vertices_dirty = true;
 
   // unload blocks that went out of scope
   // TODO:, FIXME: if we jumped farther than NUM_BLOCKS_x this probably breaks
+  // TODO:, FIXME: if the block loader is too far behind, the caches (like blocktype cache)
+  //               might wrap around and probably starts breaking stuff. (probably won't happen as long as
+  //               we keep the command buffer as small as it is at the moment)
+
   #define PUSH_BLOCK_UNLOAD(DIM) \
-    { \
-      BlockRange r = r0; \
-      if (r0.a.DIM < r1.a.DIM) { \
-        r.b.DIM = r1.a.DIM-1; \
-        r0.a.DIM = r1.a.DIM; \
+    if (rr0.a.DIM != rr1.a.DIM) { \
+      BlockRange r = rr0; \
+      if (rr0.a.DIM < rr1.a.DIM) { \
+        r.b.DIM = rr1.a.DIM-1; \
+        rr0.a.DIM = rr1.a.DIM; \
       } else { \
-        r.a.DIM = r1.b.DIM+1; \
-        r0.b.DIM = r1.b.DIM; \
+        r.a.DIM = rr1.b.DIM+1; \
+        rr0.b.DIM = rr1.b.DIM; \
       } \
-      push_block_loader_command({BlockLoaderCommand::UNLOAD_BLOCK, r}); \
+      if (r.a.x <= r.b.x || r.a.y <= r.b.y || r.a.z <= r.b.z) \
+        push_block_loader_command({BlockLoaderCommand::UNLOAD_BLOCK, r}); \
     }
 
-  PUSH_BLOCK_UNLOAD(x);
-  PUSH_BLOCK_UNLOAD(y);
-  PUSH_BLOCK_UNLOAD(z);
+  {
+    BlockRange rr0 = r0;
+    BlockRange rr1 = r1;
+    printf("(%i %i %i) -> (%i %i %i)\n", rr0.a.x, rr0.a.y, rr0.a.z, rr1.a.x, rr1.a.y, rr1.a.z);
 
-  state.player_pos = after;
+    // BlockRange r;
+    // GET_UNLOADED_BLOCKS(x, rr0, rr1, r);
+    // if (RANGE_IS_OK(r))
+    //   push_block_loader_command({BlockLoaderCommand::UNLOAD_BLOCK, r});
+    // GET_UNLOADED_BLOCKS(y, rr0, rr1, r);
+    // if (RANGE_IS_OK(r))
+    //   push_block_loader_command({BlockLoaderCommand::UNLOAD_BLOCK, r});
+    // GET_UNLOADED_BLOCKS(z, rr0, rr1, r);
+    // if (RANGE_IS_OK(r))
+    //   push_block_loader_command({BlockLoaderCommand::UNLOAD_BLOCK, r});
+    PUSH_BLOCK_UNLOAD(x);
+    PUSH_BLOCK_UNLOAD(y);
+    PUSH_BLOCK_UNLOAD(z);
+  }
 
   // load the new blocks that went into scope
   #define PUSH_BLOCK_LOAD(DIM) \
-    { \
-      BlockRange r = r1; \
-      if (r1.a.DIM < r0.a.DIM) { \
-        r.b.DIM = r0.a.DIM-1; \
-        r1.a.DIM = r0.a.DIM; \
+    if (rr1.a.DIM != rr0.a.DIM) { \
+      BlockRange r = rr1; \
+      if (rr1.a.DIM < rr0.a.DIM) { \
+        r.b.DIM = rr0.a.DIM-1; \
+        rr1.a.DIM = rr0.a.DIM; \
       } else { \
-        r.a.DIM = r0.b.DIM+1; \
-        r1.b.DIM = r0.b.DIM; \
+        r.a.DIM = rr0.b.DIM+1; \
+        rr1.b.DIM = rr0.b.DIM; \
       } \
-      push_block_loader_command({BlockLoaderCommand::LOAD_BLOCK, r}); \
+      if (r.a.x <= r.b.x || r.a.y <= r.b.y || r.a.z <= r.b.z) \
+        push_block_loader_command({BlockLoaderCommand::LOAD_BLOCK, r}); \
     }
 
-  PUSH_BLOCK_LOAD(x);
-  PUSH_BLOCK_LOAD(y);
-  PUSH_BLOCK_LOAD(z);
+  {
+    BlockRange rr0 = r0;
+    BlockRange rr1 = r1;
+
+    PUSH_BLOCK_LOAD(x);
+    PUSH_BLOCK_LOAD(y);
+    PUSH_BLOCK_LOAD(z);
+  }
+
+  // Reset world xy cache
+  #if 0
+  if (false) {
+    BlockRange rr0 = r0;
+    BlockRange rr1 = r1;
+    BlockRange r;
+
+    // x
+    GET_UNLOADED_BLOCKS(x, rr0, rr1, r);
+    if (RANGE_IS_OK(r)) {
+      for (int x = r0.a.x; x <= r1.b.x; ++x)
+      for (int y = r0.a.y; x <= r1.b.y; ++y)
+        clear_world_xy_cache(block_to_blockindex({x, y, 0}));
+    }
+
+    // y
+    GET_UNLOADED_BLOCKS(y, rr0, rr1, r);
+    if (RANGE_IS_OK(r)) {
+      for (int x = r0.a.x; x <= r1.b.x; ++x)
+      for (int y = r0.a.y; x <= r1.b.y; ++y)
+        clear_world_xy_cache(block_to_blockindex({x, y, 0}));
+    }
+  }
+  #endif
 }
 
 static void update_weather() {
@@ -3048,6 +3136,24 @@ static void render_text() {
   glBindVertexArray(0);
 }
 
+static int blockloader_thread(void *data) {
+  for (;;) {
+    BlockLoaderCommand command = pop_block_loader_command();
+    if (command.type == BlockLoaderCommand::UNLOAD_BLOCK) {
+      for (int x = command.range.a.x; x <= command.range.b.x; ++x)
+      for (int y = command.range.a.y; y <= command.range.b.y; ++y)
+      for (int z = command.range.a.z; z <= command.range.b.z; ++z)
+        unload_block({x,y,z}, false);
+    } else {
+      assert(command.type == BlockLoaderCommand::LOAD_BLOCK);
+      for (int x = command.range.a.x; x <= command.range.b.x; ++x)
+      for (int y = command.range.a.y; y <= command.range.b.y; ++y)
+      for (int z = command.range.a.z; z <= command.range.b.z; ++z)
+        load_block({x,y,z}, false);
+    }
+  }
+}
+
 // on windows, you can't just use main for some reason.
 // instead, you need to use WinMain, or wmain, or wWinMain. pick your poison ;)
 #ifdef OS_WINDOWS
@@ -3080,6 +3186,9 @@ mine_main {
 
   // initialize game state
   gamestate_init();
+
+  // create the thread in charge of loading blocks
+  SDL_CreateThread(blockloader_thread, "block loader", 0);
 
   // @mainloop
   int time = SDL_GetTicks()-16;
