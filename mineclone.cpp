@@ -2607,8 +2607,8 @@ static void update_blocks(v3 before, v3 after) {
 
   state.block_vertices_dirty = true;
 
-  // hide blocks that went out of scope
-  // TODO:, FIXME: if we jump farther than NUM_BLOCKS_x this probably breaks
+  // unload blocks that went out of scope
+  // TODO:, FIXME: if we jumped farther than NUM_BLOCKS_x this probably breaks
   #if 1
   #define HIDEBLOCK(A, B, C) \
     for (int A = r0.a.A; A < r1.a.A; ++A) \
@@ -2627,6 +2627,7 @@ static void update_blocks(v3 before, v3 after) {
 
   state.player_pos = after;
 
+  // load the new blocks that went into scope
   #if 1
   #define SHOWBLOCK(A, B, C) \
     for (int A = r0.b.A+1; A <= r1.b.A; ++A) \
@@ -2637,6 +2638,7 @@ static void update_blocks(v3 before, v3 after) {
     FOR_BLOCKS_IN_RANGE_##B \
     FOR_BLOCKS_IN_RANGE_##C \
         load_block({x, y, z}, false);
+
   SHOWBLOCK(x,y,z);
   SHOWBLOCK(y,x,z);
   SHOWBLOCK(z,x,y);
