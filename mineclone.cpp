@@ -1,15 +1,16 @@
 // TODO:
 //
 // * optimize loading blocks & persist block changes to disk:
-//   - hashmap for block face lookup
 //   - data streaming in opengl for blocks, or divide world into multiple buffer objects?
 //   - good datastructure for storing block changes
+//
+// * fix perlin noise at negative coordinates
 //
 // * FIX: we can probably have some strange behavior if the block loader lags behind too much
 //
 // * give the shadowmap higher precision closer to the player (like a fishbowl kind of thing)
 //
-// * don't limit number of vertices to a fixed amount
+// * don't limit number of vertices to a fixed amount. The same thing with vertex position lookup
 //
 // * movement through water
 //
@@ -1103,68 +1104,82 @@ static T* next(ColonyIter<T,N> &iter) {
 // quadratically probed hashmap optimized for PODs and small values
 template<class Key, class Value, int N>
 struct HashMap {
+  STATIC_ASSERT((N & (N-1)) == 0, N_must_be_power_of_2);
+
   struct Slot {
     Key key;
     Value value;
   };
 
-  Key null;
+  Key nullkey;
   Key tombstone;
   Slot slots[N];
 
-  HashMap(Key null, Key tomstone): slots((Slot*)malloc(N*sizeof(*slots))) {
-    if (!is_power_of_2(N))
-      die("hashmap size must be power of 2");
-  }
-  ~HashMap() {
-    free(slots);
+  void init(Key nullkey, Key tombstone) {
+    this->nullkey = nullkey;
+    this->tombstone = tombstone;
   }
 
   // return value may be null
-  Value* get(Key key) {
-    int offset = 1;
-    int i = hash(key) & (N-1);
-    while (offset < N) {
+  Value* get(Key key, size_t hash) {
+    int jump = 1;
+    int i = hash & (N-1);
+    while (jump < N) {
       if (slots[i].key == key)
         return &slots[i].value;
-      if (slots[i].key == null)
+
+      if (slots[i].key == nullkey)
         return 0;
-      i += offset;
-      offset *= 2;
+
+      i = (i+jump) & (N-1);
+      jump *= 2;
     }
+    debug(die("HashMap full"));
     return 0;
   }
 
-  void set(Key key, Value value) {
-    int offset = 1;
-    int i = hash(key) & (N-1);
-    while (offset < N) {
+  void set(Key key, size_t hash, Value value) {
+    int jump = 1;
+    int i = hash & (N-1);
+    while (jump < N) {
       if (slots[i].key == key) {
         slots[i].value = value;
         return;
       }
-      if (slots[i].key == null || slots[i].key == tomstone) {
+
+      if (slots[i].key == nullkey || slots[i].key == tombstone) {
         slots[i].key = key;
         slots[i].value = value;
         return;
       }
-      i += offset;
-      offset *= 2;
+
+      i = (i+jump) & (N-1);
+      jump *= 2;
     }
-    die("Hashmap full");
+    debug(die("Hashmap full"));
   }
 
-  void remove(Key key) {
-    int offset = 1;
-    int i = hash(key) & (N-1);
-    while (offset < N) {
+  void remove(Value *value) {
+    Slot *s = (Slot*) ((u8*)value - offsetof(Slot, value));
+    s->key = tombstone;
+  }
+
+  void remove(Key key, size_t hash) {
+    int jump = 1;
+    int i = hash & (N-1);
+    while (jump < N) {
       if (slots[i].key == key) {
         slots[i].key = tombstone;
         return;
       }
-      if (slots[i].key == null)
+
+      if (slots[i].key == nullkey)
         return;
+
+      i = (i+jump) & (N-1);
+      jump *= 2;
     }
+    debug(die("HashMap full"));
     return;
   }
 };
@@ -1173,9 +1188,9 @@ struct HashMap {
 // The reason these are less than NUM_VISIBLE_BLOCKS is to give room for the lazy block loader
 // to take its time :)
 static const int
-  NUM_VISIBLE_BLOCKS_x = 64,
-  NUM_VISIBLE_BLOCKS_y = 64,
-  NUM_VISIBLE_BLOCKS_z = 64;
+  NUM_VISIBLE_BLOCKS_x = 256,
+  NUM_VISIBLE_BLOCKS_y = 256,
+  NUM_VISIBLE_BLOCKS_z = 128;
 static const int
   NUM_BLOCKS_x = (NUM_VISIBLE_BLOCKS_x*2),
   NUM_BLOCKS_y = (NUM_VISIBLE_BLOCKS_y*2),
@@ -1302,7 +1317,7 @@ struct GameState {
     };
 
     #define MAX_LOADED_BLOCKS 2048
-    #define MAX_BLOCK_LOADER_COMMANDS 16
+    #define MAX_BLOCK_LOADER_COMMANDS 64
 
     // TODO: only single producer, single consumer at this point.
     BlockLoaderCommand commands[MAX_BLOCK_LOADER_COMMANDS];
@@ -1336,8 +1351,7 @@ struct GameState {
     bool block_vertices_dirty;
 
     // mapping from block face to the position in the vertex array, to optimize removal of blocks. use get_block_vertex_pos to get 
-    u32 block_vertex_pos[NUM_BLOCKS_x][NUM_BLOCKS_y][NUM_BLOCKS_z][DIRECTION_MAX];
-    // HashMap<u32, u32> block_vertex_pos;
+    HashMap<u32, u32, MAX_BLOCK_VERTICES*2> block_vertex_pos;
 
     GLuint gl_block_vao, gl_block_vbo, gl_block_ebo;
     GLuint gl_block_shader;
@@ -1516,12 +1530,37 @@ static BlockType get_blocktype_cache(Block b) {
   return get_blocktype_cache(block_to_blockindex(b));
 }
 
-static u32& get_block_vertex_pos(BlockIndex b, Direction dir) {
-  return state.block_vertex_pos[b.x][b.y][b.z][dir];
+static u32 block_vertex_pos_index(BlockIndex b, Direction dir) {
+  b.z += NUM_BLOCKS_x/2 + 1;
+  b.y += NUM_BLOCKS_y/2 + 1;
+  b.z += NUM_BLOCKS_z/2 + 1;
+  return
+    b.z * NUM_BLOCKS_x * NUM_BLOCKS_y * DIRECTION_MAX +
+    b.y * NUM_BLOCKS_x * DIRECTION_MAX +
+    b.x * DIRECTION_MAX +
+    dir;
+}
+STATIC_ASSERT(NUM_BLOCKS_x*NUM_BLOCKS_y*NUM_BLOCKS_z*DIRECTION_MAX < UINT32_MAX, num_block_faces_fit_in_u32);
+
+static u32* get_block_vertex_pos(BlockIndex b, Direction dir) {
+  u32 key = block_vertex_pos_index(b, dir);
+  u32 *value = state.block_vertex_pos.get(key, key);
+  return value;
 }
 
-static u32& get_block_vertex_pos(Block b, Direction dir) {
+static u32* get_block_vertex_pos(Block b, Direction dir) {
   return get_block_vertex_pos(block_to_blockindex(b), dir);
+}
+
+static void remove_block_vertex_pos(u32 *value) {
+  state.block_vertex_pos.remove(value);
+}
+
+static void set_block_vertex_pos(BlockIndex b, Direction dir, u32 pos) {
+  u32 key = block_vertex_pos_index(b, dir);
+  state.block_vertex_pos.set(key, key, pos);
+
+  assert(*state.block_vertex_pos.get(key, key) == pos);
 }
 
 static void blocktype_to_texpos_top(BlockType t, u16 *x0, u16 *y0, u16 *x1, u16 *y1) {
@@ -1563,16 +1602,15 @@ static void push_block_face(Block block, BlockType type, Direction dir) {
   unsigned int *block_elements = transparent ? state.transparent_block_elements : state.block_elements;
   int &num_block_elements = transparent ? state.num_transparent_block_elements : state.num_block_elements;
 
+  BlockIndex bi = block_to_blockindex(block);
   // does face already exist?
-  u32 &vertex_pos = get_block_vertex_pos(block, dir);
+  u32 *vertex_pos = get_block_vertex_pos(bi, dir);
   if (vertex_pos)
     return;
 
   // too many block_vertices?
-  if (num_block_vertices + 4 >= MAX_BLOCK_VERTICES || num_block_elements + 6 > MAX_BLOCK_ELEMENTS) {
-    vertex_pos = 0;
+  if (num_block_vertices + 4 >= MAX_BLOCK_VERTICES || num_block_elements + 6 > MAX_BLOCK_ELEMENTS)
     return;
-  }
 
   if (transparent) state.transparent_block_vertices_dirty = true;
   else             state.block_vertices_dirty = true;
@@ -1599,7 +1637,7 @@ static void push_block_face(Block block, BlockType type, Direction dir) {
     el = num_block_elements;
     num_block_elements += 6;
   }
-  vertex_pos = v/4;
+  set_block_vertex_pos(bi, dir, v/4);
 
   switch (dir) {
     case DIRECTION_UP: {
@@ -1777,7 +1815,7 @@ static void push_blockdiff(Block b, BlockType t) {
 
 
 static void remove_blockface(Block b, BlockType type, Direction d) {
-  u32 &vertex_pos = get_block_vertex_pos(b, (Direction)d);
+  u32 *vertex_pos = get_block_vertex_pos(b, d);
   if (!vertex_pos)
     return;
 
@@ -1786,9 +1824,10 @@ static void remove_blockface(Block b, BlockType type, Direction d) {
   int *free_faces = transparent ? state.free_transparent_faces : state.free_faces;
   int &num_free_faces = transparent ? state.num_free_transparent_faces : state.num_free_faces;
 
-  free_faces[num_free_faces++] = vertex_pos;
-  memset(block_vertices+(vertex_pos*4), 0, sizeof(*block_vertices)*4);
-  vertex_pos = 0;
+  free_faces[num_free_faces++] = *vertex_pos;
+  memset(block_vertices+(*vertex_pos*4), 0, sizeof(*block_vertices)*4);
+  remove_block_vertex_pos(vertex_pos);
+  debug(if (get_block_vertex_pos(b, d)) die("block face (%i %i %i %i) still exists! it has value %i for key %i", b.x, b.y, b.z, (int)d, *get_block_vertex_pos(b, d), block_vertex_pos_index(block_to_blockindex(b), d)));
 
   if (transparent) state.transparent_block_vertices_dirty = true;
   else state.block_vertices_dirty = true;
@@ -2553,10 +2592,12 @@ static void push_ui_quad(v2 x, v2 w, v2 t, v2 tw) {
 }
 
 static void gamestate_init() {
+  state.block_vertex_pos.init(0, UINT32_MAX);
+
   state.fov = PI/2.0f;
   state.nearz = 0.3f;
   state.farz = 300.0f;
-  state.player_pos = {300.0f, 300.0f, 18.1f};
+  state.player_pos = {1000.0f, 1000.0f, 30.1f};
   camera_lookat(&state.camera, state.player_pos, state.player_pos + v3{0.0f, SQRT2, -SQRT2});
   state.block_vertices_dirty = true;
   state.transparent_block_vertices_dirty = true;
