@@ -1,7 +1,7 @@
 // TODO:
 //
 // * optimize loading blocks & persist block changes to disk:
-//   - data streaming in opengl for blocks
+//   - data streaming in opengl for blocks, or divide world into multiple buffer objects?
 //   - load new blocks in separate thread
 //   - good datastructure for storing block changes
 //
@@ -53,6 +53,7 @@
 #ifdef OS_WINDOWS
   // windows.h defines max and min as macros, destroying all our code. remove it with this define :)
   #define NOMINMAX
+  #define WIN32_LEAN_AND_MEAN 1
 #endif
 
 #include <stdarg.h>
@@ -147,7 +148,6 @@ static FILE* mine_fopen(const char *filename, const char *mode) {
 }
 
 // @math
-
 
 #define ARRAY_LEN(a) (sizeof(a)/sizeof(*a))
 #define ARRAY_LAST(a) ((a)[ARRAY_LEN(a)-1])
@@ -1086,42 +1086,12 @@ static T* next(ColonyIter<T,N> &iter) {
 #define For(container) decltype(container)::Iterator it; for(auto _iterator = iter(container); (it = next(_iterator));)
 #endif
 
-static const int NUM_BLOCKS_x = 64, NUM_BLOCKS_y = 64, NUM_BLOCKS_z = 64;
+static const int NUM_BLOCKS_x = 128, NUM_BLOCKS_y = 128, NUM_BLOCKS_z = 64;
 
 struct BlockDiff {
   Block block;
   BlockType t;
 };
-
-#if 0
-struct EndOfFrameCommand {
-  enum {
-    REMOVE_BLOCK,
-    ADD_BLOCK,
-    REMOVE_FACE_FROM_MESH,
-    ADD_FACE_TO_MESH,
-  } type;
-
-  union {
-    struct {
-      Block block;
-    } remove_block;
-    struct {
-      Block block;
-      BlockType type;
-    } load_block;
-    struct {
-      int pos;
-      Direction dir;
-    } remove_face_from_mesh;
-    struct {
-      Block block;
-      BlockType type;
-      Direction dir;
-    } add_face_to_mesh;
-  };
-};
-#endif
 
 enum ItemType {
   ITEM_NULL,
@@ -1182,11 +1152,25 @@ struct BitArray {
   void unset(int i) {d[i/8] &= ~(1 << (i&7));}
 };
 
+struct BlockRange {
+  Block a, b;
+};
+
+struct BlockLoaderCommand {
+  enum {
+    UNLOAD_BLOCK,
+    LOAD_BLOCK
+  } type;
+  BlockRange range;
+};
+
 struct GameState {
   // window stuff
-  SDL_Window *window;
-  float screen_ratio;
-  int screen_width, screen_height;
+  struct {
+    SDL_Window *window;
+    float screen_ratio;
+    int screen_width, screen_height;
+  };
 
   // input, see read_input()
   struct {
@@ -1199,14 +1183,42 @@ struct GameState {
   };
 
   // camera stuff
-  float fov;
-  float nearz;
-  float farz;
-  Camera camera;
+  struct {
+    float fov;
+    float nearz;
+    float farz;
+    Camera camera;
+  };
 
   // daycycle graphics stuff
-  float sun_angle;
-  float ambient_light;
+  struct {
+    float sun_angle;
+    float ambient_light;
+  };
+
+  // block loader buffers
+  struct {
+    struct LoadedBlock {
+      BlockType type;
+      Block block;
+    };
+
+    #define MAX_LOADED_BLOCKS 2048
+    #define MAX_BLOCK_LOADER_COMMANDS 16
+
+    // TODO: only single producer, single consumer at this point.
+    BlockLoaderCommand commands[MAX_BLOCK_LOADER_COMMANDS];
+    int commands_head;
+    int commands_tail;
+    SDL_sem *num_commands;
+    SDL_sem *num_commands_free;
+
+    LoadedBlock loaded_blocks[MAX_LOADED_BLOCKS];
+    SDL_atomic_t num_loaded_blocks;
+
+    LoadedBlock unloaded_blocks[MAX_LOADED_BLOCKS];
+    SDL_atomic_t num_unloaded_blocks;
+  } block_loader;
 
   // block graphics data
   struct {
@@ -1301,22 +1313,26 @@ struct GameState {
   };
 
   // world data
-  // Array<BlockDiff> block_changes; // TODO: see push_blockdiff :)
-  u8 block_types[NUM_BLOCKS_x][NUM_BLOCKS_y][NUM_BLOCKS_z];
+  struct {
+    // cache of block types
+    u8 block_types[NUM_BLOCKS_x][NUM_BLOCKS_y][NUM_BLOCKS_z];
+    // Array<BlockDiff> block_changes; // TODO: see push_blockdiff :)
+  };
 
   // player data
-  v3 player_vel;
-  v3 player_pos;
-  bool player_on_ground;
+  struct {
+    v3 player_vel;
+    v3 player_pos;
+    bool player_on_ground;
+  };
 
   // inventory stuff
-  bool render_quickmenu;
-  bool is_inventory_open;
-  int selected_item;
-  Item inventory[8];
-
-  // commands from other threads of stuff for the main thread to do at end of frame
-  // Array<EndOfFrameCommand> commands;
+  struct {
+    bool render_quickmenu;
+    bool is_inventory_open;
+    int selected_item;
+    Item inventory[8];
+  };
 };
 static GameState state;
 
@@ -1356,10 +1372,6 @@ static Block pos_to_block(v3 p) {
 static Block range_get_bottom(Block b) {
   return {b.x - NUM_BLOCKS_x/2, b.y - NUM_BLOCKS_y/2, b.z - NUM_BLOCKS_z/2, };
 }
-
-struct BlockRange {
-  Block a, b;
-};
 
 // returned range is inclusive
 static BlockRange pos_to_range(v3 p) {
@@ -1737,6 +1749,43 @@ static void remove_block(Block b) {
   unload_block(b);
   push_blockdiff(b, BLOCKTYPE_AIR);
 }
+
+static void push_block_loader_command(BlockLoaderCommand command) {
+  #if 1
+  if (command.type == BlockLoaderCommand::UNLOAD_BLOCK) {
+    for (int x = command.range.a.x; x <= command.range.b.x; ++x)
+    for (int y = command.range.a.y; y <= command.range.b.y; ++y)
+    for (int z = command.range.a.z; z <= command.range.b.z; ++z)
+      unload_block({x,y,z}, false);
+  } else {
+    assert(command.type == BlockLoaderCommand::LOAD_BLOCK);
+    for (int x = command.range.a.x; x <= command.range.b.x; ++x)
+    for (int y = command.range.a.y; y <= command.range.b.y; ++y)
+    for (int z = command.range.a.z; z <= command.range.b.z; ++z)
+      load_block({x,y,z}, false);
+  }
+  #else
+  SDL_SemWait(state.block_loader.num_commands_free);
+
+  int tail = state.block_loader.commands_tail;
+  state.block_loader.commands[tail] = command;
+  state.block_loader.commands_tail = (tail + 1) & (MAX_BLOCK_LOADER_COMMANDS-1);
+
+  SDL_SemPost(state.block_loader.num_commands);
+  #endif
+}
+
+static BlockLoaderCommand pop_block_loader_command() {
+  SDL_SemWait(state.block_loader.num_commands);
+
+  int head = state.block_loader.commands_head;
+  BlockLoaderCommand command = state.block_loader.commands[head];
+  state.block_loader.commands_head = (head + 1) & (MAX_BLOCK_LOADER_COMMANDS-1);
+
+  SDL_SemPost(state.block_loader.num_commands_free);
+  return command;
+}
+
 
 static void add_block(Block b, BlockType t) {
   push_blockdiff(b, t);
@@ -2393,6 +2442,10 @@ static void gamestate_init() {
   state.render_quickmenu = true;
   state.sun_angle = PI/4.0f;
 
+  state.block_loader.num_commands_free = SDL_CreateSemaphore(MAX_BLOCK_LOADER_COMMANDS);
+  if (!state.block_loader.num_commands_free)
+    die("Failed to intialize semaphores: %s", SDL_GetError());
+
   // update_world_floor();
 
   puts("generating block mesh...");
@@ -2618,40 +2671,42 @@ static void update_blocks(v3 before, v3 after) {
 
   // unload blocks that went out of scope
   // TODO:, FIXME: if we jumped farther than NUM_BLOCKS_x this probably breaks
-  #if 1
-  #define HIDEBLOCK(A, B, C) \
-    for (int A = r0.a.A; A < r1.a.A; ++A) \
-    for (int B = B##0; B <= B##1; ++B) \
-    for (int C = C##0; C <= C##1; ++C) \
-        unload_block({x, y, z}, false); \
-    for (int A = r0.b.A; A > r1.b.A; --A) \
-    for (int B = B##0; B <= B##1; ++B) \
-    for (int C = C##0; C <= C##1; ++C) \
-        unload_block({x, y, z}, false);
+  #define PUSH_BLOCK_UNLOAD(DIM) \
+    { \
+      BlockRange r = r0; \
+      if (r0.a.DIM < r1.a.DIM) { \
+        r.b.DIM = r1.a.DIM-1; \
+        r0.a.DIM = r1.a.DIM; \
+      } else { \
+        r.a.DIM = r1.b.DIM+1; \
+        r0.b.DIM = r1.b.DIM; \
+      } \
+      push_block_loader_command({BlockLoaderCommand::UNLOAD_BLOCK, r}); \
+    }
 
-  HIDEBLOCK(x,y,z);
-  HIDEBLOCK(y,x,z);
-  HIDEBLOCK(z,x,y);
-  #endif
+  PUSH_BLOCK_UNLOAD(x);
+  PUSH_BLOCK_UNLOAD(y);
+  PUSH_BLOCK_UNLOAD(z);
 
   state.player_pos = after;
 
   // load the new blocks that went into scope
-  #if 1
-  #define SHOWBLOCK(A, B, C) \
-    for (int A = r0.b.A+1; A <= r1.b.A; ++A) \
-    FOR_BLOCKS_IN_RANGE_##B \
-    FOR_BLOCKS_IN_RANGE_##C \
-      load_block({x, y, z}, false); \
-    for (int A = r0.a.A-1; A >= r1.a.A; --A) \
-    FOR_BLOCKS_IN_RANGE_##B \
-    FOR_BLOCKS_IN_RANGE_##C \
-        load_block({x, y, z}, false);
+  #define PUSH_BLOCK_LOAD(DIM) \
+    { \
+      BlockRange r = r1; \
+      if (r1.a.DIM < r0.a.DIM) { \
+        r.b.DIM = r0.a.DIM-1; \
+        r1.a.DIM = r0.a.DIM; \
+      } else { \
+        r.a.DIM = r0.b.DIM+1; \
+        r1.b.DIM = r0.b.DIM; \
+      } \
+      push_block_loader_command({BlockLoaderCommand::LOAD_BLOCK, r}); \
+    }
 
-  SHOWBLOCK(x,y,z);
-  SHOWBLOCK(y,x,z);
-  SHOWBLOCK(z,x,y);
-  #endif
+  PUSH_BLOCK_LOAD(x);
+  PUSH_BLOCK_LOAD(y);
+  PUSH_BLOCK_LOAD(z);
 }
 
 static void update_weather() {
@@ -2702,10 +2757,6 @@ static void update_water_texture(float dt) {
 }
 
 static void update_inventory() {
-  if (state.keypressed[KEY_FLYUP])
-    ++state.selected_item;
-  if (state.keypressed[KEY_FLYDOWN])
-    --state.selected_item;
   state.selected_item -= state.scrolled;
   state.selected_item = clamp(state.selected_item, 0, (int)ARRAY_LEN(state.inventory)-1);
 }
