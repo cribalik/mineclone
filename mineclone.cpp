@@ -1600,20 +1600,20 @@ static bool is_block_in_range(Block b) {
 static BlockType generate_blocktype(Block b) {
   const BlockIndex bi = block_to_blockindex(b);
 
-  // to not having to recalculate stuff like ground level and water level for every block in Z,
-  // we keep a cache of it :)
-  float groundlevel;
-  float stonelevel;
+  int groundlevel;
+  int stonelevel;
   const int waterlevel = 13;
 
+  // to not having to recalculate stuff like ground level and water level for every block in Z,
+  // we keep a cache of it :)
   // get_world_xy_cache(bi, &groundlevel, &stonelevel);
   // success = false;
   // if (!success) {
     static const float stone_freq = 0.13f;
     static const float ground_freq = 0.05f;
     float crazy_hills = max(powf(perlin(b.x*ground_freq*1.0f, b.y*ground_freq*1.0f, 0) * 2.0f, 6), 0.0f);
-    groundlevel = roundf(perlin(b.x*ground_freq*0.7f, b.y*ground_freq*0.7f, 0) * 30.0f + crazy_hills); //50.0f;
-    stonelevel = roundf(10.0f + perlin(b.x*stone_freq, b.y*stone_freq, 0) * 5.0f); // 20.0f;
+    groundlevel = (int)ceilf(perlin(b.x*ground_freq*0.7f, b.y*ground_freq*0.7f, 0) * 30.0f + crazy_hills); //50.0f;
+    stonelevel = (int)ceilf(10.0f + perlin(b.x*stone_freq, b.y*stone_freq, 0) * 5.0f); // 20.0f;
   // }
 
   if (b.z < groundlevel && b.z < stonelevel)
@@ -1647,19 +1647,18 @@ static BlockType calc_blocktype(Block b) {
 }
 
 static BlockType get_blocktype(Block b) {
-  BlockType t;
-  // check cache
   bool in_range = is_block_in_range(b);
-  if (in_range) {
-    t = get_blocktype_cache(b);
-    // TODO: if we make sure to preload the cache, we should be able to skip this step
-    if (t != BLOCKTYPE_NULL)
-      return t;
-  }
-  // otherwise get value and update cache
+  if (!in_range)
+    return calc_blocktype(b);
+
+  // check cache if in range
+  BlockType t = get_blocktype_cache(b);
+  if (t != BLOCKTYPE_NULL)
+    return t;
+
+  // update cache if not there
   t = calc_blocktype(b);
-  if (in_range)
-    set_blocktype_cache(b, t);
+  set_blocktype_cache(b, t);
   return t;
 }
 
@@ -2730,7 +2729,6 @@ static void update_blocks(v3 before, v3 after) {
   {
     BlockRange rr0 = r0;
     BlockRange rr1 = r1;
-    printf("(%i %i %i) -> (%i %i %i)\n", rr0.a.x, rr0.a.y, rr0.a.z, rr1.a.x, rr1.a.y, rr1.a.z);
 
     // BlockRange r;
     // GET_UNLOADED_BLOCKS(x, rr0, rr1, r);
