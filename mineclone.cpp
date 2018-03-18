@@ -1,7 +1,7 @@
 // TODO:
 //
 // * optimize loading blocks & persist block changes to disk:
-//   - data streaming in opengl for blocks, or divide world into multiple buffer objects?
+//   - divide world into multiple buffer objects?
 //   - good datastructure for storing block changes
 //
 // * fix perlin noise at negative coordinates
@@ -13,6 +13,8 @@
 // * don't limit number of vertices to a fixed amount. The same thing with vertex position lookup
 //
 // * movement through water
+//
+// * bloom
 //
 // * ambient occlusion
 //
