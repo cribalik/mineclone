@@ -1015,7 +1015,7 @@ enum BlockType {
   BLOCKTYPE_STONE,
   BLOCKTYPE_CLOUD,
   BLOCKTYPE_WATER,
-  BLOCKTYPE_BEDROCK, // TODO: Make this unbreakable. Just like my heart. Dad?
+  BLOCKTYPE_BEDROCK,
   BLOCKTYPES_MAX
 };
 
@@ -2774,7 +2774,7 @@ static void update_player(float dt) {
     Vec<Collision> hits = collision(p0, p1, dt, {0.01f, 0.01f, 0.01f}, 0, 0, false);
     if (hits.size) {
       debug(if (hits.size != 1) die("Multiple collisions when not gliding? Somethings wrong"));
-      if (add_block_to_inventory(get_blocktype(hits[0].block))) {
+      if ((get_blocktype(hits[0].block) != BLOCKTYPE_BEDROCK) && (add_block_to_inventory(get_blocktype(hits[0].block)))) {
         remove_block(hits[0].block);
       }
       puts("hit!");

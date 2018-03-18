@@ -40,6 +40,9 @@ include/SDL2
 *.sublime-workspace
 *.sublime-project
 .idea
+cmake-build-default
+cmake-build-debug
+CMakeLists.txt
 
 # macOS specific
 info.plist
