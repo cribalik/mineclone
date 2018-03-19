@@ -1,5 +1,7 @@
 // TODO:
 //
+// * Fix jittering shadows by moving light in texel-sized increments (https://msdn.microsoft.com/en-us/library/ee416324(v=vs.85).aspx)
+//
 // * optimize loading blocks & persist block changes to disk:
 //   - divide world into multiple buffer objects?
 //   - good datastructure for storing block changes
