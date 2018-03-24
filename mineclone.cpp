@@ -1315,6 +1315,11 @@ struct GameState {
 
   // block loader buffers
   struct {
+
+    // IMPORTANT: use this lock if you want to manipulate blocks from another thread
+    // other than the block loader thread
+    SDL_SpinLock lock;
+
     struct LoadedBlock {
       BlockType type;
       Block block;
@@ -1360,7 +1365,6 @@ struct GameState {
     GLuint gl_block_shadowmap;
     #define SHADOWMAP_WIDTH (1024*2)
     #define SHADOWMAP_HEIGHT (1024*2)
-
 
     // same thing as all of the above, but for transparent blocks! (since they need to be rendered separately, because they look weird otherwise)
     bool transparent_block_vertices_dirty;
@@ -1897,11 +1901,6 @@ static void load_block(Block b, bool hide_adjacent_faces = true) {
   state.block_vertices_dirty = true;
 }
 
-static void remove_block(Block b) {
-  unload_block(b);
-  push_blockdiff(b, BLOCKTYPE_AIR);
-}
-
 static void push_block_loader_command(BlockLoaderCommand command) {
   #if 0
   BlockRange r = command.range;
@@ -1944,9 +1943,18 @@ static BlockLoaderCommand pop_block_loader_command() {
   return command;
 }
 
+static void remove_block(Block b) {
+  SDL_AtomicLock(&state.block_loader.lock);
+  unload_block(b);
+  push_blockdiff(b, BLOCKTYPE_AIR);
+  SDL_AtomicUnlock(&state.block_loader.lock);
+}
+
 static void add_block(Block b, BlockType t) {
+  SDL_AtomicLock(&state.block_loader.lock);
   push_blockdiff(b, t);
   load_block(b);
+  SDL_AtomicUnlock(&state.block_loader.lock);
 }
 
 /* in: line, plane, plane origin */
@@ -2765,6 +2773,8 @@ static void update_player(float dt) {
     }
   }
 
+  // this code might manipulate blocks in the world, so we need to lock on state.blocks_lock
+  // so we don't collide with the blockloader thread :)
   // mouse clicked - remove block
   if (state.mouse_clicked) {
     // find the block
@@ -3260,6 +3270,7 @@ static void render_text() {
 static int blockloader_thread(void*) {
   for (;;) {
     BlockLoaderCommand command = pop_block_loader_command();
+    SDL_AtomicLock(&state.block_loader.lock);
     if (command.type == BlockLoaderCommand::UNLOAD_BLOCK) {
       for (int x = command.range.a.x; x <= command.range.b.x; ++x)
       for (int y = command.range.a.y; y <= command.range.b.y; ++y)
@@ -3272,6 +3283,7 @@ static int blockloader_thread(void*) {
       for (int z = command.range.a.z; z <= command.range.b.z; ++z)
         load_block({x,y,z}, false);
     }
+    SDL_AtomicUnlock(&state.block_loader.lock);
   }
 }
 
