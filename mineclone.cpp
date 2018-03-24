@@ -1329,12 +1329,6 @@ struct GameState {
     int commands_tail;
     SDL_sem *num_commands;
     SDL_sem *num_commands_free;
-
-    LoadedBlock loaded_blocks[MAX_LOADED_BLOCKS];
-    SDL_atomic_t num_loaded_blocks;
-
-    LoadedBlock unloaded_blocks[MAX_LOADED_BLOCKS];
-    SDL_atomic_t num_unloaded_blocks;
   } block_loader;
 
   // block graphics data
@@ -1995,12 +1989,17 @@ static bool collision_plane(v3 x0, v3 x1, v3 p0, v3 p1, v3 p2, float *t_out, v3 
 template<class T>
 struct Vec {
   typedef T* Iterator;
-  int size;
   T *items;
+  int size;
 
   T& operator[](int i) {return items[i];}
   const T& operator[](int i) const {return items[i];}
 };
+
+template<class T, int N>
+Vec<T> vec(T (&t)[N]) {
+  return {t, N};
+}
 
 template<class T>
 struct VecIter {
@@ -2139,7 +2138,7 @@ static Vec<Collision> collision(v3 p0, v3 p1, float dt, v3 size, OPTIONAL v3 *p_
     p1 = p0;
 
   if (p_out) *p_out = p1;
-  return {num_hits, hits};
+  return {hits, num_hits};
 }
 
 
@@ -2776,9 +2775,9 @@ static void update_player(float dt) {
     Vec<Collision> hits = collision(p0, p1, dt, {0.01f, 0.01f, 0.01f}, 0, 0, false);
     if (hits.size) {
       debug(if (hits.size != 1) die("Multiple collisions when not gliding? Somethings wrong"));
-      if ((get_blocktype(hits[0].block) != BLOCKTYPE_BEDROCK) && (add_block_to_inventory(get_blocktype(hits[0].block)))) {
+      BlockType t = get_blocktype(hits[0].block);
+      if (t != BLOCKTYPE_BEDROCK && t != BLOCKTYPE_WATER && add_block_to_inventory(t))
         remove_block(hits[0].block);
-      }
       puts("hit!");
     }
   }
@@ -3258,7 +3257,7 @@ static void render_text() {
   glBindVertexArray(0);
 }
 
-static int blockloader_thread(void *data) {
+static int blockloader_thread(void*) {
   for (;;) {
     BlockLoaderCommand command = pop_block_loader_command();
     if (command.type == BlockLoaderCommand::UNLOAD_BLOCK) {
