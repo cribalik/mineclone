@@ -1,6 +1,8 @@
 // TODO:
 //
-// * mipmap the texture atlas
+// * mipmap the texture atlas (http://download.nvidia.com/developer/NVTextureSuite/Atlas_Tools/Texture_Atlas_Whitepaper.pdf)
+//
+// * reduce number of vertices by merging blocks of the same type
 //
 // * Fix jittering shadows by moving light in texel-sized increments (https://msdn.microsoft.com/en-us/library/ee416324(v=vs.85).aspx)
 //
@@ -16,15 +18,15 @@
 //
 // * movement through water
 //
-// * bloom
+// * bloom (https://learnopengl.com/Advanced-Lighting/Bloom)
 //
-// * ambient occlusion
+// * ambient occlusion (https://learnopengl.com/Advanced-Lighting/SSAO)
 //
-// * antialiasing
+// * antialiasing (https://learnopengl.com/Advanced-OpenGL/Anti-Aliasing)
 //
 // * more ui (menus, buttons, etc..)
 //
-// * better skybox texture, and rotate skybox depending on sun position
+// * dynamic skybox texture, and rotate skybox depending on sun position
 //
 // * transparent blocks (leaves etc)
 //
@@ -32,11 +34,9 @@
 //
 // * crafting ui
 //
-// * better terrain (different block types)
-//
 // * inventory ui
 //
-// * fix smoothing out sunlight as it goes behind horizon
+// * fix smoothing out sunlight as it goes behind horizon, right now it just clips off directly
 //
 // * view distance in water?
 //
