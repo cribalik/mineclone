@@ -29,7 +29,6 @@ struct Array {
 
 	T& operator[](int i) {return items[i];}
 	const T& operator[](int i) const {return items[i];}
-	operator T*() {return items;}
 };
 
 template<class T>
@@ -130,6 +129,16 @@ template<class T>
 void array_pusha(Array<T> &a, T *items, int n) {
 	array_pushn(a, n);
 	memcpy(a.items+a.size-n, items, n*sizeof(T));
+}
+
+template<class T>
+void array_zero(Array<T> &a) {
+	memset(a.items, 0, sizeof(T)*a.size);
+}
+
+template<class T>
+void array_zero(Array<T> &a, int from, int n) {
+	memset(a.items + from, 0, sizeof(T)*n);
 }
 
 template<class T>

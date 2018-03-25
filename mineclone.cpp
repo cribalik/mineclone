@@ -1,5 +1,7 @@
 // TODO:
 //
+// * mipmap the texture atlas
+//
 // * Fix jittering shadows by moving light in texel-sized increments (https://msdn.microsoft.com/en-us/library/ee416324(v=vs.85).aspx)
 //
 // * optimize loading blocks & persist block changes to disk:
@@ -108,6 +110,13 @@ static void _die(const char *file, int line, const char *fmt, ...) {
   #define debug(stmt) stmt
 #else
   #define debug(stmt) 0
+#endif
+
+#define VERBOSE_DEBUG 1
+#ifdef VERBOSE_DEBUG
+  #define debug_verbose(stmt) stmt
+#else
+  #define debug_verbose(stmt)
 #endif
 
 static void _sdl_die(const char *file, int line, const char *fmt, ...) {
@@ -1194,7 +1203,7 @@ struct HashMap {
 static const int
   NUM_VISIBLE_BLOCKS_x = 256,
   NUM_VISIBLE_BLOCKS_y = 256,
-  NUM_VISIBLE_BLOCKS_z = 128;
+  NUM_VISIBLE_BLOCKS_z = 256;
 static const int
   NUM_BLOCKS_x = (NUM_VISIBLE_BLOCKS_x*2),
   NUM_BLOCKS_y = (NUM_VISIBLE_BLOCKS_y*2),
@@ -1277,7 +1286,7 @@ struct BlockLoaderCommand {
 };
 
 // cache for world generation stuff that is the same over all Z
-struct WorldXYCache {
+struct WorldXYData {
   int groundlevel;
   int stonelevel;
 };
@@ -1433,7 +1442,7 @@ struct GameState {
     u8 block_types[NUM_BLOCKS_x][NUM_BLOCKS_y][NUM_BLOCKS_z];
     // cache of the ground height (so we don't have to call perlin to calculate it all the time)
     // 0 means it is unset
-    WorldXYCache xy_cache[NUM_BLOCKS_x][NUM_BLOCKS_y];
+    WorldXYData xy_cache[NUM_BLOCKS_x][NUM_BLOCKS_y];
     // Array<BlockDiff> block_changes; // TODO: see push_blockdiff :)
   } world;
 
@@ -1500,27 +1509,29 @@ static BlockRange pos_to_range(v3 p) {
   };
 }
 
-static BlockIndex block_to_blockindex(Block b) {
+static inline BlockIndex block_to_blockindex(Block b) {
   return {b.x & (NUM_BLOCKS_x-1), b.y & (NUM_BLOCKS_y-1), b.z & (NUM_BLOCKS_z-1)};
 }
 
 STATIC_ASSERT(BLOCKTYPES_MAX <= 255, blocktypes_fit_in_u8);
 
-static void set_blocktype_cache(BlockIndex b, BlockType t) {
+static inline void set_blocktype_cache(BlockIndex b, BlockType t) {
   state.world.block_types[b.x][b.y][b.z] = (u8)t;
 }
 
-static void set_blocktype_cache(Block b, BlockType t) {
+static inline void set_blocktype_cache(Block b, BlockType t) {
   set_blocktype_cache(block_to_blockindex(b), t);
 }
 
-static bool get_world_xy_cache(BlockIndex b, int *groundlevel, int *stonelevel) {
-  *groundlevel = state.world.xy_cache[b.x][b.y].groundlevel;
-  *stonelevel = state.world.xy_cache[b.x][b.y].stonelevel;
-  return *groundlevel; // groundlevel 0 means cache is not filled
+static inline WorldXYData get_world_xy_cache(BlockIndex b) {
+  return state.world.xy_cache[b.x][b.y];
 }
 
-static void clear_world_xy_cache(BlockIndex b) {
+static inline void set_world_xy_cache(BlockIndex b, WorldXYData c) {
+  state.world.xy_cache[b.x][b.y] = c;
+}
+
+static inline void clear_world_xy_cache(BlockIndex b) {
   state.world.xy_cache[b.x][b.y].groundlevel = 0;
 }
 
@@ -1537,9 +1548,9 @@ static u32 block_vertex_pos_index(BlockIndex b, Direction dir) {
   b.y += NUM_BLOCKS_y/2 + 1;
   b.z += NUM_BLOCKS_z/2 + 1;
   return
-    b.z * NUM_BLOCKS_x * NUM_BLOCKS_y * DIRECTION_MAX +
-    b.y * NUM_BLOCKS_x * DIRECTION_MAX +
-    b.x * DIRECTION_MAX +
+    b.z * (NUM_BLOCKS_x+1) * (NUM_BLOCKS_y+1) * (DIRECTION_MAX+1) +
+    b.y * (NUM_BLOCKS_x+1) * (DIRECTION_MAX+1) +
+    b.x * (DIRECTION_MAX+1) +
     dir;
 }
 STATIC_ASSERT(NUM_BLOCKS_x*NUM_BLOCKS_y*NUM_BLOCKS_z*DIRECTION_MAX < UINT32_MAX, num_block_faces_fit_in_u32);
@@ -1716,24 +1727,26 @@ static bool is_block_in_range(Block b) {
 static BlockType generate_blocktype(Block b) {
   const BlockIndex bi = block_to_blockindex(b);
 
-  int groundlevel;
-  int stonelevel;
+  WorldXYData xy_data;
   const int waterlevel = 13;
 
-  // to not having to recalculate stuff that are the same for every (x,y),
-  // like ground level and water level, we keep a cache of it :)
-  bool success = get_world_xy_cache(bi, &groundlevel, &stonelevel);
-  if (!success) {
+  // to not having to recalculate stuff that are constant for all z, for a specific (x,y)
+  // like ground level and water level, we keep a cache of it.
+  // turns out it is MUCH faster :D
+  // we have convention that groundlevel == 0 means cache is empty
+  xy_data = get_world_xy_cache(bi);
+  if (!xy_data.groundlevel) {
     static const float stone_freq = 0.13f;
     static const float ground_freq = 0.05f;
     float crazy_hills = max(powf(perlin(b.x*ground_freq*1.0f, b.y*ground_freq*1.0f, 0) * 2.0f, 6), 0.0f);
-    groundlevel = (int)ceilf(perlin(b.x*ground_freq*0.7f, b.y*ground_freq*0.7f, 0) * 30.0f + crazy_hills); //50.0f;
-    stonelevel = (int)ceilf(10.0f + perlin(b.x*stone_freq, b.y*stone_freq, 0) * 5.0f); // 20.0f;
+    xy_data.groundlevel = (int)ceilf(perlin(b.x*ground_freq*0.7f, b.y*ground_freq*0.7f, 0) * 30.0f + crazy_hills); //50.0f;
+    xy_data.stonelevel = (int)ceilf(10.0f + perlin(b.x*stone_freq, b.y*stone_freq, 0) * 5.0f); // 20.0f;
+    set_world_xy_cache(bi, xy_data);
   }
 
-  if (b.z < groundlevel && b.z < stonelevel)
+  if (b.z < xy_data.groundlevel && b.z < xy_data.stonelevel)
     return BLOCKTYPE_STONE;
-  if (b.z < groundlevel)
+  if (b.z < xy_data.groundlevel)
     return BLOCKTYPE_DIRT;
   if (b.z < waterlevel)
     return BLOCKTYPE_WATER;
@@ -1747,6 +1760,7 @@ static BlockType generate_blocktype(Block b) {
 
 // WARNING: only call this if you explicitly want to bypass the cache, otherwise use get_blocktype
 static BlockType calc_blocktype(Block b) {
+  // an early out for speed
 	const int bottomLevel = 0;
   if (b.z <= bottomLevel)
     return BLOCKTYPE_BEDROCK;
@@ -1826,6 +1840,11 @@ static void remove_blockface(Block b, BlockType type, Direction d) {
   int *free_faces = transparent ? state.free_transparent_faces : state.free_faces;
   int &num_free_faces = transparent ? state.num_free_transparent_faces : state.num_free_faces;
 
+  if ((int)*vertex_pos >= (transparent ? state.num_transparent_block_vertices : state.num_block_vertices)) {
+    debug(die("Something went very wrong"));
+    return;
+  }
+
   free_faces[num_free_faces++] = *vertex_pos;
   memset(block_vertices+(*vertex_pos*4), 0, sizeof(*block_vertices)*4);
   remove_block_vertex_pos(vertex_pos);
@@ -1835,18 +1854,54 @@ static void remove_blockface(Block b, BlockType type, Direction d) {
   else state.block_vertices_dirty = true;
 }
 
-static void unload_block(Block b, bool create_new_faces = true) {
-  BlockType t = get_blocktype(b);
+static void show_block_faces(Block b, BlockType t) {
+  if (t == BLOCKTYPE_AIR)
+    return;
 
-  // clear caches
-  set_blocktype_cache(b, BLOCKTYPE_NULL);
+  // draw sides that face transparent blocks
+  for (int d = 0; d < DIRECTION_MAX; ++d) {
+    BlockType tt = get_blocktype(get_adjacent_block(b, (Direction)d));
+    if (!blocktype_is_transparent(tt))
+      continue;
+    // we don't want to draw water against water
+    if (t == BLOCKTYPE_WATER && tt == BLOCKTYPE_WATER)
+      continue;
 
-  // remove the visible faces of this block
+    push_block_face(b, t, (Direction)d);
+  }
+  state.block_vertices_dirty = true;
+}
+
+static void hide_block_faces(Block b, BlockType t) {
   for (int d = 0; d < DIRECTION_MAX; ++d)
     remove_blockface(b, t, (Direction)d);
+}
 
+// hide the faces of the adjacent blocks that no longer can be seen
+static void hide_block_faces_of_adjacent_blocks(Block b, BlockType t) {
+  // special case for water: if it is water, we only want to hide other water blocks
+  if (t == BLOCKTYPE_WATER) {
+    for (int d = 0; d < DIRECTION_MAX; ++d) {
+      Block adj = get_adjacent_block(b, (Direction)d);
+      BlockType tt = get_blocktype(adj);
+      if (tt == BLOCKTYPE_WATER)
+        remove_blockface(adj, tt, invert_direction((Direction)d));
+    }
+  }
+  // if it is transparent, we want to keep all adjacent block faces
+  else if (!blocktype_is_transparent(t)) {
+    for (int d = 0; d < DIRECTION_MAX; ++d) {
+      Block adj = get_adjacent_block(b, (Direction)d);
+      BlockType tt = get_blocktype(adj);
+      remove_blockface(adj, tt, invert_direction((Direction)d));
+    }
+  }
+  state.block_vertices_dirty = true;
+}
+
+static void show_block_faces_of_adjacent_blocks(Block b, BlockType t) {
   // and add the newly visible faces of the adjacent blocks
-  if (create_new_faces && (blocktype_is_transparent(t) == false || t == BLOCKTYPE_WATER)) {
+  if (!blocktype_is_transparent(t) || t == BLOCKTYPE_WATER) {
     for (int d = 0; d < DIRECTION_MAX; ++d) {
       Block adj = get_adjacent_block(b, (Direction)d);
 
@@ -1858,47 +1913,43 @@ static void unload_block(Block b, bool create_new_faces = true) {
   }
 }
 
-static void load_block(Block b, bool hide_adjacent_faces = true) {
-  BlockType t = get_blocktype(b);
-  assert(t != BLOCKTYPE_NULL);
-  if (t == BLOCKTYPE_AIR)
-    return;
+static void remove_block(Block b, BlockType t) {
+  show_block_faces_of_adjacent_blocks(b, t);
+  hide_block_faces(b, t);
+  push_blockdiff(b, BLOCKTYPE_AIR);
+}
 
-  // hide the faces of the adjacent blocks that no longer can be seen
-  if (hide_adjacent_faces) {
-    // special case for water: if it is water, we only want to hide other water blocks
-    if (t == BLOCKTYPE_WATER) {
-      for (int d = 0; d < DIRECTION_MAX; ++d) {
-        Block adj = get_adjacent_block(b, (Direction)d);
-        BlockType tt = get_blocktype(adj);
-        if (tt == BLOCKTYPE_WATER)
-          remove_blockface(adj, tt, invert_direction((Direction)d));
-      }
-    }
-    // if it is transparent, we want to keep all adjacent block faces
-    else if (!blocktype_is_transparent(t)) {
-      for (int d = 0; d < DIRECTION_MAX; ++d) {
-        Block adj = get_adjacent_block(b, (Direction)d);
-        BlockType tt = get_blocktype(adj);
-        remove_blockface(adj, tt, invert_direction((Direction)d));
-      }
-    }
+static void set_blocktype(Block b, BlockType new_type) {
+  SDL_AtomicLock(&state.block_loader.lock);
+
+  assert(new_type != BLOCKTYPE_NULL);
+
+  if (new_type == BLOCKTYPE_AIR) {
+    remove_block(b, get_blocktype(b));
+    printf("Setting block (%i %i %i) to air\n", b.x, b.y, b.z);
+    goto done;
   }
 
-  // draw sides that face transparent blocks
-  for (int d = 0; d < DIRECTION_MAX; ++d) {
-    BlockType tt = get_blocktype(get_adjacent_block(b, (Direction)d));
+  // if converting from one blocktype to another, then always convert to air first, and then to new_type. for simplicity
+  BlockType old_type = get_blocktype(b);
+  if (old_type != BLOCKTYPE_AIR)
+    remove_block(b, old_type);
 
-    // no need to draw faces against opaque blocks
-    if (!blocktype_is_transparent(tt))
-      continue;
-    // we don't want to draw every side of adjacent water blocks
-    if (t == BLOCKTYPE_WATER && tt == BLOCKTYPE_WATER)
-      continue;
+  push_blockdiff(b, new_type);
 
-    push_block_face(b, t, (Direction)d);
-  }
-  state.block_vertices_dirty = true;
+  hide_block_faces_of_adjacent_blocks(b, new_type);
+  show_block_faces(b, new_type);
+
+  debug_verbose(
+    printf("(%i %i %i)\n", b.x, b.y, b.z);
+    for (int d = 0; d < DIRECTION_MAX; ++d) {
+      u32 *vpos = get_block_vertex_pos(b, (Direction)d);
+      printf("vertex pos: %i\n", vpos ? *vpos : -1);
+    }
+  );
+
+done:
+  SDL_AtomicUnlock(&state.block_loader.lock);
 }
 
 static void push_block_loader_command(BlockLoaderCommand command) {
@@ -1908,7 +1959,7 @@ static void push_block_loader_command(BlockLoaderCommand command) {
     for (int x = r.a.x; x <= r.b.x; ++x)
     for (int y = r.a.y; y <= r.b.y; ++y)
     for (int z = r.a.z; z <= r.b.z; ++z)
-      load_block({x,y,z}, false);
+      show_block_faces({x,y,z}, false);
   } else {
     assert(command.type == BlockLoaderCommand::UNLOAD_BLOCK);
     for (int x = r.a.x; x <= r.b.x; ++x)
@@ -1941,20 +1992,6 @@ static BlockLoaderCommand pop_block_loader_command() {
   if (SDL_SemPost(state.block_loader.num_commands_free))
     sdl_die("Semaphore failure");
   return command;
-}
-
-static void remove_block(Block b) {
-  SDL_AtomicLock(&state.block_loader.lock);
-  unload_block(b);
-  push_blockdiff(b, BLOCKTYPE_AIR);
-  SDL_AtomicUnlock(&state.block_loader.lock);
-}
-
-static void add_block(Block b, BlockType t) {
-  SDL_AtomicLock(&state.block_loader.lock);
-  push_blockdiff(b, t);
-  load_block(b);
-  SDL_AtomicUnlock(&state.block_loader.lock);
 }
 
 /* in: line, plane, plane origin */
@@ -2022,25 +2059,6 @@ template<class T>
 static T* next(VecIter<T> &i) {
   if (i.t == i.end) return 0;
   return i.t++;
-}
-
-static void generate_block_mesh() {
-  block_vertices_reset();
-
-  #if 0
-  FOR_BLOCKS_IN_RANGE_x
-  FOR_BLOCKS_IN_RANGE_y
-  FOR_BLOCKS_IN_RANGE_z {
-    Block b = {x,y,z};
-    set_blocktype_cache(b, calc_blocktype(b));
-  }
-  #endif
-
-  // render block faces that face transparent blocks
-  FOR_BLOCKS_IN_RANGE_x
-  FOR_BLOCKS_IN_RANGE_y
-  FOR_BLOCKS_IN_RANGE_z
-    load_block({x,y,z}, false);
 }
 
 struct Collision {
@@ -2602,37 +2620,6 @@ static void push_ui_quad(v2 x, v2 w, v2 t, v2 tw) {
   state.ui_elements[state.num_ui_elements++] = e+3;
 }
 
-static void gamestate_init() {
-  state.block_vertex_pos.init(0, UINT32_MAX);
-
-  state.fov = PI/2.0f;
-  state.nearz = 0.3f;
-  state.farz = 300.0f;
-  state.player_pos = {1000.0f, 1000.0f, 30.1f};
-  camera_lookat(&state.camera, state.player_pos, state.player_pos + v3{0.0f, SQRT2, -SQRT2});
-  state.block_vertices_dirty = true;
-  state.transparent_block_vertices_dirty = true;
-  state.render_quickmenu = true;
-  state.sun_angle = PI/4.0f;
-
-  state.block_loader.num_commands_free = SDL_CreateSemaphore(MAX_BLOCK_LOADER_COMMANDS);
-  if (!state.block_loader.num_commands_free)
-    sdl_die("Failed to intialize semaphores");
-  state.block_loader.num_commands = SDL_CreateSemaphore(0);
-  if (!state.block_loader.num_commands)
-    sdl_die("Failed to initialize semaphores");
-
-  block_vertices_reset();
-  generate_block_mesh();
-
-  // fill inventory with a bunch of blocks
-  for (int i = 0; i < min(BLOCKTYPES_MAX - 1 - BLOCKTYPE_AIR, (int)ARRAY_LEN(state.inventory)); ++i) {
-    state.inventory[i].type = ITEM_BLOCK;
-    state.inventory[i].block.num = 64;
-    state.inventory[i].block.type = (BlockType)(BLOCKTYPE_AIR + 1 + i);
-  }
-}
-
 struct KeyFrame {
   float at;
   float value;
@@ -2787,7 +2774,7 @@ static void update_player(float dt) {
       debug(if (hits.size != 1) die("Multiple collisions when not gliding? Somethings wrong"));
       BlockType t = get_blocktype(hits[0].block);
       if (t != BLOCKTYPE_BEDROCK && t != BLOCKTYPE_WATER && add_block_to_inventory(t))
-        remove_block(hits[0].block);
+        set_blocktype(hits[0].block, BLOCKTYPE_AIR);
       puts("hit!");
     }
   }
@@ -2812,7 +2799,7 @@ static void update_player(float dt) {
     if (state.inventory[state.selected_item].type != ITEM_BLOCK || state.inventory[state.selected_item].block.num == 0)
       goto skip_blockplace;
 
-    add_block(b, state.inventory[state.selected_item].block.type);
+    set_blocktype(b, state.inventory[state.selected_item].block.type);
 
     --state.inventory[state.selected_item].block.num;
     if (state.inventory[state.selected_item].block.num == 0)
@@ -3267,6 +3254,49 @@ static void render_text() {
   glBindVertexArray(0);
 }
 
+static void block_loader_load_block(Block b) {
+  BlockType t = calc_blocktype(b);
+  set_blocktype_cache(b, t);
+  show_block_faces(b, t);
+}
+
+static void block_loader_unload_block(Block b) {
+  // We know the value should be in the cache since it hasn't been unloaded yet,
+  // so we go to the cache directly
+  BlockType t = get_blocktype_cache(b);
+
+  // remove the visible faces of this block
+  hide_block_faces(b, t);
+
+  // clear cache
+  set_blocktype_cache(b, BLOCKTYPE_NULL);
+}
+
+static void generate_block_mesh() {
+  printf("Loading world..");
+  fflush(stdout);
+  int start_time = SDL_GetTicks();
+
+  block_vertices_reset();
+
+  #if 0
+  FOR_BLOCKS_IN_RANGE_x
+  FOR_BLOCKS_IN_RANGE_y
+  FOR_BLOCKS_IN_RANGE_z {
+    Block b = {x,y,z};
+    set_blocktype_cache(b, calc_blocktype(b));
+  }
+  #endif
+
+  // render block faces that face transparent blocks
+  FOR_BLOCKS_IN_RANGE_x
+  FOR_BLOCKS_IN_RANGE_y
+  FOR_BLOCKS_IN_RANGE_z
+    block_loader_load_block({x,y,z});
+
+  printf("Done in %f seconds\n", (SDL_GetTicks() - start_time) / 1000.0f);
+}
+
 static int blockloader_thread(void*) {
   for (;;) {
     BlockLoaderCommand command = pop_block_loader_command();
@@ -3275,15 +3305,46 @@ static int blockloader_thread(void*) {
       for (int x = command.range.a.x; x <= command.range.b.x; ++x)
       for (int y = command.range.a.y; y <= command.range.b.y; ++y)
       for (int z = command.range.a.z; z <= command.range.b.z; ++z)
-        unload_block({x,y,z}, false);
+        block_loader_unload_block({x,y,z});
     } else {
       assert(command.type == BlockLoaderCommand::LOAD_BLOCK);
       for (int x = command.range.a.x; x <= command.range.b.x; ++x)
       for (int y = command.range.a.y; y <= command.range.b.y; ++y)
       for (int z = command.range.a.z; z <= command.range.b.z; ++z)
-        load_block({x,y,z}, false);
+        block_loader_load_block({x,y,z});
     }
     SDL_AtomicUnlock(&state.block_loader.lock);
+  }
+}
+
+static void gamestate_init() {
+  state.block_vertex_pos.init(0, UINT32_MAX);
+
+  state.fov = PI/2.0f;
+  state.nearz = 0.3f;
+  state.farz = 300.0f;
+  state.player_pos = {1000.0f, 1000.0f, 18.1f};
+  camera_lookat(&state.camera, state.player_pos, state.player_pos + v3{0.0f, SQRT2, -SQRT2});
+  state.block_vertices_dirty = true;
+  state.transparent_block_vertices_dirty = true;
+  state.render_quickmenu = true;
+  state.sun_angle = PI/4.0f;
+
+  state.block_loader.num_commands_free = SDL_CreateSemaphore(MAX_BLOCK_LOADER_COMMANDS);
+  if (!state.block_loader.num_commands_free)
+    sdl_die("Failed to intialize semaphores");
+  state.block_loader.num_commands = SDL_CreateSemaphore(0);
+  if (!state.block_loader.num_commands)
+    sdl_die("Failed to initialize semaphores");
+
+  block_vertices_reset();
+  generate_block_mesh();
+
+  // fill inventory with a bunch of blocks
+  for (int i = 0; i < min(BLOCKTYPES_MAX - 1 - BLOCKTYPE_AIR, (int)ARRAY_LEN(state.inventory)); ++i) {
+    state.inventory[i].type = ITEM_BLOCK;
+    state.inventory[i].block.num = 64;
+    state.inventory[i].block.type = (BlockType)(BLOCKTYPE_AIR + 1 + i);
   }
 }
 
