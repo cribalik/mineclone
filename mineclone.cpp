@@ -14,8 +14,6 @@
 //
 // * give the shadowmap higher precision closer to the player (like a fishbowl kind of thing)
 //
-// * don't limit number of vertices to a fixed amount. The same thing with vertex position lookup
-//
 // * movement through water
 //
 // * bloom
@@ -80,12 +78,15 @@
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "stb_truetype.h"
 
+typedef unsigned int uint;
 typedef uint8_t u8;
 typedef uint16_t u16;
 typedef int16_t i16;
 typedef int32_t i32;
 typedef uint32_t u32;
 typedef uint64_t u64;
+// bools that are word size can be faster
+typedef u32 b32;
 
 // just a tag to say that it's okay if argument is null
 #define OPTIONAL
@@ -1114,62 +1115,47 @@ static T* next(ColonyIter<T,N> &iter) {
 #define For(container) decltype(container)::Iterator it; for(auto _iterator = iter(container); (it = next(_iterator));)
 #endif
 
-// quadratically probed hashmap optimized for PODs and small values
-template<class Key, class Value, int N>
-struct HashMap {
-  STATIC_ASSERT((N & (N-1)) == 0, N_must_be_power_of_2);
+// a map for unique keys. quadratically probed and optimized for PODs and small values.
+template<class Key, class Value, Key nullkey, Key tombstone>
+struct Map {
 
   struct Slot {
     Key key;
     Value value;
   };
 
-  Key nullkey;
-  Key tombstone;
-  Slot slots[N];
+  Slot *slots;
+  int num_slots;
 
-  void init(Key nullkey, Key tombstone) {
-    this->nullkey = nullkey;
-    this->tombstone = tombstone;
+  void init(int initial_size) {
+    if (initial_size & (initial_size-1))
+      die("Map: initial size must be a power of 2");
+
+    this->num_slots = initial_size;
+    this->slots = (Slot*)malloc(initial_size * sizeof(*slots));
   }
 
   // return value may be null
-  Value* get(Key key, size_t hash) {
+  Value* get(Key key) {
     int jump = 1;
-    int i = hash & (N-1);
-    while (jump < N) {
+    int i = key & (num_slots-1);
+    while (jump < num_slots) {
       if (slots[i].key == key)
         return &slots[i].value;
 
       if (slots[i].key == nullkey)
         return 0;
 
-      i = (i+jump) & (N-1);
+      i = (i+jump) & (num_slots-1);
       jump *= 2;
     }
-    debug(die("HashMap full"));
     return 0;
   }
 
-  void set(Key key, size_t hash, Value value) {
-    int jump = 1;
-    int i = hash & (N-1);
-    while (jump < N) {
-      if (slots[i].key == key) {
-        slots[i].value = value;
-        return;
-      }
-
-      if (slots[i].key == nullkey || slots[i].key == tombstone) {
-        slots[i].key = key;
-        slots[i].value = value;
-        return;
-      }
-
-      i = (i+jump) & (N-1);
-      jump *= 2;
-    }
-    debug(die("Hashmap full"));
+  void set(Key key, Value value) {
+    while (!set(slots, num_slots, key, value))
+      extend();
+    assert(*this->get(key) == value);
   }
 
   void remove(Value *value) {
@@ -1177,24 +1163,79 @@ struct HashMap {
     s->key = tombstone;
   }
 
-  void remove(Key key, size_t hash) {
+  void remove(Key key) {
     int jump = 1;
-    int i = hash & (N-1);
-    while (jump < N) {
+    int i = key & (num_slots-1);
+    while (jump < num_slots) {
       if (slots[i].key == key) {
         slots[i].key = tombstone;
-        return;
+        goto done;
       }
 
       if (slots[i].key == nullkey)
-        return;
+        goto done;
 
-      i = (i+jump) & (N-1);
+      i = (i+jump) & (num_slots-1);
       jump *= 2;
     }
-    debug(die("HashMap full"));
-    return;
+    
+    done:
+    assert(!this->get(key));
   }
+
+private:
+  static b32 set(Slot *slots, int num_slots, Key key, Value value) {
+    int jump = 1;
+    int i = key & (num_slots-1);
+    while (jump < num_slots) {
+      if (slots[i].key == key) {
+        slots[i].value = value;
+        return true;
+      }
+
+      if (slots[i].key == nullkey || slots[i].key == tombstone) {
+        slots[i].key = key;
+        slots[i].value = value;
+        return true;
+      }
+
+      i = (i+jump) & (num_slots-1);
+      jump *= 2;
+    }
+    return false;
+  }
+
+  Slot* try_extend(int new_num_slots) {
+    printf("extending hashmap to %i slots\n", new_num_slots);
+    Slot *new_slots = (Slot*)malloc(new_num_slots * sizeof(*new_slots));
+
+    for (int i = 0; i < new_num_slots; ++i)
+      new_slots[i].key = nullkey;
+
+    for (int i = 0; i < num_slots; ++i) {
+      if (slots[i].key == tombstone || slots[i].key == nullkey)
+        continue;
+
+      if (!set(new_slots, new_num_slots, slots[i].key, slots[i].value)) {
+        free(new_slots);
+        return 0;
+      }
+    }
+    return new_slots;
+  }
+
+  void extend() {
+    // alloc new memory
+    int new_num_slots = num_slots*2;
+    Slot *new_slots;
+
+    while (!(new_slots = try_extend(new_num_slots)))
+      new_num_slots *= 2;
+    free(slots);
+    slots = new_slots;
+    num_slots = new_num_slots;
+  }
+
 };
 
 // how many blocks we keep in caches and stuff.
@@ -1349,21 +1390,16 @@ struct GameState {
   struct {
     // block
     #define NUM_BLOCK_SIDES 3 // the number of different textures we have per block. at the moment, it is top,side,bottom
-    #define MAX_BLOCK_VERTICES 1024*1024
-    #define MAX_BLOCK_ELEMENTS (MAX_BLOCK_VERTICES*2)
 
-    BlockVertex block_vertices[MAX_BLOCK_VERTICES];
-    int num_block_vertices;
-    unsigned int block_elements[MAX_BLOCK_ELEMENTS];
-    int num_block_elements;
+    Array<BlockVertex> block_vertices;
+    Array<uint> block_elements;
     // a list of positions in the vertex array that are free
-    int free_faces[MAX_BLOCK_VERTICES];
-    int num_free_faces;
+    Array<int> free_faces;
     // flag so we know if we should resend the vertex data to the gl buffer at the end of the frame
     bool block_vertices_dirty;
 
     // mapping from block face to the position in the vertex array, to optimize removal of blocks. use get_block_vertex_pos to get 
-    HashMap<u32, u32, MAX_BLOCK_VERTICES*2> block_vertex_pos;
+    Map<u32, int, 0, UINT32_MAX> block_vertex_pos;
 
     GLuint gl_block_vao, gl_block_vbo, gl_block_ebo;
     GLuint gl_block_shader;
@@ -1377,12 +1413,9 @@ struct GameState {
 
     // same thing as all of the above, but for transparent blocks! (since they need to be rendered separately, because they look weird otherwise)
     bool transparent_block_vertices_dirty;
-    BlockVertex transparent_block_vertices[MAX_BLOCK_VERTICES];
-    int num_transparent_block_vertices;
-    unsigned int transparent_block_elements[MAX_BLOCK_ELEMENTS];
-    int num_transparent_block_elements;
-    int free_transparent_faces[MAX_BLOCK_VERTICES];
-    int num_free_transparent_faces;
+    Array<BlockVertex> transparent_block_vertices;
+    Array<uint> transparent_block_elements;
+    Array<int> free_transparent_faces;
     GLuint gl_transparent_block_vao, gl_transparent_block_vbo, gl_transparent_block_ebo;
 
     #define BLOCK_TEXTURE_SIZE 16
@@ -1555,25 +1588,25 @@ static u32 block_vertex_pos_index(BlockIndex b, Direction dir) {
 }
 STATIC_ASSERT(NUM_BLOCKS_x*NUM_BLOCKS_y*NUM_BLOCKS_z*DIRECTION_MAX < UINT32_MAX, num_block_faces_fit_in_u32);
 
-static u32* get_block_vertex_pos(BlockIndex b, Direction dir) {
+static int* get_block_vertex_pos(BlockIndex b, Direction dir) {
   u32 key = block_vertex_pos_index(b, dir);
-  u32 *value = state.block_vertex_pos.get(key, key);
+  int *value = state.block_vertex_pos.get(key);
   return value;
 }
 
-static u32* get_block_vertex_pos(Block b, Direction dir) {
+static int* get_block_vertex_pos(Block b, Direction dir) {
   return get_block_vertex_pos(block_to_blockindex(b), dir);
 }
 
-static void remove_block_vertex_pos(u32 *value) {
+static void remove_block_vertex_pos(int *value) {
   state.block_vertex_pos.remove(value);
 }
 
 static void set_block_vertex_pos(BlockIndex b, Direction dir, u32 pos) {
   u32 key = block_vertex_pos_index(b, dir);
-  state.block_vertex_pos.set(key, key, pos);
+  state.block_vertex_pos.set(key, pos);
 
-  assert(*state.block_vertex_pos.get(key, key) == pos);
+  assert(*state.block_vertex_pos.get(key) == pos);
 }
 
 static void blocktype_to_texpos_top(BlockType t, u16 *x0, u16 *y0, u16 *x1, u16 *y1) {
@@ -1608,21 +1641,14 @@ static void push_block_face(Block block, BlockType type, Direction dir) {
   const bool transparent = blocktype_is_transparent(type);
 
   // pick transparent or opaque vertices
-  BlockVertex *block_vertices = transparent ? state.transparent_block_vertices : state.block_vertices;
-  int &num_block_vertices = transparent ? state.num_transparent_block_vertices : state.num_block_vertices;
-  int *free_faces = transparent ? state.free_transparent_faces : state.free_faces;
-  int &num_free_faces = transparent ? state.num_free_transparent_faces : state.num_free_faces;
-  unsigned int *block_elements = transparent ? state.transparent_block_elements : state.block_elements;
-  int &num_block_elements = transparent ? state.num_transparent_block_elements : state.num_block_elements;
+  Array<BlockVertex> &block_vertices = transparent ? state.transparent_block_vertices : state.block_vertices;
+  Array<int> &free_faces = transparent ? state.free_transparent_faces : state.free_faces;
+  Array<uint> &block_elements = transparent ? state.transparent_block_elements : state.block_elements;
 
   BlockIndex bi = block_to_blockindex(block);
   // does face already exist?
-  u32 *vertex_pos = get_block_vertex_pos(bi, dir);
+  int *vertex_pos = get_block_vertex_pos(bi, dir);
   if (vertex_pos)
-    return;
-
-  // too many block_vertices?
-  if (num_block_vertices + 4 >= MAX_BLOCK_VERTICES || num_block_elements + 6 > MAX_BLOCK_ELEMENTS)
     return;
 
   if (transparent) state.transparent_block_vertices_dirty = true;
@@ -1638,17 +1664,17 @@ static void push_block_face(Block block, BlockType type, Direction dir) {
 
   int v, el;
   // check if there are any free vertex slots
-  if (num_free_faces) {
-    int i = free_faces[--num_free_faces];
+  if (free_faces.size) {
+    int i = array_pop(free_faces);
     v = i*4; // 4 block_vertices per face
     el = i*6; // 6 block_elements per face
   }
   else {
     // else push at the end
-    v = num_block_vertices;
-    num_block_vertices += 4;
-    el = num_block_elements;
-    num_block_elements += 6;
+    v = block_vertices.size;
+    array_pushn(block_vertices, 4);
+    el = block_elements.size;
+    array_pushn(block_elements, 6);
   }
   set_block_vertex_pos(bi, dir, v/4);
 
@@ -1708,9 +1734,14 @@ static void push_block_face(Block block, BlockType type, Direction dir) {
 
 static void block_vertices_reset() {
   // make first 4 block_vertices contain the null block
-  state.num_block_vertices = 4; state.num_block_elements = 6;
-  // again, 4 vertices for null block
-  state.num_transparent_block_vertices = 4; state.num_transparent_block_elements = 6;
+  array_resize(state.block_vertices, 4);
+  array_zero(state.block_vertices);
+  array_resize(state.transparent_block_vertices, 4);
+  array_zero(state.transparent_block_vertices);
+  array_resize(state.block_elements, 6);
+  array_zero(state.block_elements);
+  array_resize(state.transparent_block_elements, 6);
+  array_zero(state.transparent_block_elements);
 }
 
 static bool is_block_in_range(Block b) {
@@ -1831,22 +1862,21 @@ static void push_blockdiff(Block b, BlockType t) {
 
 
 static void remove_blockface(Block b, BlockType type, Direction d) {
-  u32 *vertex_pos = get_block_vertex_pos(b, d);
+  int *vertex_pos = get_block_vertex_pos(b, d);
   if (!vertex_pos)
     return;
 
   const bool transparent = blocktype_is_transparent(type);
-  BlockVertex *block_vertices = transparent ? state.transparent_block_vertices : state.block_vertices;
-  int *free_faces = transparent ? state.free_transparent_faces : state.free_faces;
-  int &num_free_faces = transparent ? state.num_free_transparent_faces : state.num_free_faces;
+  Array<BlockVertex> &block_vertices = transparent ? state.transparent_block_vertices : state.block_vertices;
+  Array<int> &free_faces = transparent ? state.free_transparent_faces : state.free_faces;
 
-  if ((int)*vertex_pos >= (transparent ? state.num_transparent_block_vertices : state.num_block_vertices)) {
+  if ((int)*vertex_pos >= block_vertices.size) {
     debug(die("Something went very wrong"));
     return;
   }
 
-  free_faces[num_free_faces++] = *vertex_pos;
-  memset(block_vertices+(*vertex_pos*4), 0, sizeof(*block_vertices)*4);
+  array_push(free_faces, *vertex_pos);
+  array_zero(block_vertices, *vertex_pos*4, 4);
   remove_block_vertex_pos(vertex_pos);
   debug(if (get_block_vertex_pos(b, d)) die("block face (%i %i %i %i) still exists! it has value %i for key %i", b.x, b.y, b.z, (int)d, *get_block_vertex_pos(b, d), block_vertex_pos_index(block_to_blockindex(b), d)));
 
@@ -1873,6 +1903,8 @@ static void show_block_faces(Block b, BlockType t) {
 }
 
 static void hide_block_faces(Block b, BlockType t) {
+  if (t == BLOCKTYPE_AIR)
+    return;
   for (int d = 0; d < DIRECTION_MAX; ++d)
     remove_blockface(b, t, (Direction)d);
 }
@@ -1943,7 +1975,7 @@ static void set_blocktype(Block b, BlockType new_type) {
   debug_verbose(
     printf("(%i %i %i)\n", b.x, b.y, b.z);
     for (int d = 0; d < DIRECTION_MAX; ++d) {
-      u32 *vpos = get_block_vertex_pos(b, (Direction)d);
+      int *vpos = get_block_vertex_pos(b, (Direction)d);
       printf("vertex pos: %i\n", vpos ? *vpos : -1);
     }
   );
@@ -3020,12 +3052,12 @@ static void render_transparent_blocks(const m4 &) {
     // puts("resending block_vertices");
     glBindBuffer(GL_ARRAY_BUFFER, state.gl_transparent_block_vbo);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, state.gl_transparent_block_ebo);
-    glBufferData(GL_ARRAY_BUFFER, state.num_transparent_block_vertices*sizeof(*state.transparent_block_vertices), state.transparent_block_vertices, GL_DYNAMIC_DRAW);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, state.num_transparent_block_elements*sizeof(*state.transparent_block_elements), state.transparent_block_elements, GL_DYNAMIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, state.transparent_block_vertices.size*sizeof(*state.transparent_block_vertices.items), state.transparent_block_vertices.items, GL_DYNAMIC_DRAW);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, state.transparent_block_elements.size*sizeof(*state.transparent_block_elements.items), state.transparent_block_elements.items, GL_DYNAMIC_DRAW);
     state.transparent_block_vertices_dirty = false;
   }
 
-  glDrawElements(GL_TRIANGLES, state.num_transparent_block_elements, GL_UNSIGNED_INT, 0);
+  glDrawElements(GL_TRIANGLES, state.transparent_block_elements.size, GL_UNSIGNED_INT, 0);
   glBindVertexArray(0);
 }
 
@@ -3034,8 +3066,8 @@ static void render_opaque_blocks(m4 viewprojection) {
   if (state.block_vertices_dirty) {
     glBindBuffer(GL_ARRAY_BUFFER, state.gl_block_vbo);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, state.gl_block_ebo);
-    glBufferData(GL_ARRAY_BUFFER, state.num_block_vertices*sizeof(*state.block_vertices), state.block_vertices, GL_DYNAMIC_DRAW);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, state.num_block_elements*sizeof(*state.block_elements), state.block_elements, GL_DYNAMIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, state.block_vertices.size*sizeof(*state.block_vertices.items), state.block_vertices.items, GL_DYNAMIC_DRAW);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, state.block_elements.size*sizeof(*state.block_elements.items), state.block_elements.items, GL_DYNAMIC_DRAW);
     state.block_vertices_dirty = false;
   }
 
@@ -3084,7 +3116,7 @@ static void render_opaque_blocks(m4 viewprojection) {
     // draw
     glBindVertexArray(state.gl_block_vao);
 
-    glDrawElements(GL_TRIANGLES, state.num_block_elements+6, GL_UNSIGNED_INT, 0);
+    glDrawElements(GL_TRIANGLES, state.block_elements.size, GL_UNSIGNED_INT, 0);
     glBindVertexArray(0);
 
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -3124,7 +3156,7 @@ static void render_opaque_blocks(m4 viewprojection) {
   glBindTexture(GL_TEXTURE_2D, state.gl_block_shadowmap);
 
   // draw
-  glDrawElements(GL_TRIANGLES, state.num_block_elements, GL_UNSIGNED_INT, 0);
+  glDrawElements(GL_TRIANGLES, state.block_elements.size, GL_UNSIGNED_INT, 0);
   glBindVertexArray(0);
 }
 
@@ -3318,7 +3350,8 @@ static int blockloader_thread(void*) {
 }
 
 static void gamestate_init() {
-  state.block_vertex_pos.init(0, UINT32_MAX);
+  // TODO: might as well have a much larger value than 1024
+  state.block_vertex_pos.init(4);
 
   state.fov = PI/2.0f;
   state.nearz = 0.3f;

@@ -43,6 +43,11 @@ void array_push(Array<T> &a, T val) {
 }
 
 template<class T>
+T array_pop(Array<T> &a) {
+	return a.items[--a.size];
+}
+
+template<class T>
 void array_insertz(Array<T> &a, int i) {
 	array_insert(a, i, T());
 }
