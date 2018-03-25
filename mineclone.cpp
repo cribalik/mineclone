@@ -769,23 +769,6 @@ static const char *block_fragment_shader = R"FSHADER(
   uniform sampler2D u_texture;
   uniform sampler2D u_shadowmap;
 
-  // see https://medium.com/game-dev-daily/the-srgb-learning-curve-773b7f68cf7a
-  // and https://learnopengl.com/Advanced-Lighting/Gamma-Correction
-  // for nice explanations of gamma
-
-  float to_srgbf(float val) {
-      if(val < 0.0031308f) {
-          val = val * 12.92f;
-      } else {
-          val = 1.055f * pow(val, 1.0f/2.4f) - 0.055f;
-      }
-      return val;
-  }
-
-  vec3 to_srgb(vec3 v) {
-    return vec3(to_srgbf(v.x), to_srgbf(v.y), to_srgbf(v.z));
-  }
-
   float calc_shadow(vec4 pos) {
     // perspective divide
     vec3 p = pos.xyz / pos.w;
@@ -829,8 +812,6 @@ static const char *block_fragment_shader = R"FSHADER(
     // blend with fog
     c = c*(1-f_fog.w) + f_fog.xyz*f_fog.w;
 
-    // convert to srgb
-    c = to_srgb(c);
     g_color = vec4(c, tex.w);
     g_normal = vec4(f_normal, 1);
   }
@@ -917,6 +898,9 @@ static const char *post_processing_fragment_shader = R"FSHADER(
   uniform float u_near;
   uniform float u_far;
 
+  // functions
+
+  // depth is nonlinear and weird due to how projection is done, se want to linearize it so it's a nice value in [0,1]
   // see https://learnopengl.com/Advanced-OpenGL/Depth-testing
   float linearize_depth(float depth) {
     float z = 2.0 * depth - 1.0;
@@ -924,12 +908,31 @@ static const char *post_processing_fragment_shader = R"FSHADER(
     return (z - u_near) / (u_far - u_near);
   }
 
+  // see https://medium.com/game-dev-daily/the-srgb-learning-curve-773b7f68cf7a
+  // and https://learnopengl.com/Advanced-Lighting/Gamma-Correction
+  // for nice explanations of gamma
+  float to_srgbf(float val) {
+    if(val < 0.0031308f) {
+        val = val * 12.92f;
+    } else {
+        val = 1.055f * pow(val, 1.0f/2.4f) - 0.055f;
+    }
+    return val;
+  }
+  vec3 to_srgb(vec3 v) {
+    return vec3(to_srgbf(v.x), to_srgbf(v.y), to_srgbf(v.z));
+  }
+
   void main() {
     vec3 color = texture(u_color, f_tpos).xyz;
     vec3 normal = texture(u_normal, f_tpos).xyz;
     float depth = linearize_depth(texture(u_depth, f_tpos).x); // depth linearized to range [0,1]
 
+    // f_color is the output. we are boring for now and just forward the color
     f_color = vec4(color, 1.0f);
+
+    // DON'T remove this! we need to convert back from linear space to srgb (see the description of to_srgbf)
+    f_color = vec4(to_srgb(f_color.xyz), 1.0);
   }
 )FSHADER";
 
@@ -1008,23 +1011,9 @@ static const char *skybox_fragment_shader = R"FSHADER(
   uniform samplerCube u_skybox;
   uniform float u_ambient;
 
-  float to_srgbf(float val) {
-    if(val < 0.0031308f) {
-        val = val * 12.92f;
-    } else {
-        val = 1.055f * pow(val, 1.0f/2.4f) - 0.055f;
-    }
-    return val;
-  }
-
-  vec3 to_srgb(vec3 v) {
-    return vec3(to_srgbf(v.x), to_srgbf(v.y), to_srgbf(v.z));
-  }
-
   void main() {
     vec3 c = texture(u_skybox, f_tpos).xyz;
     c *= u_ambient;
-    c = to_srgb(c);
     f_color = vec4(c, 1.0f);
   }
   )FSHADER";
