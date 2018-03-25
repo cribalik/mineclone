@@ -3129,6 +3129,8 @@ static void sdl_init() {
 }
 
 static void render_transparent_blocks(const m4 &) {
+  glBindFramebuffer(GL_FRAMEBUFFER, state.gl_gbuffer);
+
   glEnable(GL_BLEND);
   glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
   glEnable(GL_CULL_FACE);
@@ -3140,7 +3142,10 @@ static void render_transparent_blocks(const m4 &) {
   glBindVertexArray(state.gl_transparent_block_vao);
   glActiveTexture(GL_TEXTURE0);
   glBindTexture(GL_TEXTURE_2D, state.gl_block_texture);
-
+  glActiveTexture(GL_TEXTURE1);
+  glBindTexture(GL_TEXTURE_2D, state.gl_block_shadowmap);
+  glActiveTexture(GL_TEXTURE2);
+  glBindTexture(GL_TEXTURE_CUBE_MAP, state.gl_skybox_texture);
 
   if (state.transparent_block_vertices_dirty) {
     // puts("resending block_vertices");
@@ -3150,8 +3155,6 @@ static void render_transparent_blocks(const m4 &) {
     glBufferData(GL_ELEMENT_ARRAY_BUFFER, state.transparent_block_elements.size*sizeof(*state.transparent_block_elements.items), state.transparent_block_elements.items, GL_DYNAMIC_DRAW);
     state.transparent_block_vertices_dirty = false;
   }
-
-  glBindFramebuffer(GL_FRAMEBUFFER, state.gl_gbuffer);
 
   glDrawElements(GL_TRIANGLES, state.transparent_block_elements.size, GL_UNSIGNED_INT, 0);
   glBindVertexArray(0);
