@@ -1365,9 +1365,7 @@ struct GameState {
 
   // block loader buffers
   struct {
-
-    // IMPORTANT: use this lock if you want to manipulate blocks from another thread
-    // other than the block loader thread
+    // IMPORTANT: use this lock if you want to manipulate blocks from another thread other than the block loader thread
     SDL_SpinLock lock;
 
     struct LoadedBlock {
@@ -1389,7 +1387,7 @@ struct GameState {
   // block graphics data
   struct {
     // block
-    #define NUM_BLOCK_SIDES 3 // the number of different textures we have per block. at the moment, it is top,side,bottom
+    #define NUM_BLOCK_SIDES_IN_TEXTURE 3 // the number of different textures we have per block. at the moment, it is top,side,bottom
 
     Array<BlockVertex> block_vertices;
     Array<uint> block_elements;
@@ -1421,7 +1419,7 @@ struct GameState {
     #define BLOCK_TEXTURE_SIZE 16
     // where in the texture buffer is the water texture. We manipulate the texture every frame so we get moving water :)
     r2i water_texture_pos;
-    u8 water_texture_buffer[BLOCK_TEXTURE_SIZE*BLOCK_TEXTURE_SIZE*NUM_BLOCK_SIDES*4]; // 4 because of rgba
+    u8 water_texture_buffer[BLOCK_TEXTURE_SIZE*BLOCK_TEXTURE_SIZE*NUM_BLOCK_SIDES_IN_TEXTURE*4]; // 4 because of rgba
   };
 
   // ui graphics data
@@ -1433,7 +1431,6 @@ struct GameState {
 
     GLuint gl_ui_vao, gl_ui_vbo, gl_ui_ebo;
     GLuint gl_ui_shader;
-    GLuint gl_ui_texture_uniform;
     GLuint gl_ui_texture;
 
     // ui text
@@ -1448,17 +1445,12 @@ struct GameState {
     GLuint gl_text_vao, gl_text_vbo;
     GLuint gl_text_shader;
     GLuint gl_text_texture;
-    GLuint gl_text_texture_uniform;
-    GLuint gl_text_offset_uniform;
-    GLuint gl_text_color_uniform;
   };
 
   // skybox graphics data
   struct {
     GLuint gl_skybox_vao, gl_skybox_vbo;
     GLuint gl_skybox_shader;
-    GLuint gl_skybox_viewprojection_uniform;
-    GLuint gl_skybox_ambient_uniform;
     GLuint gl_skybox_texture;
     #define SKYBOX_TEXTURE_SIZE 128
     u8 skybox_texture_buffer[SKYBOX_TEXTURE_SIZE * SKYBOX_TEXTURE_SIZE * 3]; // 3 because of rgb
@@ -2429,8 +2421,6 @@ static void skybox_gl_buffer_create() {
 
   state.gl_skybox_shader = shader_create(skybox_vertex_shader, skybox_fragment_shader);
   glUseProgram(state.gl_skybox_shader);
-  state.gl_skybox_viewprojection_uniform = glGetUniformLocation(state.gl_skybox_shader, "u_viewprojection");
-  state.gl_skybox_ambient_uniform = glGetUniformLocation(state.gl_skybox_shader, "u_ambient");
 
   // generate texture
   glGenTextures(1, &state.gl_skybox_texture);
@@ -2554,9 +2544,7 @@ static void ui_gl_buffer_create() {
 
   state.gl_ui_shader = shader_create(ui_vertex_shader, ui_fragment_shader);
   glUseProgram(state.gl_ui_shader);
-  state.gl_ui_texture_uniform = glGetUniformLocation(state.gl_ui_shader, "u_texture");
-  if (state.gl_ui_texture_uniform == (GLuint)-1) die("Failed to find uniform location of 'u_texture'");
-  glUniform1i(state.gl_ui_texture_uniform, 0);
+  glUniform1i(glGetUniformLocation(state.gl_ui_shader, "u_texture"), 0);
 
   // load ui textures
   state.gl_ui_texture = state.gl_block_texture;
@@ -2582,9 +2570,6 @@ static void text_gl_buffer_create() {
 
   state.gl_text_shader = shader_create(text_vertex_shader, text_fragment_shader);
   glUseProgram(state.gl_text_shader);
-  state.gl_text_offset_uniform = glGetUniformLocation(state.gl_text_shader, "utextoffset");
-  state.gl_text_color_uniform = glGetUniformLocation(state.gl_text_shader, "utextcolor");
-  state.gl_text_texture_uniform = glGetUniformLocation(state.gl_text_shader, "u_texture");
 
   // load font from file and create texture
   state.text_atlas_size.x = 512;
@@ -2617,7 +2602,7 @@ static void text_gl_buffer_create() {
 
   glActiveTexture(GL_TEXTURE0);
   glBindTexture(GL_TEXTURE_2D, state.gl_text_texture);
-  glUniform1i(state.gl_text_texture_uniform, 0);
+  glUniform1i(glGetUniformLocation(state.gl_text_shader, "u_texture"), 0);
   glTexImage2D(GL_TEXTURE_2D, 0, GL_RED, tex_w, tex_h, 0, GL_RED, GL_UNSIGNED_BYTE, bitmap);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
@@ -2965,10 +2950,10 @@ static void update_water_texture(float dt) {
   static float offset;
   offset += dt * 0.03f;
 
-  const int w = (state.water_texture_pos.x1 - state.water_texture_pos.x0)/NUM_BLOCK_SIDES;
+  const int w = (state.water_texture_pos.x1 - state.water_texture_pos.x0)/NUM_BLOCK_SIDES_IN_TEXTURE;
   const int h = state.water_texture_pos.y1 - state.water_texture_pos.y0;
 
-  for (int block_sides = 0; block_sides < NUM_BLOCK_SIDES; ++block_sides) {
+  for (int block_sides = 0; block_sides < NUM_BLOCK_SIDES_IN_TEXTURE; ++block_sides) {
     u8 *p = &state.water_texture_buffer[block_sides*w*4];
     for (int x = 0; x < w; ++x) {
       for (int y = 0; y < h; ++y) {
@@ -2979,12 +2964,12 @@ static void update_water_texture(float dt) {
         *p++ = (u8)(UINT8_MAX * (0.5f + 0.5f*f));
         *p++ = (u8)(UINT8_MAX * 0.3f);
       }
-      p += 4*w*(NUM_BLOCK_SIDES-1);
+      p += 4*w*(NUM_BLOCK_SIDES_IN_TEXTURE-1);
     }
   }
   glActiveTexture(GL_TEXTURE0);
   glBindTexture(GL_TEXTURE_2D, state.gl_block_texture);
-  glTexSubImage2D(GL_TEXTURE_2D, 0, state.water_texture_pos.x0, state.water_texture_pos.y0, w*NUM_BLOCK_SIDES, h, GL_RGBA, GL_UNSIGNED_BYTE, state.water_texture_buffer);
+  glTexSubImage2D(GL_TEXTURE_2D, 0, state.water_texture_pos.x0, state.water_texture_pos.y0, w*NUM_BLOCK_SIDES_IN_TEXTURE, h, GL_RGBA, GL_UNSIGNED_BYTE, state.water_texture_buffer);
 }
 
 static void update_inventory() {
@@ -3168,8 +3153,8 @@ static void render_skybox(const m4 &view, const m4 &proj) {
   v.d[15] = 1.0f;
 
   m4 vp = proj * v;
-  glUniformMatrix4fv(state.gl_skybox_viewprojection_uniform, 1, GL_TRUE, vp.d);
-  glUniform1f(state.gl_skybox_ambient_uniform, state.ambient_light);
+  glUniformMatrix4fv(glGetUniformLocation(state.gl_skybox_shader, "u_viewprojection"), 1, GL_TRUE, vp.d);
+  glUniform1f(glGetUniformLocation(state.gl_skybox_shader, "u_ambient"), state.ambient_light);
 
   glBindVertexArray(state.gl_skybox_vao);
   glActiveTexture(GL_TEXTURE0);
@@ -3263,18 +3248,18 @@ static void render_text() {
   glBufferData(GL_ARRAY_BUFFER, state.text_vertices.size*sizeof(*state.text_vertices.items), state.text_vertices.items, GL_DYNAMIC_DRAW);
 
   // shadow
-  glUniform4f(state.gl_text_color_uniform, 0.0f, 0.0f, 0.0f, 0.7f);
-  glUniform2f(state.gl_text_offset_uniform, 0.003f, -0.003f);
+  glUniform4f(glGetUniformLocation(state.gl_text_shader, "utextcolor"), 0.0f, 0.0f, 0.0f, 0.7f);
+  glUniform2f(glGetUniformLocation(state.gl_text_shader, "utextoffset"), 0.003f, -0.003f);
   glDrawArrays(GL_TRIANGLES, 0, state.text_vertices.size);
 
   // shadow
-  glUniform4f(state.gl_text_color_uniform, 0.0f, 0.0f, 0.0f, 0.5f);
-  glUniform2f(state.gl_text_offset_uniform, -0.003f, 0.003f);
+  glUniform4f(glGetUniformLocation(state.gl_text_shader, "utextcolor"), 0.0f, 0.0f, 0.0f, 0.5f);
+  glUniform2f(glGetUniformLocation(state.gl_text_shader, "utextoffset"), -0.003f, 0.003f);
   glDrawArrays(GL_TRIANGLES, 0, state.text_vertices.size);
 
   // text
-  glUniform4f(state.gl_text_color_uniform, 0.99f, 0.99f, 0.99f, 1.0f);
-  glUniform2f(state.gl_text_offset_uniform, 0.0f, 0.0f);
+  glUniform4f(glGetUniformLocation(state.gl_text_shader, "utextcolor"), 0.99f, 0.99f, 0.99f, 1.0f);
+  glUniform2f(glGetUniformLocation(state.gl_text_shader, "utextoffset"), 0.0f, 0.0f);
   glDrawArrays(GL_TRIANGLES, 0, state.text_vertices.size);
   glBindVertexArray(0);
 }
