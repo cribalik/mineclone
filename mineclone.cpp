@@ -683,6 +683,7 @@ static const char *block_vertex_shader = R"VSHADER(
 
   // out
   out vec2 f_tpos;
+  out vec3 f_normal;
   out vec3 f_diffuse;
   out vec3 f_ambient;
   out vec4 f_shadowmap_pos;
@@ -744,6 +745,7 @@ static const char *block_vertex_shader = R"VSHADER(
     gl_Position = u_viewprojection * vec4(pos, 1.0f);
     f_shadowmap_pos = u_shadowmap_viewprojection * vec4(pos, 1.0f);
     f_tpos = tpos;
+    f_normal = normal;
   }
   )VSHADER";
 
@@ -753,13 +755,15 @@ static const char *block_fragment_shader = R"FSHADER(
 
   // in
   in vec2 f_tpos;
+  in vec3 f_normal;
   in vec3 f_diffuse;
   in vec3 f_ambient;
   in vec4 f_shadowmap_pos;
   in vec4 f_fog;
 
   // out
-  out vec4 f_color;
+  layout(location = 0) out vec4 g_color;
+  layout(location = 1) out vec4 g_normal;
 
   // uniform
   uniform sampler2D u_texture;
@@ -827,7 +831,8 @@ static const char *block_fragment_shader = R"FSHADER(
 
     // convert to srgb
     c = to_srgb(c);
-    f_color = vec4(c, tex.w);
+    g_color = vec4(c, tex.w);
+    g_normal = vec4(f_normal, 1);
   }
   )FSHADER";
 
@@ -908,6 +913,7 @@ static const char *post_processing_fragment_shader = R"FSHADER(
   // uniform
   uniform sampler2D u_color;
   uniform sampler2D u_depth;
+  uniform sampler2D u_normal;
   uniform float u_near;
   uniform float u_far;
 
@@ -920,10 +926,8 @@ static const char *post_processing_fragment_shader = R"FSHADER(
 
   void main() {
     vec3 color = texture(u_color, f_tpos).xyz;
-
-    // depth linearized to 0-1
-    float depth = linearize_depth(texture(u_depth, f_tpos).x);
-    // TODO: do something fun with the depth value, like depth of field :D
+    vec3 normal = texture(u_normal, f_tpos).xyz;
+    float depth = linearize_depth(texture(u_depth, f_tpos).x); // depth linearized to range [0,1]
 
     f_color = vec4(color, 1.0f);
   }
@@ -1466,7 +1470,7 @@ struct GameState {
     #define SHADOWMAP_WIDTH (1024*2)
     #define SHADOWMAP_HEIGHT (1024*2)
     // post processing stuff, like the G buffer (https://learnopengl.com/Advanced-Lighting/Deferred-Shading)
-    GLuint gl_gbuffer, gl_gbuffer_color_target, gl_gbuffer_depth_target, gl_gbuffer_quad;
+    GLuint gl_gbuffer, gl_gbuffer_color_target, gl_gbuffer_depth_target, gl_gbuffer_normal_target, gl_gbuffer_quad;
     GLuint gl_post_processing_shader;
 
     // same thing as all of the above, but for transparent blocks! (since they need to be rendered separately, because they look weird otherwise)
@@ -2380,28 +2384,32 @@ static void block_gl_buffer_create() {
   // @gbuffer
   {
     glGenFramebuffers(1, &state.gl_gbuffer);
-    glGenTextures(1, &state.gl_gbuffer_color_target);
-    glGenTextures(1, &state.gl_gbuffer_depth_target);
-
     glBindFramebuffer(GL_FRAMEBUFFER, state.gl_gbuffer);
 
     // color
+    glGenTextures(1, &state.gl_gbuffer_color_target);
     glBindTexture(GL_TEXTURE_2D, state.gl_gbuffer_color_target);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB16F, state.screen_width, state.screen_height, 0, GL_RGB, GL_FLOAT, 0);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_MIRRORED_REPEAT); 
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_MIRRORED_REPEAT);  
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, state.gl_gbuffer_color_target, 0);
     // depth
+    glGenTextures(1, &state.gl_gbuffer_depth_target);
     glBindTexture(GL_TEXTURE_2D, state.gl_gbuffer_depth_target);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT, state.screen_width, state.screen_height, 0, GL_DEPTH_COMPONENT, GL_FLOAT, 0);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_MIRRORED_REPEAT); 
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_MIRRORED_REPEAT);  
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, state.gl_gbuffer_depth_target, 0);
-    // TODO: normals?
+    // normals
+    glGenTextures(1, &state.gl_gbuffer_normal_target);
+    glBindTexture(GL_TEXTURE_2D, state.gl_gbuffer_normal_target);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB16F, state.screen_width, state.screen_height, 0, GL_RGB, GL_FLOAT, 0);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, state.gl_gbuffer_normal_target, 0);
+
+    uint outputs[] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
+    glDrawBuffers(ARRAY_LEN(outputs), outputs);
 
     if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
       die("G buffer not complete!");
@@ -2411,6 +2419,7 @@ static void block_gl_buffer_create() {
     glUseProgram(state.gl_post_processing_shader);
     glUniform1i(glGetUniformLocation(state.gl_post_processing_shader, "u_color"), 0);
     glUniform1i(glGetUniformLocation(state.gl_post_processing_shader, "u_depth"), 1);
+    glUniform1i(glGetUniformLocation(state.gl_post_processing_shader, "u_normal"), 2);
 
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glBindTexture(GL_TEXTURE_2D, 0);
@@ -3143,6 +3152,8 @@ static void render_gbuffer() {
   glBindTexture(GL_TEXTURE_2D, state.gl_gbuffer_color_target);
   glActiveTexture(GL_TEXTURE1);
   glBindTexture(GL_TEXTURE_2D, state.gl_gbuffer_depth_target);
+  glActiveTexture(GL_TEXTURE2);
+  glBindTexture(GL_TEXTURE_2D, state.gl_gbuffer_normal_target);
 
   glUseProgram(state.gl_post_processing_shader);
   glUniform1f(glGetUniformLocation(state.gl_post_processing_shader, "u_near"), state.nearz);
@@ -3542,10 +3553,9 @@ mine_main {
 
     // @render
     glBindFramebuffer(GL_FRAMEBUFFER, state.gl_gbuffer);
-    glClearColor(0.0f, 0.8f, 0.6f, 1.0f);
+    glClearColor(0.3f, 0.3f, 0.6f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
-
     glClearColor(0.0f, 0.8f, 0.6f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
