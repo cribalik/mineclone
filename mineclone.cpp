@@ -1427,13 +1427,9 @@ struct GameState {
   // ui graphics data
   struct {
     // ui widgets
-    #define MAX_UI_VERTICES 1024*512
-    #define MAX_UI_ELEMENTS (MAX_UI_VERTICES*2)
 
-    UIVertex ui_vertices[MAX_UI_VERTICES];
-    int num_ui_vertices;
-    unsigned int ui_elements[MAX_UI_ELEMENTS];
-    int num_ui_elements;
+    Array<UIVertex> ui_vertices;
+    Array<uint> ui_elements;
 
     GLuint gl_ui_vao, gl_ui_vbo, gl_ui_ebo;
     GLuint gl_ui_shader;
@@ -1445,8 +1441,7 @@ struct GameState {
     #define RENDERER_LAST_CHAR 128
     #define RENDERER_FONT_SIZE 32.0f
 
-    UIVertex text_vertices[1024];
-    int num_text_vertices;
+    Array<UIVertex> text_vertices;
     v2i text_atlas_size;
     Glyph glyphs[RENDERER_LAST_CHAR - RENDERER_FIRST_CHAR];
 
@@ -2209,7 +2204,7 @@ static float calc_string_width(const char *str) {
 }
 
 static void text_vertices_reset() {
-  state.num_text_vertices = 0;
+  state.text_vertices.size = 0;
 }
 
 static void push_text(const char *str, v2 pos, float height, bool center) {
@@ -2220,15 +2215,12 @@ static void push_text(const char *str, v2 pos, float height, bool center) {
   ipw = 1.0f / state.text_atlas_size.x;
   iph = 1.0f / state.text_atlas_size.y;
 
-  if (state.num_text_vertices + strlen(str) >= ARRAY_LEN(state.text_vertices))
-    return;
-
   if (center) {
     pos.x -= calc_string_width(str) * scale / 2;
     /*pos.y -= height/2.0f;*/ /* Why isn't this working? */
   }
 
-  for (; *str && state.num_text_vertices + 6 < (int)ARRAY_LEN(state.text_vertices); ++str) {
+  for (; *str; ++str) {
     Glyph g = glyph_get(*str);
 
     x = pos.x + g.offset_x*scale;
@@ -2242,7 +2234,7 @@ static void push_text(const char *str, v2 pos, float height, bool center) {
     ty0 = g.y0 * iph;
     ty1 = g.y1 * iph;
 
-    v = state.text_vertices + state.num_text_vertices;
+    v = array_pushn(state.text_vertices, 6);
 
     *v++ = {x, y, tx0, ty0};
     *v++ = {x + w, y, tx1, ty0};
@@ -2251,7 +2243,6 @@ static void push_text(const char *str, v2 pos, float height, bool center) {
     *v++ = {x + w, y, tx1, ty0};
     *v++ = {x + w, y + h, tx1, ty1};
 
-    state.num_text_vertices += 6;
     pos.x += g.advance * scale;
   }
 }
@@ -2639,17 +2630,19 @@ static void text_gl_buffer_create() {
 }
 
 static void push_ui_quad(v2 x, v2 w, v2 t, v2 tw) {
-  const int e = state.num_ui_vertices;
-  state.ui_vertices[state.num_ui_vertices++] = {x.x,     x.y,     t.x,      t.y};
-  state.ui_vertices[state.num_ui_vertices++] = {x.x+w.x, x.y,     t.x+tw.x, t.y};
-  state.ui_vertices[state.num_ui_vertices++] = {x.x+w.x, x.y+w.y, t.x+tw.x, t.y+tw.y};
-  state.ui_vertices[state.num_ui_vertices++] = {x.x,     x.y+w.y, t.x,      t.y+tw.y};
-  state.ui_elements[state.num_ui_elements++] = e+0;
-  state.ui_elements[state.num_ui_elements++] = e+1;
-  state.ui_elements[state.num_ui_elements++] = e+2;
-  state.ui_elements[state.num_ui_elements++] = e+0;
-  state.ui_elements[state.num_ui_elements++] = e+2;
-  state.ui_elements[state.num_ui_elements++] = e+3;
+  const int e = state.ui_vertices.size;
+  UIVertex *v = array_pushn(state.ui_vertices, 4);
+  *v++ = {x.x,     x.y,     t.x,      t.y};
+  *v++ = {x.x+w.x, x.y,     t.x+tw.x, t.y};
+  *v++ = {x.x+w.x, x.y+w.y, t.x+tw.x, t.y+tw.y};
+  *v++ = {x.x,     x.y+w.y, t.x,      t.y+tw.y};
+  uint *el = array_pushn(state.ui_elements, 6);
+  *el++ = e+0;
+  *el++ = e+1;
+  *el++ = e+2;
+  *el++ = e+0;
+  *el++ = e+2;
+  *el++ = e+3;
 }
 
 struct KeyFrame {
@@ -3190,7 +3183,7 @@ static void render_skybox(const m4 &view, const m4 &proj) {
 }
 
 static void render_ui() {
-  state.num_ui_vertices = state.num_ui_elements = 0;
+  state.ui_vertices.size = state.ui_elements.size = 0;
   glDisable(GL_DEPTH_TEST);
 
   if (state.keypressed[KEY_INVENTORY])
@@ -3248,10 +3241,10 @@ static void render_ui() {
 
   glBindBuffer(GL_ARRAY_BUFFER, state.gl_ui_vbo);
   glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, state.gl_ui_ebo);
-  glBufferData(GL_ARRAY_BUFFER, state.num_ui_vertices*sizeof(*state.ui_vertices), state.ui_vertices, GL_DYNAMIC_DRAW);
-  glBufferData(GL_ELEMENT_ARRAY_BUFFER, state.num_ui_elements*sizeof(*state.ui_elements), state.ui_elements, GL_DYNAMIC_DRAW);
+  glBufferData(GL_ARRAY_BUFFER, state.ui_vertices.size*sizeof(*state.ui_vertices.items), state.ui_vertices.items, GL_DYNAMIC_DRAW);
+  glBufferData(GL_ELEMENT_ARRAY_BUFFER, state.ui_elements.size*sizeof(*state.ui_elements.items), state.ui_elements.items, GL_DYNAMIC_DRAW);
 
-  glDrawElements(GL_TRIANGLES, state.num_ui_elements, GL_UNSIGNED_INT, 0);
+  glDrawElements(GL_TRIANGLES, state.ui_elements.size, GL_UNSIGNED_INT, 0);
   glBindVertexArray(0);
 }
 
@@ -3267,22 +3260,22 @@ static void render_text() {
   glActiveTexture(GL_TEXTURE0);
   glBindTexture(GL_TEXTURE_2D, state.gl_text_texture);
   glBindBuffer(GL_ARRAY_BUFFER, state.gl_text_vbo);
-  glBufferData(GL_ARRAY_BUFFER, state.num_text_vertices*sizeof(*state.text_vertices), state.text_vertices, GL_DYNAMIC_DRAW);
+  glBufferData(GL_ARRAY_BUFFER, state.text_vertices.size*sizeof(*state.text_vertices.items), state.text_vertices.items, GL_DYNAMIC_DRAW);
 
   // shadow
   glUniform4f(state.gl_text_color_uniform, 0.0f, 0.0f, 0.0f, 0.7f);
   glUniform2f(state.gl_text_offset_uniform, 0.003f, -0.003f);
-  glDrawArrays(GL_TRIANGLES, 0, state.num_text_vertices);
+  glDrawArrays(GL_TRIANGLES, 0, state.text_vertices.size);
 
   // shadow
   glUniform4f(state.gl_text_color_uniform, 0.0f, 0.0f, 0.0f, 0.5f);
   glUniform2f(state.gl_text_offset_uniform, -0.003f, 0.003f);
-  glDrawArrays(GL_TRIANGLES, 0, state.num_text_vertices);
+  glDrawArrays(GL_TRIANGLES, 0, state.text_vertices.size);
 
   // text
   glUniform4f(state.gl_text_color_uniform, 0.99f, 0.99f, 0.99f, 1.0f);
   glUniform2f(state.gl_text_offset_uniform, 0.0f, 0.0f);
-  glDrawArrays(GL_TRIANGLES, 0, state.num_text_vertices);
+  glDrawArrays(GL_TRIANGLES, 0, state.text_vertices.size);
   glBindVertexArray(0);
 }
 
