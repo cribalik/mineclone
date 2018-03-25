@@ -2333,15 +2333,14 @@ static GLuint load_block_texture(const char *filename) {
 static void block_gl_buffer_create() {
   // create block vbo
   {
-    GLuint vao, ebo, vbo;
-    glGenVertexArrays(1, &vao);
-    glGenBuffers(1, &vbo);
-    glGenBuffers(1, &ebo);
+    glGenVertexArrays(1, &state.gl_block_vao);
+    glGenBuffers(1, &state.gl_block_vbo);
+    glGenBuffers(1, &state.gl_block_ebo);
 
-    glBindVertexArray(vao);
+    glBindVertexArray(state.gl_block_vao);
 
-    glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
+    glBindBuffer(GL_ARRAY_BUFFER, state.gl_block_vbo);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, state.gl_block_ebo);
 
     glEnableVertexAttribArray(0);
     glEnableVertexAttribArray(1);
@@ -2350,13 +2349,15 @@ static void block_gl_buffer_create() {
     glVertexAttribPointer(1, 2, GL_UNSIGNED_SHORT, GL_TRUE, sizeof(BlockVertex), (GLvoid*)offsetof(BlockVertex, tex));
     glVertexAttribIPointer(2, 1, GL_UNSIGNED_BYTE, sizeof(BlockVertex), (GLvoid*)offsetof(BlockVertex, direction));
 
-    state.gl_block_vao = vao;
-    state.gl_block_vbo = vbo;
-    state.gl_block_ebo = ebo;
-
+    // create shader
     state.gl_block_shader  = shader_create(block_vertex_shader, block_fragment_shader);
     glUseProgram(state.gl_block_shader);
 
+    // set constant uniforms
+    glUniform1f(glGetUniformLocation(state.gl_block_shader, "u_fog_near"), 100.0f);
+    glUniform1f(glGetUniformLocation(state.gl_block_shader, "u_fog_far"), 130.0f);
+
+    // set texture uniforms
     glUniform1i(glGetUniformLocation(state.gl_block_shader, "u_texture"), 0);
     glUniform1i(glGetUniformLocation(state.gl_block_shader, "u_shadowmap"), 1);
     glUniform1i(glGetUniformLocation(state.gl_block_shader, "u_skybox"), 2);
@@ -2405,7 +2406,7 @@ static void block_gl_buffer_create() {
     if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
       die("G buffer not complete!");
 
-    // set the texture indices
+    // set texture uniforms
     state.gl_post_processing_shader = shader_create(post_processing_vertex_shader, post_processing_fragment_shader);
     glUseProgram(state.gl_post_processing_shader);
     glUniform1i(glGetUniformLocation(state.gl_post_processing_shader, "u_color"), 0);
@@ -2418,43 +2419,39 @@ static void block_gl_buffer_create() {
 
   // create shadowmap FBO
   {
-    GLuint fbo;
     state.gl_shadowmap_shader = shader_create(shadowmap_vertex_shader, shadowmap_fragment_shader);
-    glGenFramebuffers(1, &fbo);
-    GLuint shadowmap;
-    glGenTextures(1, &shadowmap);
-    glBindTexture(GL_TEXTURE_2D, shadowmap);
+    glGenFramebuffers(1, &state.gl_block_shadowmap_fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, state.gl_block_shadowmap_fbo);
+
+    // depth
+    glGenTextures(1, &state.gl_block_shadowmap);
+    glBindTexture(GL_TEXTURE_2D, state.gl_block_shadowmap);
     glTexImage2D (GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT, SHADOWMAP_WIDTH, SHADOWMAP_HEIGHT, 0, GL_DEPTH_COMPONENT, GL_FLOAT, 0);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT); 
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);  
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, state.gl_block_shadowmap, 0);
 
-    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, shadowmap, 0);
     glDrawBuffer(GL_NONE);
     glReadBuffer(GL_NONE);
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
     if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
       die("Framebuffer not complete!");
 
-    state.gl_block_shadowmap_fbo = fbo;
-    state.gl_block_shadowmap = shadowmap;
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
   }
-
 
   // create transparent block vbo
   {
-    GLuint vao, vbo, ebo;
-    glGenVertexArrays(1, &vao);
-    glGenBuffers(1, &vbo);
-    glGenBuffers(1, &ebo);
+    glGenVertexArrays(1, &state.gl_transparent_block_vao);
+    glGenBuffers(1, &state.gl_transparent_block_vbo);
+    glGenBuffers(1, &state.gl_transparent_block_ebo);
 
-    glBindVertexArray(vao);
+    glBindVertexArray(state.gl_transparent_block_vao);
 
-    glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
+    glBindBuffer(GL_ARRAY_BUFFER, state.gl_transparent_block_vbo);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, state.gl_transparent_block_ebo);
 
     glEnableVertexAttribArray(0);
     glEnableVertexAttribArray(1);
@@ -2463,15 +2460,12 @@ static void block_gl_buffer_create() {
     glVertexAttribPointer(1, 2, GL_UNSIGNED_SHORT, GL_TRUE, sizeof(BlockVertex), (GLvoid*)offsetof(BlockVertex, tex));
     glVertexAttribIPointer(2, 1, GL_UNSIGNED_BYTE, sizeof(BlockVertex), (GLvoid*)offsetof(BlockVertex, direction));
 
-    state.gl_transparent_block_vao = vao;
-    state.gl_transparent_block_vbo = vbo;
-    state.gl_transparent_block_ebo = ebo;
-
     glBindVertexArray(0);
   }
 }
 
 static void skybox_gl_buffer_create() {
+  // skybox vertices
   float vertices[] = {
       -1.0f,  1.0f, -1.0f,
       -1.0f, -1.0f, -1.0f,
@@ -2516,28 +2510,27 @@ static void skybox_gl_buffer_create() {
        1.0f, -1.0f,  1.0f
   };
 
-  GLuint vao, vbo;
+  // create and bind
+  glGenVertexArrays(1, &state.gl_skybox_vao);
+  glGenBuffers(1, &state.gl_skybox_vbo);
+  glBindVertexArray(state.gl_skybox_vao);
+  glBindBuffer(GL_ARRAY_BUFFER, state.gl_skybox_vbo);
 
-  glGenVertexArrays(1, &vao);
-  glGenBuffers(1, &vbo);
-
-  glBindVertexArray(vao);
-  glBindBuffer(GL_ARRAY_BUFFER, vbo);
-
+  // send data
   glEnableVertexAttribArray(0);
   glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3*sizeof(float), 0);
-
   glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
 
+  // unbind
   glBindVertexArray(0);
   glBindBuffer(GL_ARRAY_BUFFER, 0);
 
+  // create shader
   state.gl_skybox_shader = shader_create(skybox_vertex_shader, skybox_fragment_shader);
   glUseProgram(state.gl_skybox_shader);
 
   // generate texture
   glGenTextures(1, &state.gl_skybox_texture);
-  glActiveTexture(GL_TEXTURE0);
   glBindTexture(GL_TEXTURE_CUBE_MAP, state.gl_skybox_texture);
   // const char *filenames[] = {
   //   "right.jpg",
@@ -2548,6 +2541,7 @@ static void skybox_gl_buffer_create() {
   //   "back.jpg",
   // };
 
+  // magic math to generate a pretty skybox
   const float y_offset[] = {0.0f,  0.0f, -0.5f, 0.5f, 0.0f, 1.0f};
   const float x_offset[] = {0.5f, -0.5f,  0.0f, 0.0f, 0.0f, 0.0f};
   const float r0 = 0.0f,
@@ -2581,58 +2575,16 @@ static void skybox_gl_buffer_create() {
       state.skybox_texture_buffer[bi+2] = b;
     }
 
-    // draw sun
-    #if 0
-    if (face == 4) {
-      for (int x = SKYBOX_TEXTURE_SIZE*3/8; x < SKYBOX_TEXTURE_SIZE*5/8; ++x)
-      for (int y = SKYBOX_TEXTURE_SIZE*3/8; y < SKYBOX_TEXTURE_SIZE*5/8; ++y) {
-        const float dx = x - SKYBOX_TEXTURE_SIZE/2;
-        const float dy = y - SKYBOX_TEXTURE_SIZE/2;
-        const float d = sqrtf(dx*dx + dy*dy);
-        float t = d/SKYBOX_TEXTURE_SIZE*8;
-        t = clamp(t, 0.0f, 1.0f);
-        t = pow(t, 5);
-        t = clamp(t, 0.2f, 1.0f);
-        const int bi = (y*SKYBOX_TEXTURE_SIZE + x)*3;
-        const float r = 0.9647f;
-        const float g = 0.82745f;
-        const float b = 0.396078f;
-        t = 0.0f;
-        state.skybox_texture_buffer[bi] = UINT8_MAX * lerp(t, r, (float)state.skybox_texture_buffer[bi]/UINT8_MAX);
-        state.skybox_texture_buffer[bi+1] = UINT8_MAX * lerp(t, g, (float)state.skybox_texture_buffer[bi+1]/UINT8_MAX);
-        state.skybox_texture_buffer[bi+2] = UINT8_MAX * lerp(t, b, (float)state.skybox_texture_buffer[bi+2]/UINT8_MAX);
-      }
-    }
-    #endif
-
     glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + face,
                  0, GL_RGB, SKYBOX_TEXTURE_SIZE, SKYBOX_TEXTURE_SIZE, 0, GL_RGB,
                  GL_UNSIGNED_BYTE,
                  state.skybox_texture_buffer);
-
-    // in case we want to use an image texture instead, use this code
-    #if 0
-    int w,h,n;
-    stbi_set_flip_vertically_on_load(1);
-    u8 *data = stbi_load(filenames[face], &w, &h, &n, 3);
-    if (!data) die("Could not load texture %s", filenames[face]);
-    if (n != 3) die("Texture %s must only be rgb, but had %face channels\n", filenames[face], n);
-
-    glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + face,
-                 0, GL_RGB, w, h, 0, GL_RGB, GL_UNSIGNED_BYTE,
-                 data);
-
-    stbi_image_free(data);
-    #endif
   }
   glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
   glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
   glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
   glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
   glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);  
-
-  state.gl_skybox_vao = vao;
-  state.gl_skybox_vbo = vbo;
 }
 
 static void ui_gl_buffer_create() {
@@ -3277,8 +3229,6 @@ static void render_opaque_blocks(m4 viewprojection) {
   glEnable(GL_DEPTH_TEST);
 
   // camera
-  glUniform1f(glGetUniformLocation(state.gl_block_shader, "u_fog_near"), 100.0f);
-  glUniform1f(glGetUniformLocation(state.gl_block_shader, "u_fog_far"), 130.0f);
   glUniform3f(glGetUniformLocation(state.gl_block_shader, "u_camerapos"), state.camera_pos.x, state.camera_pos.y, state.camera_pos.z);
   glUniformMatrix4fv(glGetUniformLocation(state.gl_block_shader, "u_viewprojection"), 1, GL_TRUE, viewprojection.d);
   glUniformMatrix4fv(glGetUniformLocation(state.gl_block_shader, "u_shadowmap_viewprojection"), 1, GL_TRUE, shadowmap_viewprojection.d);
