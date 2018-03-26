@@ -683,6 +683,7 @@ static const char *block_vertex_shader = R"VSHADER(
 
   // out
   out vec2 f_tpos;
+  out vec3 f_position;
   out vec3 f_normal;
   out vec3 f_diffuse;
   out vec3 f_ambient;
@@ -746,6 +747,7 @@ static const char *block_vertex_shader = R"VSHADER(
     f_shadowmap_pos = u_shadowmap_viewprojection * vec4(pos, 1.0f);
     f_tpos = tpos;
     f_normal = normal;
+    f_position = pos - u_camerapos;
   }
   )VSHADER";
 
@@ -755,6 +757,7 @@ static const char *block_fragment_shader = R"FSHADER(
 
   // in
   in vec2 f_tpos;
+  in vec3 f_position;
   in vec3 f_normal;
   in vec3 f_diffuse;
   in vec3 f_ambient;
@@ -764,6 +767,7 @@ static const char *block_fragment_shader = R"FSHADER(
   // out
   layout(location = 0) out vec4 g_color;
   layout(location = 1) out vec4 g_normal;
+  layout(location = 2) out vec4 g_position;
 
   // uniform
   uniform sampler2D u_texture;
@@ -814,6 +818,7 @@ static const char *block_fragment_shader = R"FSHADER(
 
     g_color = vec4(c, tex.w);
     g_normal = vec4(f_normal, 1);
+    g_position = vec4(f_position, 1.0);
   }
   )FSHADER";
 
@@ -895,6 +900,7 @@ static const char *post_processing_fragment_shader = R"FSHADER(
   uniform sampler2D u_color;
   uniform sampler2D u_depth;
   uniform sampler2D u_normal;
+  uniform sampler2D u_position;
   uniform float u_near;
   uniform float u_far;
 
@@ -926,6 +932,7 @@ static const char *post_processing_fragment_shader = R"FSHADER(
   void main() {
     vec3 color = texture(u_color, f_tpos).xyz;
     vec3 normal = texture(u_normal, f_tpos).xyz;
+    vec3 position = texture(u_position, f_tpos).xyz;
     float depth = linearize_depth(texture(u_depth, f_tpos).x); // depth linearized to range [0,1]
 
     // f_color is the output. we are boring for now and just forward the color
@@ -1459,7 +1466,7 @@ struct GameState {
     #define SHADOWMAP_WIDTH (1024*2)
     #define SHADOWMAP_HEIGHT (1024*2)
     // post processing stuff, like the G buffer (https://learnopengl.com/Advanced-Lighting/Deferred-Shading)
-    GLuint gl_gbuffer, gl_gbuffer_color_target, gl_gbuffer_depth_target, gl_gbuffer_normal_target, gl_gbuffer_quad;
+    GLuint gl_gbuffer, gl_gbuffer_color_target, gl_gbuffer_depth_target, gl_gbuffer_normal_target, gl_gbuffer_position_target;
     GLuint gl_post_processing_shader;
 
     // same thing as all of the above, but for transparent blocks! (since they need to be rendered separately, because they look weird otherwise)
@@ -2396,8 +2403,15 @@ static void block_gl_buffer_create() {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, state.gl_gbuffer_normal_target, 0);
+    // position
+    glGenTextures(1, &state.gl_gbuffer_position_target);
+    glBindTexture(GL_TEXTURE_2D, state.gl_gbuffer_position_target);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB16F, state.screen_width, state.screen_height, 0, GL_RGB, GL_FLOAT, 0);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT2, GL_TEXTURE_2D, state.gl_gbuffer_position_target, 0);
 
-    uint outputs[] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
+    uint outputs[] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2};
     glDrawBuffers(ARRAY_LEN(outputs), outputs);
 
     if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
@@ -2409,6 +2423,7 @@ static void block_gl_buffer_create() {
     glUniform1i(glGetUniformLocation(state.gl_post_processing_shader, "u_color"), 0);
     glUniform1i(glGetUniformLocation(state.gl_post_processing_shader, "u_depth"), 1);
     glUniform1i(glGetUniformLocation(state.gl_post_processing_shader, "u_normal"), 2);
+    glUniform1i(glGetUniformLocation(state.gl_post_processing_shader, "u_position"), 3);
 
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glBindTexture(GL_TEXTURE_2D, 0);
@@ -3137,12 +3152,16 @@ static void flush_quads(GLuint shader) {
 static void render_gbuffer() {
   // draw a big quad over the screen with the gbuffer texture
   push_quad({0.0f, 0.0f}, {1.0f, 1.0f}, {0.0f, 0.0f}, {1.0f, 1.0f});
+
+  // bind textures
   glActiveTexture(GL_TEXTURE0);
   glBindTexture(GL_TEXTURE_2D, state.gl_gbuffer_color_target);
   glActiveTexture(GL_TEXTURE1);
   glBindTexture(GL_TEXTURE_2D, state.gl_gbuffer_depth_target);
   glActiveTexture(GL_TEXTURE2);
   glBindTexture(GL_TEXTURE_2D, state.gl_gbuffer_normal_target);
+  glActiveTexture(GL_TEXTURE3);
+  glBindTexture(GL_TEXTURE_2D, state.gl_gbuffer_position_target);
 
   glUseProgram(state.gl_post_processing_shader);
   glUniform1f(glGetUniformLocation(state.gl_post_processing_shader, "u_near"), state.nearz);
