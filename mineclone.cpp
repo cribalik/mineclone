@@ -48,7 +48,7 @@
 // * torches - calculate lighting per block (voxel lighting)
 //
 // * reflect and refract lighting from skybox? or if skybox is not interesting enough, maybe we can do something cool using the surrounding blocks?
-//   
+//
 ////
 
 #ifdef _MSC_VER
@@ -171,6 +171,8 @@ static FILE* mine_fopen(const char *filename, const char *mode) {
 }
 
 // @math
+
+#define sign(x) ((x) < 0.0f ? -1.0f : 1.0f)
 
 static bool is_power_of_2(int x) {
   return (x & (x-1)) == 0;
@@ -1097,6 +1099,15 @@ static bool blocktype_is_transparent(BlockType t) {
   }
 }
 
+static bool blocktype_is_destructible(BlockType t) {
+  switch (t) {
+    case BLOCKTYPE_BEDROCK:
+    case BLOCKTYPE_WATER:
+      return false;
+    default:
+      return true;
+  }
+}
 enum Direction {
   DIRECTION_UP, DIRECTION_X, DIRECTION_Y, DIRECTION_MINUS_Y, DIRECTION_MINUS_X, DIRECTION_DOWN, DIRECTION_MAX
 };
@@ -1528,9 +1539,12 @@ struct GameState {
 
   // player data
   struct {
+    v3 player_hitbox;
     v3 player_vel;
     v3 player_pos;
     bool player_on_ground;
+    bool god_mode;
+    bool player_flying;
   };
 
   // inventory stuff
@@ -1839,8 +1853,7 @@ static BlockType generate_blocktype(Block b) {
 // WARNING: only call this if you explicitly want to bypass the cache, otherwise use get_blocktype
 static BlockType calc_blocktype(Block b) {
   // an early out for speed
-	const int bottomLevel = 0;
-  if (b.z <= bottomLevel)
+  if (b.z <= 0)
     return BLOCKTYPE_BEDROCK;
 
   // first check changes, which are set when someone removes or places a block
@@ -2259,7 +2272,12 @@ static void reset_text_vertices() {
   state.text_vertices.size = 0;
 }
 
-static void push_text(const char *str, v2 pos, float height, bool center) {
+enum TextAlignment {
+  ALIGN_LEFT,
+  ALIGN_CENTER,
+  ALIGN_RIGHT
+};
+static void push_text(const char *str, v2 pos, float height, TextAlignment align) {
   float h,w, scale, ipw,iph, x,y, tx0,ty0,tx1,ty1;
   QuadVertex *v;
 
@@ -2267,9 +2285,16 @@ static void push_text(const char *str, v2 pos, float height, bool center) {
   ipw = 1.0f / state.text_atlas_size.x;
   iph = 1.0f / state.text_atlas_size.y;
 
-  if (center) {
-    pos.x -= calc_string_width(str) * scale / 2;
-    /*pos.y -= height/2.0f;*/ /* Why isn't this working? */
+  switch (align) {
+    case ALIGN_LEFT:
+      break;
+    case ALIGN_CENTER:
+      pos.x -= calc_string_width(str) * scale / 2;
+      /*pos.y -= height/2.0f;*/ /* Why isn't this working? */
+      break;
+    case ALIGN_RIGHT:
+      pos.x -= calc_string_width(str) * scale;
+      break;
   }
 
   for (; *str; ++str) {
@@ -2802,14 +2827,15 @@ static void update_player(float dt) {
   const float GRAVITY = 0.015f;
   const float JUMPPOWER = 0.21f;
   v3 v = state.player_vel;
-  static bool flying = true;
-  if (flying) {
+  if (state.player_flying) {
     if (state.keyisdown[KEY_FORWARD]) v += dt*camera_forward(&state.camera, ACCELERATION);
     if (state.keyisdown[KEY_BACKWARD]) v += dt*camera_backward(&state.camera, ACCELERATION);
     if (state.keyisdown[KEY_LEFT]) v += dt*camera_strafe_left(&state.camera, ACCELERATION);
     if (state.keyisdown[KEY_RIGHT]) v += dt*camera_strafe_right(&state.camera, ACCELERATION);
     if (state.keyisdown[KEY_FLYUP]) v += dt*camera_up(&state.camera, ACCELERATION);
     if (state.keyisdown[KEY_FLYDOWN]) v += dt*camera_down(&state.camera, ACCELERATION);
+    if (state.keypressed[KEY_JUMP])
+      state.player_flying = false;
     // proportional drag (air resistance)
     v.x *= powf(0.88f, dt);
     v.y *= powf(0.88f, dt);
@@ -2822,18 +2848,16 @@ static void update_player(float dt) {
     if (state.keypressed[KEY_JUMP]) {
       v.z = JUMPPOWER;
       if (!state.player_on_ground)
-        flying = true;
+        state.player_flying = true;
     }
     v.z += -dt*GRAVITY;
     // proportional drag (air resistance)
     v.x *= powf(0.8f, dt);
     v.y *= powf(0.8f, dt);
     // constant drag (friction against ground kinda)
-    v3 n = normalize(v);
-    v3 drag = -dt*v3{0.001f*n.x, 0.001f*n.y, 0.0f};
-    if (fabsf(drag.x) > fabsf(v.x)) drag.x = -v.x;
-    if (fabsf(drag.y) > fabsf(v.y)) drag.y = -v.y;
-    v += drag;
+    v2 drag = {at_most(0.001f, fabsf(v.x)), at_most(0.001f, fabsf(v.y))};
+    v.x -= sign(v.x) * drag.x;
+    v.y -= sign(v.y) * drag.y;
   }
   state.player_vel = v;
 
@@ -2841,12 +2865,12 @@ static void update_player(float dt) {
   state.camera_pos = state.player_pos + CAMERA_OFFSET_FROM_PLAYER;
 
   // collision
-  Vec<Collision> hits = collision(state.player_pos, state.player_pos + state.player_vel*dt, dt, {0.8f, 0.8f, 1.5f}, &state.player_pos, &state.player_vel, true);
+  Vec<Collision> hits = collision(state.player_pos, state.player_pos + state.player_vel*dt, dt, state.player_hitbox, &state.player_pos, &state.player_vel, true);
   state.player_on_ground = false;
   For(hits) {
     if (it->normal.z > 0.9f) {
       state.player_on_ground = true;
-      flying = false;
+      state.player_flying = false;
       break;
     }
   }
@@ -2864,8 +2888,11 @@ static void update_player(float dt) {
     if (hits.size) {
       debug(if (hits.size != 1) die("Multiple collisions when not gliding? Somethings wrong"));
       BlockType t = get_blocktype(hits[0].block);
-      if (t != BLOCKTYPE_BEDROCK && t != BLOCKTYPE_WATER && add_block_to_inventory(t))
-        set_blocktype(hits[0].block, BLOCKTYPE_AIR);
+      if (state.god_mode || blocktype_is_destructible(t)) {
+        bool success = add_block_to_inventory(t);
+        if (success)
+          set_blocktype(hits[0].block, BLOCKTYPE_AIR);
+      }
       puts("hit!");
     }
   }
@@ -3349,9 +3376,15 @@ static void render_ui() {
       if (i == state.selected_item)
         xx -= box_margin_y/2, yy -= box_margin_y/2, bs += box_margin_y;
       push_quad({xx, yy}, {bs, bs}, {tx, ty}, {tw, th});
-      push_text(int_to_str(state.inventory[i].block.num), {x + box_size - 0.01f, y + box_size - 0.01f}, 0.05f, true);
+      push_text(int_to_str(state.inventory[i].block.num), {x + box_size - 0.01f, y + box_size - 0.01f}, 0.05f, ALIGN_CENTER);
     }
   }
+
+  v2 status_pos = {0.95f, 0.95f};
+  if (state.player_flying)
+    push_text("Flying", status_pos, 0.05f, ALIGN_RIGHT);
+  else
+    push_text(state.player_on_ground ? "Ground" : "Air", status_pos, 0.05f, ALIGN_RIGHT);
 
   // texture
   glActiveTexture(GL_TEXTURE0);
@@ -3455,8 +3488,12 @@ static int blockloader_thread(void*) {
 }
 
 static void gamestate_init() {
+  state.player_hitbox = {0.8f, 0.8f, 1.5f};
+
   // TODO: might as well have a much larger value than 1024
   state.block_vertex_pos.init(4);
+
+  // state.god_mode = true;
 
   state.fov = PI/2.0f;
   state.nearz = 0.3f;
