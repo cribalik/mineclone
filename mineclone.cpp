@@ -7,12 +7,11 @@
 // * Fix jittering shadows by moving light in texel-sized increments (https://msdn.microsoft.com/en-us/library/ee416324(v=vs.85).aspx)
 //
 // * optimize loading blocks & persist block changes to disk:
-//   - divide world into multiple buffer objects?
+//   - Get rid of the blocktype cache for the entire world, and only use it when loading blocks and generating mesh, since it is really only needed then.
+//   - divide block mesh vertices into multiple buffer objects?
 //   - good datastructure for storing block changes
 //
 // * fix perlin noise at negative coordinates
-//
-// * FIX: we can probably have some strange behavior if the block loader lags behind too much
 //
 // * give the shadowmap close to player higher precision (like a fishbowl kind of thing?)
 //
