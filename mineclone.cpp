@@ -75,6 +75,13 @@
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "stb_truetype.h"
 
+// uncomment to enable vr (only on Windows)
+#define VR_ENABLED
+#if defined(OS_WINDOWS) && defined(VR_ENABLED)
+  #include "OpenVR/openvr.h"
+#endif
+
+
 typedef unsigned int uint;
 typedef uint8_t u8;
 typedef uint16_t u16;
@@ -785,25 +792,25 @@ static const char *block_fragment_shader = R"FSHADER(
     float bias = 0.0f;
 
     // change to 1 to enable (very rudamentary) pcf, see https://learnopengl.com/Advanced-Lighting/Shadows/Shadow-Mapping
-#if 0
-    float shadow = 0.0;
-    for(int x = -1; x <= 1; ++x)
-    {
-        for(int y = -1; y <= 1; ++y)
-        {
-            float pcfDepth = texture(u_shadowmap, p.xy + vec2(x, y) * texelSize).r; 
-            shadow += p.z - bias > pcfDepth ? 1.0 : 0.0;        
-        }    
+  #if 0
+      float shadow = 0.0;
+      for(int x = -1; x <= 1; ++x)
+      {
+          for(int y = -1; y <= 1; ++y)
+          {
+              float pcfDepth = texture(u_shadowmap, p.xy + vec2(x, y) * texelSize).r; 
+              shadow += p.z - bias > pcfDepth ? 1.0 : 0.0;        
+          }    
+      }
+      shadow /= 9.0;
+      return 1.0 - shadow;
+
+  #else
+
+      return depth < p.z - bias ? 0.0f : 1.0f;
+
+  #endif
     }
-    shadow /= 9.0;
-    return 1.0 - shadow;
-
-#else
-
-    return depth < p.z - bias ? 0.0f : 1.0f;
-
-#endif
-  }
 
   void main() {
     vec3 light = vec3(0.0f);
@@ -1404,6 +1411,14 @@ struct GameState {
     float screen_ratio;
     int screen_width, screen_height;
   };
+
+  // vr stuff
+  #ifdef VR_ENABLED
+  struct {
+    vr::IVRSystem *system;
+    vr::IVRCompositor *compositor;
+  } vr;
+  #endif
 
   // input, see read_input()
   struct {
@@ -2750,6 +2765,20 @@ static float keyframe_value(KeyFrame keyframes[], int num_keyframes, float at) {
   return keyframes[num_keyframes-1].value;
 }
 
+static void shutdown_vr() {
+  if (state.vr.system)
+    vr::VR_Shutdown();
+  state.vr.system = 0;
+}
+
+static void shutdown(int code) {
+  #ifdef VR_ENABLED
+  shutdown_vr();
+  #endif
+
+  exit(code);
+}
+
 // fills out the input fields in GameState
 static void read_input() {
   // clear earlier events
@@ -2765,7 +2794,7 @@ static void read_input() {
 
       case SDL_WINDOWEVENT:
         if (event.window.event == SDL_WINDOWEVENT_CLOSE)
-          exit(0);
+          shutdown(0);
         break;
 
       case SDL_MOUSEBUTTONDOWN:
@@ -2811,6 +2840,26 @@ static void read_input() {
   // had some problems on touchpad on linux where a rightclick also triggered a left click, this fixed it
   if (state.mouse_clicked && state.mouse_clicked_right)
     state.mouse_clicked = false;
+}
+
+static void read_vr_input() {
+  // process VR system events
+  vr::VREvent_t event;
+  while (state.vr.system->PollNextEvent(&event, sizeof(event))) {
+    // TODO: handle device events (most notably VREvent_TrackedDeviceActivated, VREvent_TrackedDeviceDeactivated, and VREvent_TrackedDeviceUpdated)
+  }
+
+  // process controller states
+  #if 0
+  for( vr::TrackedDeviceIndex_t unDevice = 0; unDevice < vr::k_unMaxTrackedDeviceCount; unDevice++ )
+  {
+    vr::VRControllerState_t state;
+    if( m_pHMD->GetControllerState( unDevice, &state, sizeof(state) ) )
+    {
+      m_rbShowTrackedDevice[ unDevice ] = state.ulButtonPressed == 0;
+    }
+  }
+  #endif
 }
 
 static void update_player(float dt) {
@@ -3100,6 +3149,15 @@ static void sdl_init() {
   sdl_try(SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE));
   sdl_try(SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3));
   sdl_try(SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3));
+
+  // make sure multisampling is disabled - well do it manually if we want it
+  sdl_try(SDL_GL_SetAttribute(SDL_GL_MULTISAMPLEBUFFERS, 0));
+  sdl_try(SDL_GL_SetAttribute(SDL_GL_MULTISAMPLESAMPLES, 0));
+
+  #ifdef DEBUG
+  SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, SDL_GL_CONTEXT_DEBUG_FLAG);
+  #endif
+
   // hide mouse
   sdl_try(SDL_SetRelativeMouseMode(SDL_TRUE));
 
@@ -3522,11 +3580,48 @@ static void gamestate_init() {
   }
 }
 
+bool has_commandline_option(int argc, wchar_t *argv[], const wchar_t *opt) {
+  for (int i = 1; i < argc; ++i)
+    if (wcscmp(argv[i], opt) == 0)
+      return true;
+  return false;
+}
+
+#ifdef VR_ENABLED
+void vr_init() {
+  // init OpenVR
+  {
+    vr::HmdError err = vr::VRInitError_None;
+    state.vr.system = vr::VR_Init(&err, vr::VRApplication_Scene);
+    if (err != vr::VRInitError_None) {
+      state.vr.system = 0;
+      printf("Failed to init VR: %s (%i)\n", vr::VR_GetVRInitErrorAsEnglishDescription(err), (int)err);
+    }
+  }
+
+  // log system name
+  {
+    char system_name[32];
+    char serial_number[32];
+    state.vr.system->GetStringTrackedDeviceProperty(vr::k_unTrackedDeviceIndex_Hmd, vr::Prop_TrackingSystemName_String, system_name, sizeof(system_name));
+    state.vr.system->GetStringTrackedDeviceProperty(vr::k_unTrackedDeviceIndex_Hmd, vr::Prop_SerialNumber_String, serial_number, sizeof(serial_number));
+    debug(printf("Using VR tracking system: %s [%s]\n", system_name, serial_number));
+  }
+
+  state.vr.compositor = vr::VRCompositor();
+
+  if (!state.vr.compositor) {
+    printf("Failed to init VR compositor\n");
+    shutdown_vr();
+  }
+}
+#endif
+
 // on windows, you can't just use main for some reason.
 // instead, you need to use WinMain, or wmain, or wWinMain. pick your poison ;)
 #ifdef OS_WINDOWS
   // int WINAPI wWinMain(HINSTANCE /*hInstance*/, HINSTANCE /*hPrevInstance*/, PWSTR /*pCmdLine*/, int /*nCmdShow*/) {
-  #define mine_main int wmain(int, wchar_t *[], wchar_t *[] )
+  #define mine_main int wmain(int argc, wchar_t *argv[], wchar_t *[] )
 #else
   #define mine_main int main(int, const char *[])
 #endif
@@ -3534,6 +3629,11 @@ static void gamestate_init() {
 mine_main {
   printf("%lu %lu %lu %lu %lu\n", sizeof(state)/1024/1024, sizeof(state.block_vertex_pos)/1024/1024, sizeof(state.world.block_types)/1024/1024, sizeof(state.block_vertices)/1024/1024, sizeof(state.block_elements)/1024/1024);
   sdl_init();
+
+  #ifdef VR_ENABLED
+  if (has_commandline_option(argc, argv, L"--vr"))
+    vr_init();
+  #endif
 
   // get gl3w to fetch opengl function pointers
   gl3wInit();
@@ -3572,11 +3672,16 @@ mine_main {
     // read input
     read_input();
 
+    #ifdef VR_ENABLED
+    // read vr events
+    read_vr_input();
+    #endif
+
     // handle input
     if (state.keypressed[KEY_ESCAPE])
-      exit(0);
+      shutdown(0);
 
-    // @inventory input
+    // update @inventory
     update_inventory();
 
     // update water texture
@@ -3593,9 +3698,11 @@ mine_main {
     // debug prints
     debug_prints(loopindex, dt);
 
+    // update weather
     update_weather();
 
     // @render
+    // clear both screen and gbuffer
     glBindFramebuffer(GL_FRAMEBUFFER, state.gl_gbuffer);
     glClearColor(0.3f, 0.3f, 0.6f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -3603,20 +3710,27 @@ mine_main {
     glClearColor(0.0f, 0.8f, 0.6f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
+    // get camera matrices
     const m4 view = camera_view_matrix(&state.camera, state.camera_pos);
     const m4 proj = camera_projection_matrix(&state.camera, state.fov, state.nearz, state.farz, state.screen_ratio);
     const m4 viewprojection = proj * view;
 
+    // render opaque blocks to gbuffer
     render_opaque_blocks(viewprojection);
 
+    // render skybox to gbuffer
     render_skybox(view, proj);
 
+    // render transparent blocks to gbuffer
     render_transparent_blocks(viewprojection);
 
+    // render the gbuffer texture to screen
     render_gbuffer();
 
+    // render the ui (buttons, menus etc.) to screen
     render_ui();
 
+    // render the text to screen
     render_text();
 
     // swap back buffer
