@@ -2693,14 +2693,10 @@ static void block_gl_buffer_create() {
     // load block textures
     state.block_texture = Texture::create_from_file("textures.bmp", GL_TEXTURE_2D, GL_RGB, GL_SRGB_ALPHA);
 
-    // calculate where the water texture is in 
+    // calculate where the water texture is positioned
     blocktype_to_texpos(BLOCKTYPE_WATER, &state.water_texture_pos.x, &state.water_texture_pos.y, &state.water_texture_pos.w, &state.water_texture_pos.h);
-    state.water_texture_pos.w /= NUM_BLOCK_SIDES_IN_TEXTURE;
-
-    debug(
-      if (state.water_texture_pos.w*state.water_texture_pos.h*4*NUM_BLOCK_SIDES_IN_TEXTURE != ARRAY_LEN(state.water_texture_buffer))
-        die("Maths went wrong, expected %lu but got %i", ARRAY_LEN(state.water_texture_buffer), state.water_texture_pos.w*state.water_texture_pos.h*4*NUM_BLOCK_SIDES_IN_TEXTURE);
-    );
+    if (state.water_texture_pos.w*state.water_texture_pos.h*4 != ARRAY_LEN(state.water_texture_buffer))
+      die("Maths went wrong, expected %lu but got %i", ARRAY_LEN(state.water_texture_buffer), state.water_texture_pos.w*state.water_texture_pos.h*4);
   }
 
   // create G buffer
@@ -3339,21 +3335,22 @@ static void update_water_texture(float dt) {
   offset += dt * 0.03f;
 
   for (int block_sides = 0; block_sides < NUM_BLOCK_SIDES_IN_TEXTURE; ++block_sides) {
-    u8 *p = &state.water_texture_buffer[block_sides*state.water_texture_pos.w*4];
-    for (int x = 0; x < state.water_texture_pos.w; ++x) {
+    int w = state.water_texture_pos.w/NUM_BLOCK_SIDES_IN_TEXTURE;
+    u8 *p = &state.water_texture_buffer[block_sides*w*4];
+    for (int x = 0; x < w; ++x) {
       for (int y = 0; y < state.water_texture_pos.h; ++y) {
-        float f = perlin(offset + x*0.25f, y*0.10f, 0);
+        float f = perlin(offset + x*0.25f, offset*0.3f + y*0.10f, 0);
         f = clamp(f, 0.0f, 1.0f);
         *p++ = 0;
         *p++ = (u8)(UINT8_MAX * (0.5f + 0.5f*f));
         *p++ = (u8)(UINT8_MAX * (0.5f + 0.5f*f));
-        *p++ = (u8)(UINT8_MAX * 0.3f);
+        *p++ = (u8)(UINT8_MAX * 0.5f);
       }
-      p += 4*state.water_texture_pos.w*(NUM_BLOCK_SIDES_IN_TEXTURE-1);
+      p += 4*w*(NUM_BLOCK_SIDES_IN_TEXTURE-1);
     }
   }
   state.block_texture.bind(0);
-  glTexSubImage2D(GL_TEXTURE_2D, 0, state.water_texture_pos.x, state.water_texture_pos.y, state.water_texture_pos.w*NUM_BLOCK_SIDES_IN_TEXTURE, state.water_texture_pos.h, GL_RGBA, GL_UNSIGNED_BYTE, state.water_texture_buffer);
+  glTexSubImage2D(GL_TEXTURE_2D, 0, state.water_texture_pos.x, state.water_texture_pos.y, state.water_texture_pos.w, state.water_texture_pos.h, GL_RGBA, GL_UNSIGNED_BYTE, state.water_texture_buffer);
 }
 
 static void update_inventory() {
