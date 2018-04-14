@@ -1,6 +1,6 @@
 # mineclone
 
-The Mineclone project is a 7-day challenge to implement a minecraft clone from scratch in C++.
+The Mineclone project is a challenge to implement a minecraft clone from scratch in C++ for educational purposes.
 
 ![mineclone screenshot](screenshot.png)
 
