@@ -1546,11 +1546,11 @@ struct VertexBuffer {
       VertexDataSpec v = info[i];
       glEnableVertexAttribArray(i);
       if (v.as_integer) {
-        glVertexAttribIPointer(i, v.count, v.type, v.stride, (GLvoid*)v.offset);
+        glVertexAttribIPointer(i, v.count, v.type, v.stride, (GLvoid*)(uintptr_t)v.offset);
         printf("ipointer: %i %i %i %i %i\n", i, v.count, v.type, v.stride, v.offset);
       }
       else {
-        glVertexAttribPointer(i, v.count, v.type, v.normalize, v.stride, (GLvoid*)v.offset);
+        glVertexAttribPointer(i, v.count, v.type, v.normalize, v.stride, (GLvoid*)(uintptr_t)v.offset);
         printf("pointer:  %i %i %i %i %i\n", i, v.count, v.type, v.stride, v.offset);
       }
     }
@@ -2126,7 +2126,7 @@ static void remove_block_vertex_pos(int *value) {
   state.block_vertex_pos.remove(value);
 }
 
-static void set_block_vertex_pos(BlockIndex b, Direction dir, u32 pos) {
+static void set_block_vertex_pos(BlockIndex b, Direction dir, int pos) {
   u32 key = block_vertex_pos_index(b, dir);
   state.block_vertex_pos.set(key, pos);
 
@@ -2489,28 +2489,26 @@ static void set_blocktype(Block b, BlockType new_type) {
   if (new_type == BLOCKTYPE_AIR) {
     remove_block(b, get_blocktype(b));
     printf("Setting block (%i %i %i) to air\n", b.x, b.y, b.z);
-    goto done;
+  } else {
+    // if converting from one blocktype to another, then always convert to air first, and then to new_type. for simplicity
+    BlockType old_type = get_blocktype(b);
+    if (old_type != BLOCKTYPE_AIR)
+      remove_block(b, old_type);
+
+    push_blockdiff(b, new_type);
+
+    hide_block_faces_of_adjacent_blocks(b, new_type);
+    show_block_faces(b, new_type);
+
+    debug_verbose(
+      printf("(%i %i %i)\n", b.x, b.y, b.z);
+      for (int d = 0; d < DIRECTION_MAX; ++d) {
+        int *vpos = get_block_vertex_pos(b, (Direction)d);
+        printf("vertex pos: %i\n", vpos ? *vpos : -1);
+      }
+    );
   }
 
-  // if converting from one blocktype to another, then always convert to air first, and then to new_type. for simplicity
-  BlockType old_type = get_blocktype(b);
-  if (old_type != BLOCKTYPE_AIR)
-    remove_block(b, old_type);
-
-  push_blockdiff(b, new_type);
-
-  hide_block_faces_of_adjacent_blocks(b, new_type);
-  show_block_faces(b, new_type);
-
-  debug_verbose(
-    printf("(%i %i %i)\n", b.x, b.y, b.z);
-    for (int d = 0; d < DIRECTION_MAX; ++d) {
-      int *vpos = get_block_vertex_pos(b, (Direction)d);
-      printf("vertex pos: %i\n", vpos ? *vpos : -1);
-    }
-  );
-
-done:
   SDL_AtomicUnlock(&state.block_loader.lock);
 }
 
@@ -3853,12 +3851,21 @@ static void gamestate_init() {
   }
 }
 
+#ifdef OS_WINDOWS
 bool has_commandline_option(int argc, wchar_t *argv[], const wchar_t *opt) {
   for (int i = 1; i < argc; ++i)
     if (wcscmp(argv[i], opt) == 0)
       return true;
   return false;
 }
+#else
+bool has_commandline_option(int argc, const char *argv[], const char *opt) {
+  for (int i = 1; i < argc; ++i)
+    if (strcmp(argv[i], opt) == 0)
+      return true;
+  return false;
+}
+#endif
 
 #ifdef VR_ENABLED
 void vr_init() {
