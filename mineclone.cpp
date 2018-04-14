@@ -1525,12 +1525,12 @@ struct VertexBuffer {
     glBufferData(GL_ARRAY_BUFFER, size, data, usage);
   }
 
-  void bind() {
+  void bind() const {
     glBindVertexArray(this->vao);
     glBindBuffer(GL_ARRAY_BUFFER, this->vbo);
   }
 
-  void unbind() {
+  void unbind() const {
     glBindVertexArray(0);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
   }
@@ -1566,13 +1566,13 @@ struct VertexElementBuffer {
   GLuint vbo;
   GLuint ebo; // not always used
 
-  void bind() {
+  void bind() const {
     glBindVertexArray(this->vao);
     glBindBuffer(GL_ARRAY_BUFFER, this->vbo);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, this->ebo);
   }
 
-  void unbind() {
+  void unbind() const {
     glBindVertexArray(0);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
@@ -1589,11 +1589,10 @@ struct VertexElementBuffer {
   }
 };
 
-
 struct Shader {
   GLuint id;
 
-  void use() {
+  void use() const {
     glUseProgram(this->id);
   }
 
@@ -1669,12 +1668,12 @@ struct Texture {
   GLenum type;
   int w,h;
 
-  void bind(int texture_index) {
+  void bind(int texture_index) const {
     glActiveTexture(GL_TEXTURE0 + texture_index);
     glBindTexture(this->type, this->id);
   }
 
-  void unbind(int texture_index) {
+  void unbind(int texture_index) const {
     glActiveTexture(GL_TEXTURE0 + texture_index);
     glBindTexture(this->type, 0);
   }
@@ -1702,7 +1701,7 @@ struct Texture {
     return t;
   }
 
-  static Texture create_empty(GLenum type, GLenum texture_format, int w, int h, GLint mag_filter, GLint min_filter) {
+  static Texture create_empty(GLenum type, GLenum texture_format, int w, int h, GLint mag_filter = GL_NEAREST, GLint min_filter = GL_NEAREST) {
     Texture t = {};
     t.type = type;
     t.w = w;
@@ -1748,6 +1747,101 @@ struct Texture {
     return t;
   }
 };
+
+struct FrameBufferTarget {
+  Texture texture;
+  GLenum attachment_type; // see glFramebufferTexture2D
+};
+
+struct FrameBuffer {
+  GLuint id;
+  Texture depth_target;
+  Texture color_targets[8];
+  int num_color_targets;
+  int w,h;
+
+  void bind() const {
+    glViewport(0, 0, w, h);
+    glBindFramebuffer(GL_FRAMEBUFFER, this->id);
+  }
+
+  static FrameBuffer create(Texture color_targets[], int num_color_targets, OPTIONAL Texture *depth_target) {
+    FrameBuffer fb = {};
+
+    glGenFramebuffers(1, &fb.id);
+    glBindFramebuffer(GL_FRAMEBUFFER, fb.id);
+
+    if (depth_target) {
+      glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, depth_target->id, 0);
+      fb.depth_target = *depth_target;
+      fb.w = depth_target->w;
+      fb.h = depth_target->h;
+    }
+
+    if (!num_color_targets) {
+      glDrawBuffer(GL_NONE);
+      glReadBuffer(GL_NONE);
+    } else {
+      fb.num_color_targets = num_color_targets;
+      fb.w = color_targets[0].w;
+      fb.h = color_targets[0].h;
+      for (int i = 0; i < num_color_targets; ++i) {
+        // check that all size are equal, TODO: we don't really _have to_ do this,
+        // so if you need textures of different sizes and know what you are doing, remove this
+        if (color_targets[i].w != fb.w || color_targets[i].h != fb.h)
+          die("Sizes of all texture targets for framebuffer didn't match, earlier texture had size %i,%i but new texture had size %i,%i", fb.w, fb.h, color_targets[i].w, color_targets[i].h);
+
+        // TODO: do we need this?
+        color_targets[i].bind(0);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + i, GL_TEXTURE_2D, color_targets[i].id, 0);
+      }
+    }
+
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+      die("Framebuffer not complete!");
+
+    return fb;
+  }
+};
+
+
+// TODO: add flags like GL_DEPTH_TEST, GL_CULL_FACE, glBlendFunc, and so on
+struct RenderPipeline {
+  Shader shader;
+
+  enum {VERTEX_BUFFER, VERTEX_ELEMENT_BUFFER} buffer_type;
+  union {
+    VertexBuffer vb; // buffer_type = VERTEX_BUFFER
+    VertexElementBuffer veb; // buffer_type = VERTEX_ELEMENT_BUFFER
+  };
+
+  Texture textures[16];
+  int num_textures;
+
+  FrameBuffer framebuffer;
+};
+
+void render(const RenderPipeline& rp, int num_quads) {
+  // use shader
+  rp.shader.use();
+
+  // bind textures
+  for (int i = 0; i < rp.num_textures; ++i)
+    rp.textures[i].bind(i);
+
+  // bind VAO and draw
+  switch (rp.buffer_type) {
+    case RenderPipeline::VERTEX_BUFFER:
+      rp.vb.bind();
+      glDrawArrays(GL_TRIANGLES, 0, num_quads*6);
+      break;
+    case RenderPipeline::VERTEX_ELEMENT_BUFFER:
+      rp.veb.bind();
+      glDrawElements(GL_TRIANGLES, num_quads*6, GL_UNSIGNED_INT, 0);
+      break;
+  }
+  gl_ok_or_die;
+}
 
 // cache for world generation stuff that is the same over all Z
 struct WorldXYData {
@@ -1837,11 +1931,12 @@ struct GameState {
     Texture block_texture;
     // shadowmapping stuff, see https://learnopengl.com/Advanced-Lighting/Shadows/Shadow-Mapping for a great tutorial on shadowmapping
     Shader shadowmap_shader;
-    GLuint gl_block_shadowmap_fbo;
+    FrameBuffer gl_block_shadowmap_fbo;
     Texture block_shadowmap;
     #define SHADOWMAP_WIDTH (1024*2)
     #define SHADOWMAP_HEIGHT (1024*2)
     // post processing stuff, like the G buffer (https://learnopengl.com/Advanced-Lighting/Deferred-Shading)
+    // FrameBuffer gbuffer;
     GLuint gl_gbuffer, gl_gbuffer_color_target, gl_gbuffer_depth_target, gl_gbuffer_normal_target, gl_gbuffer_position_target;
     Shader post_processing_shader;
 
@@ -2755,19 +2850,19 @@ static void block_gl_buffer_create() {
   // create shadowmap FBO
   {
     state.shadowmap_shader = Shader::create_from_string(shadowmap_vertex_shader, shadowmap_fragment_shader);
-    glGenFramebuffers(1, &state.gl_block_shadowmap_fbo);
-    glBindFramebuffer(GL_FRAMEBUFFER, state.gl_block_shadowmap_fbo);
+
+    state.block_shadowmap = Texture::create_empty(GL_TEXTURE_2D, GL_DEPTH_COMPONENT, SHADOWMAP_WIDTH, SHADOWMAP_HEIGHT, GL_NEAREST, GL_NEAREST);
+    state.gl_block_shadowmap_fbo = FrameBuffer::create(0, 0, &state.block_shadowmap);
 
     // depth
-    state.block_shadowmap = Texture::create_empty(GL_TEXTURE_2D, GL_DEPTH_COMPONENT, SHADOWMAP_WIDTH, SHADOWMAP_HEIGHT, GL_NEAREST, GL_NEAREST);
-    state.block_shadowmap.bind(0);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, state.block_shadowmap.id, 0);
+    // state.block_shadowmap.bind(0);
+    // glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, state.block_shadowmap.id, 0);
 
-    glDrawBuffer(GL_NONE);
-    glReadBuffer(GL_NONE);
+    // glDrawBuffer(GL_NONE);
+    // glReadBuffer(GL_NONE);
 
-    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
-      die("Framebuffer not complete!");
+    // if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+    //   die("Framebuffer not complete!");
 
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
   }
@@ -3502,7 +3597,7 @@ static void render_opaque_blocks(m4 viewprojection) {
   m4 shadowmap_viewprojection;
   {
     glViewport(0, 0, SHADOWMAP_WIDTH, SHADOWMAP_HEIGHT);
-    glBindFramebuffer(GL_FRAMEBUFFER, state.gl_block_shadowmap_fbo);
+    state.gl_block_shadowmap_fbo.bind();
     glEnable(GL_DEPTH_TEST);
     glClear(GL_DEPTH_BUFFER_BIT);
     // glDisable(GL_CULL_FACE);
