@@ -1821,8 +1821,7 @@ struct RenderPipeline {
   void clear() const {
     this->framebuffer->bind();
     glClear(GL_COLOR_BUFFER_BIT);
-    if (render_flags | RENDERFLAG_DEPTH_TEST)
-      glClear(GL_DEPTH_BUFFER_BIT);
+    glClear(GL_DEPTH_BUFFER_BIT);
   }
 
   void render(int num_vertices) const {
@@ -1842,35 +1841,26 @@ struct RenderPipeline {
     // depth
     if (this->render_flags & RENDERFLAG_DEPTH_TEST)
       glEnable(GL_DEPTH_TEST);
-    // else
-      // glDisable(GL_DEPTH_TEST);
+    else
+      glDisable(GL_DEPTH_TEST);
 
     // blend
     if (this->render_flags & RENDERFLAG_BLEND) {
       glEnable(GL_BLEND);
       glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     }
-    // else {
-    //   glDisable(GL_BLEND);
-    // }
-
-    // cull front
-    if (this->render_flags & RENDERFLAG_CULL_FRONT_FACE) {
-      glEnable(GL_CULL_FACE);
-      glCullFace(GL_FRONT);
+    else {
+      glDisable(GL_BLEND);
     }
-    // else {
-    //   glDisable(GL_CULL_FACE);
-    // }
 
-    // cull back
-    if (this->render_flags & RENDERFLAG_CULL_BACK_FACE) {
+    // cull
+    if (this->render_flags & (RENDERFLAG_CULL_FRONT_FACE | RENDERFLAG_CULL_BACK_FACE)) {
       glEnable(GL_CULL_FACE);
-      glCullFace(GL_BACK);
+      glCullFace((this->render_flags & RENDERFLAG_CULL_FRONT_FACE) ? GL_FRONT : GL_BACK);
     }
-    // else {
-    //   glDisable(GL_CULL_FACE);
-    // }
+    else {
+      glDisable(GL_CULL_FACE);
+    }
 
     gl_ok_or_die;
 
@@ -2820,7 +2810,7 @@ static void block_gl_buffer_create() {
   state.opaque_block_vb = VertexBuffer::create(block_vertexspec, ARRAY_LEN(block_vertexspec), true);
   state.opaque_block_pipeline.vb = &state.opaque_block_vb;
   state.opaque_block_pipeline.framebuffer = &state.gbuffer;
-  state.opaque_block_pipeline.render_flags = RENDERFLAG_CULL_BACK_FACE, RENDERFLAG_DEPTH_TEST;
+  state.opaque_block_pipeline.render_flags = RENDERFLAG_CULL_BACK_FACE | RENDERFLAG_DEPTH_TEST;
 
   blocktype_to_texpos(BLOCKTYPE_WATER, &state.water_texture_pos.x, &state.water_texture_pos.y, &state.water_texture_pos.w, &state.water_texture_pos.h);
   if (state.water_texture_pos.w*state.water_texture_pos.h*4 != ARRAY_LEN(state.water_texture_buffer))
@@ -3553,8 +3543,6 @@ static void render_opaque_blocks(m4 viewprojection) {
 
     state.shadowmap_pipeline.framebuffer->clear();
     state.shadowmap_pipeline.render(state.block_elements.size);
-
-    glCullFace(GL_BACK);
   }
 
   // render opaque blocks
