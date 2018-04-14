@@ -543,6 +543,134 @@ static m4 m4_iden() {
   };
 }
 
+static m4 m4_invert(const m4& m) {
+  m4 inv;
+
+  inv.d[0] = m.d[5]  * m.d[10] * m.d[15] - 
+           m.d[5]  * m.d[11] * m.d[14] - 
+           m.d[9]  * m.d[6]  * m.d[15] + 
+           m.d[9]  * m.d[7]  * m.d[14] +
+           m.d[13] * m.d[6]  * m.d[11] - 
+           m.d[13] * m.d[7]  * m.d[10];
+
+  inv.d[4] = -m.d[4]  * m.d[10] * m.d[15] + 
+            m.d[4]  * m.d[11] * m.d[14] + 
+            m.d[8]  * m.d[6]  * m.d[15] - 
+            m.d[8]  * m.d[7]  * m.d[14] - 
+            m.d[12] * m.d[6]  * m.d[11] + 
+            m.d[12] * m.d[7]  * m.d[10];
+
+  inv.d[8] = m.d[4]  * m.d[9] * m.d[15] - 
+           m.d[4]  * m.d[11] * m.d[13] - 
+           m.d[8]  * m.d[5] * m.d[15] + 
+           m.d[8]  * m.d[7] * m.d[13] + 
+           m.d[12] * m.d[5] * m.d[11] - 
+           m.d[12] * m.d[7] * m.d[9];
+
+  inv.d[12] = -m.d[4]  * m.d[9] * m.d[14] + 
+             m.d[4]  * m.d[10] * m.d[13] +
+             m.d[8]  * m.d[5] * m.d[14] - 
+             m.d[8]  * m.d[6] * m.d[13] - 
+             m.d[12] * m.d[5] * m.d[10] + 
+             m.d[12] * m.d[6] * m.d[9];
+
+  inv.d[1] = -m.d[1]  * m.d[10] * m.d[15] + 
+            m.d[1]  * m.d[11] * m.d[14] + 
+            m.d[9]  * m.d[2] * m.d[15] - 
+            m.d[9]  * m.d[3] * m.d[14] - 
+            m.d[13] * m.d[2] * m.d[11] + 
+            m.d[13] * m.d[3] * m.d[10];
+
+  inv.d[5] = m.d[0]  * m.d[10] * m.d[15] - 
+           m.d[0]  * m.d[11] * m.d[14] - 
+           m.d[8]  * m.d[2] * m.d[15] + 
+           m.d[8]  * m.d[3] * m.d[14] + 
+           m.d[12] * m.d[2] * m.d[11] - 
+           m.d[12] * m.d[3] * m.d[10];
+
+  inv.d[9] = -m.d[0]  * m.d[9] * m.d[15] + 
+            m.d[0]  * m.d[11] * m.d[13] + 
+            m.d[8]  * m.d[1] * m.d[15] - 
+            m.d[8]  * m.d[3] * m.d[13] - 
+            m.d[12] * m.d[1] * m.d[11] + 
+            m.d[12] * m.d[3] * m.d[9];
+
+  inv.d[13] = m.d[0]  * m.d[9] * m.d[14] - 
+            m.d[0]  * m.d[10] * m.d[13] - 
+            m.d[8]  * m.d[1] * m.d[14] + 
+            m.d[8]  * m.d[2] * m.d[13] + 
+            m.d[12] * m.d[1] * m.d[10] - 
+            m.d[12] * m.d[2] * m.d[9];
+
+  inv.d[2] = m.d[1]  * m.d[6] * m.d[15] - 
+           m.d[1]  * m.d[7] * m.d[14] - 
+           m.d[5]  * m.d[2] * m.d[15] + 
+           m.d[5]  * m.d[3] * m.d[14] + 
+           m.d[13] * m.d[2] * m.d[7] - 
+           m.d[13] * m.d[3] * m.d[6];
+
+  inv.d[6] = -m.d[0]  * m.d[6] * m.d[15] + 
+            m.d[0]  * m.d[7] * m.d[14] + 
+            m.d[4]  * m.d[2] * m.d[15] - 
+            m.d[4]  * m.d[3] * m.d[14] - 
+            m.d[12] * m.d[2] * m.d[7] + 
+            m.d[12] * m.d[3] * m.d[6];
+
+  inv.d[10] = m.d[0]  * m.d[5] * m.d[15] - 
+            m.d[0]  * m.d[7] * m.d[13] - 
+            m.d[4]  * m.d[1] * m.d[15] + 
+            m.d[4]  * m.d[3] * m.d[13] + 
+            m.d[12] * m.d[1] * m.d[7] - 
+            m.d[12] * m.d[3] * m.d[5];
+
+  inv.d[14] = -m.d[0]  * m.d[5] * m.d[14] + 
+             m.d[0]  * m.d[6] * m.d[13] + 
+             m.d[4]  * m.d[1] * m.d[14] - 
+             m.d[4]  * m.d[2] * m.d[13] - 
+             m.d[12] * m.d[1] * m.d[6] + 
+             m.d[12] * m.d[2] * m.d[5];
+
+  inv.d[3] = -m.d[1] * m.d[6] * m.d[11] + 
+            m.d[1] * m.d[7] * m.d[10] + 
+            m.d[5] * m.d[2] * m.d[11] - 
+            m.d[5] * m.d[3] * m.d[10] - 
+            m.d[9] * m.d[2] * m.d[7] + 
+            m.d[9] * m.d[3] * m.d[6];
+
+  inv.d[7] = m.d[0] * m.d[6] * m.d[11] - 
+           m.d[0] * m.d[7] * m.d[10] - 
+           m.d[4] * m.d[2] * m.d[11] + 
+           m.d[4] * m.d[3] * m.d[10] + 
+           m.d[8] * m.d[2] * m.d[7] - 
+           m.d[8] * m.d[3] * m.d[6];
+
+  inv.d[11] = -m.d[0] * m.d[5] * m.d[11] + 
+             m.d[0] * m.d[7] * m.d[9] + 
+             m.d[4] * m.d[1] * m.d[11] - 
+             m.d[4] * m.d[3] * m.d[9] - 
+             m.d[8] * m.d[1] * m.d[7] + 
+             m.d[8] * m.d[3] * m.d[5];
+
+  inv.d[15] = m.d[0] * m.d[5] * m.d[10] - 
+            m.d[0] * m.d[6] * m.d[9] - 
+            m.d[4] * m.d[1] * m.d[10] + 
+            m.d[4] * m.d[2] * m.d[9] + 
+            m.d[8] * m.d[1] * m.d[6] - 
+            m.d[8] * m.d[2] * m.d[5];
+
+  float det = m.d[0] * inv.d[0] + m.d[1] * inv.d[4] + m.d[2] * inv.d[8] + m.d[3] * inv.d[12];
+
+  if (det == 0)
+      return inv;
+
+  det = 1.0f / det;
+
+  for (int i = 0; i < 16; i++)
+      inv.d[i] *= det;
+
+  return inv;
+}
+
 static void m4_print(m4 m) {
   printf("(\n%f %f %f %f\n%f %f %f %f\n%f %f %f %f\n%f %f %f %f\n)\n", m.d[0], m.d[1], m.d[2], m.d[3], m.d[4], m.d[5], m.d[6], m.d[7], m.d[8], m.d[9], m.d[10], m.d[11], m.d[12], m.d[13], m.d[14], m.d[15]);
 }
@@ -1837,7 +1965,6 @@ struct RenderPipeline {
       this->textures[i]->bind(i);
     gl_ok_or_die;
 
-    // TODO: after we've converted everthing to RenderPipeline, uncomment the disables
     // depth
     if (this->render_flags & RENDERFLAG_DEPTH_TEST)
       glEnable(GL_DEPTH_TEST);
@@ -1894,7 +2021,7 @@ struct GameState {
   // vr stuff
   #ifdef VR_ENABLED
   struct {
-    bool vr_enabled;
+    bool enabled;
     vr::IVRSystem *system;
     vr::IVRCompositor *compositor;
   } vr;
@@ -3139,7 +3266,7 @@ static void read_input() {
     state.mouse_clicked = false;
 }
 
-#if VR_ENABLED
+#ifdef VR_ENABLED
 static void read_vr_input() {
   // process VR system events
   vr::VREvent_t event;
@@ -3732,7 +3859,7 @@ static void gamestate_init() {
   state.nearz = 0.3f;
   state.farz = len(v3{(float)NUM_VISIBLE_BLOCKS_x, (float)NUM_VISIBLE_BLOCKS_y, (float)NUM_VISIBLE_BLOCKS_z});
   state.player.pos = {1000.0f, 1000.0f, 18.1f};
-  camera_lookat(&state.camera, state.player.pos, state.player.pos + v3{0.0f, SQRT2, -SQRT2});
+  camera_lookat(&state.camera, state.player.pos, state.player.pos + v3{0.0f, 1.0f, 0.0f});
   state.block_vertices_dirty = true;
   state.transparent_block_vertices_dirty = true;
   state.inventory.render_quickmenu = true;
@@ -3774,7 +3901,7 @@ bool has_commandline_option(int argc, const char *argv[], const char *opt) {
 
 #ifdef VR_ENABLED
 void vr_init() {
-  state.vr.vr_enabled = true;
+  state.vr.enabled = true;
   // init OpenVR
   {
     vr::HmdError err = vr::VRInitError_None;
@@ -3800,8 +3927,71 @@ void vr_init() {
     printf("Failed to init VR compositor\n");
     shutdown_vr();
   }
+
+  state.vr.compositor->SetTrackingSpace(vr::TrackingUniverseSeated); 
 }
 #endif
+
+void render_world(const m4 &view, const m4 &proj) {
+  const m4 viewprojection = proj * view;
+  // render opaque blocks to gbuffer
+  render_opaque_blocks(viewprojection);
+
+  // render skybox to gbuffer
+  render_skybox(view, proj);
+
+  // render transparent blocks to gbuffer
+  render_transparent_blocks(viewprojection);
+
+  // render the gbuffer texture to screen
+  render_gbuffer();
+}
+
+#ifdef VR_ENABLED
+static m4 vr_m34_to_m4(const vr::HmdMatrix34_t& mat) {
+  return m4_invert({
+    mat.m[0][0], mat.m[0][1], mat.m[0][2], mat.m[0][3],
+    mat.m[1][0], mat.m[1][1], mat.m[1][2], mat.m[1][3],
+    mat.m[2][0], mat.m[2][1], mat.m[2][2], mat.m[2][3],
+    0.0f,    0.0f,    0.0f,    1.0f,
+  });
+}
+
+static m4 vr_m44_to_m4(const vr::HmdMatrix44_t& mat) {
+  return {
+    mat.m[0][0], mat.m[1][0], mat.m[2][0], mat.m[3][0],
+    mat.m[0][1], mat.m[1][1], mat.m[2][1], mat.m[3][1], 
+    mat.m[0][2], mat.m[1][2], mat.m[2][2], mat.m[3][2], 
+    mat.m[0][3], mat.m[1][3], mat.m[2][3], mat.m[3][3]
+  };
+}
+
+static void render_world_vr(m4 view, m4 proj) {
+  // wait until hmd position is available
+  vr::TrackedDevicePose_t poses[vr::k_unMaxTrackedDeviceCount];
+  state.vr.compositor->WaitGetPoses(poses, ARRAY_LEN(poses), 0, 0);
+
+  // if hmd position for some reason is not valid, don't render
+  if (!poses[vr::k_unTrackedDeviceIndex_Hmd].bPoseIsValid) {
+    printf("HMD pose is not valid\n");
+    return;
+  }
+
+  // get view matrix
+  view = vr_m34_to_m4(poses[vr::k_unTrackedDeviceIndex_Hmd].mDeviceToAbsoluteTracking) * view;
+
+  // TODO: add left eye to view
+  // proj = vr_m44_to_m4(state.vr.system->GetProjectionMatrix(vr::Eye_Left, state.nearz, state.farz));
+
+  render_world(view, proj);
+  // vr_submit_texture(state.gbuffer);
+
+  // get_right_eye(&view, &proj);
+  // render_world(view, proj);
+  // vr_submit_texture(state.gbuffer);
+}
+#endif
+
 
 // on windows, you can't just use main for some reason.
 // instead, you need to use WinMain, or wmain, or wWinMain. pick your poison ;)
@@ -3857,7 +4047,7 @@ mine_main {
 
     #ifdef VR_ENABLED
     // read vr events
-    if (state.vr.vr_enabled)
+    if (state.vr.enabled)
       read_vr_input();
     #endif
 
@@ -3893,19 +4083,21 @@ mine_main {
     // get camera matrices
     const m4 view = camera_view_matrix(&state.camera, state.camera_pos);
     const m4 proj = camera_projection_matrix(&state.camera, state.fov, state.nearz, state.farz, state.screen_ratio);
-    const m4 viewprojection = proj * view;
 
-    // render opaque blocks to gbuffer
-    render_opaque_blocks(viewprojection);
+    // render basically everything that is not ui
+    #ifdef VR_ENABLED
 
-    // render skybox to gbuffer
-    render_skybox(view, proj);
+    if (state.vr.enabled)
+      render_world_vr(view, proj);
+    else {
+      render_world(view, proj);
+    }
 
-    // render transparent blocks to gbuffer
-    render_transparent_blocks(viewprojection);
+    #else
 
-    // render the gbuffer texture to screen
-    render_gbuffer();
+    render_world(view, proj);
+
+    #endif
 
     // render the ui (buttons, menus etc.) to screen
     render_ui();
