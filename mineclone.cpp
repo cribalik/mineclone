@@ -1811,7 +1811,7 @@ struct RenderPipeline {
   Shader shader;
   u32 render_flags; // see RenderFlag
 
-  VertexBuffer vb;
+  VertexBuffer *vb;
 
   Texture *textures[16];
   int num_textures;
@@ -1827,9 +1827,9 @@ struct RenderPipeline {
 
   void render(int num_vertices) const {
     this->framebuffer->bind();
+    gl_ok_or_die;
 
     // use shader
-    gl_ok_or_die;
     this->shader.use();
     gl_ok_or_die;
 
@@ -1875,8 +1875,9 @@ struct RenderPipeline {
     gl_ok_or_die;
 
     // bind VAO and draw
-    this->vb.bind();
-    if (this->vb.has_element_buffer())
+    this->vb->bind();
+    gl_ok_or_die;
+    if (this->vb->has_element_buffer())
       glDrawElements(GL_TRIANGLES, num_vertices, GL_UNSIGNED_INT, 0);
     else
       glDrawArrays(GL_TRIANGLES, 0, num_vertices);
@@ -1960,6 +1961,7 @@ struct GameState {
     #define NUM_BLOCK_SIDES_IN_TEXTURE 3 // the number of different textures we have per block. at the moment, it is top,side,bottom
     #define BLOCK_TEXTURE_SIZE 16
 
+    VertexBuffer opaque_block_vb;
     RenderPipeline opaque_block_pipeline;
     Texture block_texture;
 
@@ -1983,9 +1985,10 @@ struct GameState {
     // post processing stuff (https://learnopengl.com/Advanced-Lighting/Deferred-Shading)
     FrameBuffer gbuffer;
     Texture gbuffer_color_target, gbuffer_depth_target, gbuffer_normal_target, gbuffer_position_target;
-    Shader post_processing_shader;
+    RenderPipeline post_processing_pipeline;
 
     // same thing as all of the above, but for transparent blocks (since they need to be rendered separately after everything else has rendered in order for them to look correct)
+    VertexBuffer transparent_block_vb;
     RenderPipeline transparent_block_pipeline;
     Array<BlockVertex> transparent_block_vertices;
     Array<uint> transparent_block_elements;
@@ -2002,10 +2005,9 @@ struct GameState {
     // ui widgets
     Array<QuadVertex> quad_vertices;
     Array<uint> quad_elements;
-
     VertexBuffer quad_vb;
-    Shader ui_shader;
-    Texture ui_texture;
+
+    RenderPipeline ui_pipeline;
 
     // ui text
     #define RENDERER_FIRST_CHAR 32
@@ -2015,15 +2017,15 @@ struct GameState {
     Array<QuadVertex> text_vertices;
     v2i text_atlas_size;
     Glyph glyphs[RENDERER_LAST_CHAR - RENDERER_FIRST_CHAR];
-
     VertexBuffer text_vb;
-    Shader text_shader;
+    RenderPipeline text_pipeline;
     Texture text_texture;
   };
 
   // skybox graphics data
   struct {
     RenderPipeline skybox_pipeline;
+    VertexBuffer skybox_vb;
     CubeMap skybox;
     #define SKYBOX_TEXTURE_SIZE 128
     u8 skybox_texture_buffer[SKYBOX_TEXTURE_SIZE * SKYBOX_TEXTURE_SIZE * 3]; // 3 because of rgb
@@ -2746,10 +2748,6 @@ static float calc_string_width(const char *str) {
   return result;
 }
 
-static void reset_text_vertices() {
-  state.text_vertices.size = 0;
-}
-
 enum TextAlignment {
   ALIGN_LEFT,
   ALIGN_CENTER,
@@ -2792,11 +2790,11 @@ static void push_text(const char *str, v2 pos, float height, TextAlignment align
     v = array_pushn(state.text_vertices, 6);
 
     *v++ = {x, y, tx0, ty0};
-    *v++ = {x + w, y, tx1, ty0};
-    *v++ = {x, y + h, tx0, ty1};
     *v++ = {x, y + h, tx0, ty1};
     *v++ = {x + w, y, tx1, ty0};
+    *v++ = {x, y + h, tx0, ty1};
     *v++ = {x + w, y + h, tx1, ty1};
+    *v++ = {x + w, y, tx1, ty0};
 
     pos.x += g.advance * scale;
   }
@@ -2819,7 +2817,8 @@ static void block_gl_buffer_create() {
   state.opaque_block_pipeline.textures[state.opaque_block_pipeline.num_textures++] = &state.shadowmap;
   state.opaque_block_pipeline.shader.set("u_skybox", 2);
   state.opaque_block_pipeline.textures[state.opaque_block_pipeline.num_textures++] = &state.skybox.texture;
-  state.opaque_block_pipeline.vb = VertexBuffer::create(block_vertexspec, ARRAY_LEN(block_vertexspec), true);
+  state.opaque_block_vb = VertexBuffer::create(block_vertexspec, ARRAY_LEN(block_vertexspec), true);
+  state.opaque_block_pipeline.vb = &state.opaque_block_vb;
   state.opaque_block_pipeline.framebuffer = &state.gbuffer;
   state.opaque_block_pipeline.render_flags = RENDERFLAG_CULL_BACK_FACE, RENDERFLAG_DEPTH_TEST;
 
@@ -2835,11 +2834,19 @@ static void block_gl_buffer_create() {
   Texture color_targets[] = {state.gbuffer_color_target, state.gbuffer_normal_target, state.gbuffer_position_target};
   state.gbuffer = FrameBuffer::create(color_targets, ARRAY_LEN(color_targets), &state.gbuffer_depth_target);
 
-  state.post_processing_shader = Shader::create_from_string(post_processing_vertex_shader, post_processing_fragment_shader);
-  state.post_processing_shader.set("u_color", 0);
-  state.post_processing_shader.set("u_depth", 1);
-  state.post_processing_shader.set("u_normal", 2);
-  state.post_processing_shader.set("u_position", 3);
+  state.post_processing_pipeline.shader = Shader::create_from_string(post_processing_vertex_shader, post_processing_fragment_shader);
+  state.post_processing_pipeline.shader.set("u_color", 0);
+  state.post_processing_pipeline.shader.set("u_depth", 1);
+  state.post_processing_pipeline.shader.set("u_normal", 2);
+  state.post_processing_pipeline.shader.set("u_position", 3);
+
+  state.post_processing_pipeline.textures[0] = &state.gbuffer_color_target;
+  state.post_processing_pipeline.textures[1] = &state.gbuffer_depth_target;
+  state.post_processing_pipeline.textures[2] = &state.gbuffer_normal_target;
+  state.post_processing_pipeline.textures[3] = &state.gbuffer_position_target;
+  state.post_processing_pipeline.num_textures = 4;
+  state.post_processing_pipeline.vb = &state.quad_vb;
+  state.post_processing_pipeline.framebuffer = &state.screen_framebuffer;
 
   // create shadowmap FBO
   state.shadowmap = Texture::create_empty(GL_TEXTURE_2D, GL_DEPTH_COMPONENT, GL_DEPTH_COMPONENT, SHADOWMAP_WIDTH, SHADOWMAP_HEIGHT, GL_NEAREST, GL_NEAREST);
@@ -2851,8 +2858,69 @@ static void block_gl_buffer_create() {
 
   // create transparent block vbo
   state.transparent_block_pipeline = state.opaque_block_pipeline;
-  state.transparent_block_pipeline.vb = VertexBuffer::create(block_vertexspec, ARRAY_LEN(block_vertexspec), true);
+  state.transparent_block_vb = VertexBuffer::create(block_vertexspec, ARRAY_LEN(block_vertexspec), true);
+  state.transparent_block_pipeline.vb = &state.transparent_block_vb;
   state.transparent_block_pipeline.render_flags |= RENDERFLAG_BLEND;
+}
+
+static void ui_gl_buffer_create() {
+  VertexDataSpec vspec[] = {
+    VERTEXDATA_FLOAT(QuadVertex, pos),
+    VERTEXDATA_FLOAT(QuadVertex, tex)
+  };
+  state.quad_vb = VertexBuffer::create(vspec, ARRAY_LEN(vspec), true);
+  state.ui_pipeline.vb = &state.quad_vb;
+  state.ui_pipeline.shader = Shader::create_from_string(ui_vertex_shader, ui_fragment_shader);
+  state.ui_pipeline.shader.set("u_texture", 0);
+  state.ui_pipeline.textures[state.ui_pipeline.num_textures++] = &state.block_texture;
+  state.ui_pipeline.framebuffer = &state.screen_framebuffer;
+}
+
+static void text_gl_buffer_create() {
+  VertexDataSpec vspec [] = {
+    VERTEXDATA_FLOAT(QuadVertex, pos),
+    VERTEXDATA_FLOAT(QuadVertex, tex)
+  };
+  state.text_vb = VertexBuffer::create(vspec, ARRAY_LEN(vspec), false);
+  state.text_pipeline.vb = &state.text_vb;
+  state.text_pipeline.shader = Shader::create_from_string(text_vertex_shader, text_fragment_shader);
+  state.text_pipeline.shader.set("u_texture", 0);
+  state.text_pipeline.framebuffer = &state.screen_framebuffer;
+  state.text_pipeline.render_flags |= RENDERFLAG_BLEND;
+
+  // load font from file and create texture
+  state.text_atlas_size.x = 512;
+  state.text_atlas_size.y = 512;
+  const char *filename = "font.ttf";
+  const int BUFFER_SIZE = 1024*1024;
+  const int tex_w = state.text_atlas_size.x;
+  const int tex_h = state.text_atlas_size.y;
+  const int first_char = RENDERER_FIRST_CHAR;
+  const int last_char = RENDERER_LAST_CHAR;
+  const float height = RENDERER_FONT_SIZE;
+
+  unsigned char *ttf_mem = (unsigned char*)malloc(BUFFER_SIZE);
+  unsigned char *bitmap = (unsigned char*)malloc(tex_w * tex_h);
+  if (!ttf_mem || !bitmap)
+    die("Failed to allocate memory for font\n");
+
+  FILE *f = mine_fopen(filename, "rb");
+  if (!f)
+    die("Failed to open ttf file %s\n", filename);
+  int num_read = fread(ttf_mem, 1, BUFFER_SIZE, f);
+  if (num_read <= 0)
+    die("Failed to read from file %s\n", filename);
+
+  int res = stbtt_BakeFontBitmap(ttf_mem, 0, height, bitmap, tex_w, tex_h, first_char, last_char - first_char, (stbtt_bakedchar*) state.glyphs);
+  if (res <= 0)
+    die("Failed to bake font: %i\n", res);
+
+  state.text_texture = Texture::create_from_data(GL_TEXTURE_2D, GL_RED, GL_RED, tex_w, tex_h, bitmap, GL_LINEAR, GL_LINEAR);
+  state.text_pipeline.textures[state.text_pipeline.num_textures++] = &state.text_texture;
+
+  fclose(f);
+  free(ttf_mem);
+  free(bitmap);
 }
 
 static void skybox_gl_buffer_create() {
@@ -2906,8 +2974,9 @@ static void skybox_gl_buffer_create() {
 
   // create and bind
   VertexDataSpec vspec[] = {VERTEXDATA_FLOAT(SkyboxVertex, pos)};
-  state.skybox_pipeline.vb = VertexBuffer::create(vspec, ARRAY_LEN(vspec), false);
-  state.skybox_pipeline.vb.set_vbo_data(vertices, sizeof(vertices), GL_STATIC_DRAW);
+  state.skybox_vb = VertexBuffer::create(vspec, ARRAY_LEN(vspec), false);
+  state.skybox_pipeline.vb = &state.skybox_vb;
+  state.skybox_pipeline.vb->set_vbo_data(vertices, sizeof(vertices), GL_STATIC_DRAW);
 
   // create shader
   state.skybox_pipeline.shader = Shader::create_from_string(skybox_vertex_shader, skybox_fragment_shader);
@@ -2965,67 +3034,6 @@ static void skybox_gl_buffer_create() {
   glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
   glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
   glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);  
-}
-
-static void ui_gl_buffer_create() {
-  VertexDataSpec vspec[] = {
-    VERTEXDATA_FLOAT(QuadVertex, pos),
-    VERTEXDATA_FLOAT(QuadVertex, tex)
-  };
-  state.quad_vb = VertexBuffer::create(vspec, ARRAY_LEN(vspec), true);
-
-  state.ui_shader = Shader::create_from_string(ui_vertex_shader, ui_fragment_shader);
-  state.ui_shader.set("u_texture", 0);
-
-  state.ui_texture = state.block_texture;
-}
-
-static void text_gl_buffer_create() {
-  VertexDataSpec vspec [] = {
-    VERTEXDATA_FLOAT(QuadVertex, pos),
-    VERTEXDATA_FLOAT(QuadVertex, tex)
-  };
-
-  state.text_vb = VertexBuffer::create(vspec, ARRAY_LEN(vspec), false);
-
-  state.text_shader = Shader::create_from_string(text_vertex_shader, text_fragment_shader);
-  state.text_shader.use();
-
-  // load font from file and create texture
-  state.text_atlas_size.x = 512;
-  state.text_atlas_size.y = 512;
-  const char *filename = "font.ttf";
-  const int BUFFER_SIZE = 1024*1024;
-  const int tex_w = state.text_atlas_size.x;
-  const int tex_h = state.text_atlas_size.y;
-  const int first_char = RENDERER_FIRST_CHAR;
-  const int last_char = RENDERER_LAST_CHAR;
-  const float height = RENDERER_FONT_SIZE;
-
-  unsigned char *ttf_mem = (unsigned char*)malloc(BUFFER_SIZE);
-  unsigned char *bitmap = (unsigned char*)malloc(tex_w * tex_h);
-  if (!ttf_mem || !bitmap)
-    die("Failed to allocate memory for font\n");
-
-  FILE *f = mine_fopen(filename, "rb");
-  if (!f)
-    die("Failed to open ttf file %s\n", filename);
-  int num_read = fread(ttf_mem, 1, BUFFER_SIZE, f);
-  if (num_read <= 0)
-    die("Failed to read from file %s\n", filename);
-
-  int res = stbtt_BakeFontBitmap(ttf_mem, 0, height, bitmap, tex_w, tex_h, first_char, last_char - first_char, (stbtt_bakedchar*) state.glyphs);
-  if (res <= 0)
-    die("Failed to bake font: %i\n", res);
-
-  state.text_texture = Texture::create_from_data(GL_TEXTURE_2D, GL_RED, GL_RED, tex_w, tex_h, bitmap, GL_LINEAR, GL_LINEAR);
-  state.text_shader.set("u_texture", 0);
-
-  fclose(f);
-  free(ttf_mem);
-  free(bitmap);
-
-  glBindVertexArray(0);
 }
 
 static void push_quad(v2 x, v2 w, v2 t, v2 tw) {
@@ -3477,7 +3485,7 @@ static void sdl_init() {
 
 static void render_transparent_blocks(const m4 &) {
   if (state.transparent_block_vertices_dirty) {
-    state.transparent_block_pipeline.vb.bind();
+    state.transparent_block_pipeline.vb->bind();
     glBufferData(GL_ARRAY_BUFFER, state.transparent_block_vertices.size*sizeof(*state.transparent_block_vertices.items), state.transparent_block_vertices.items, GL_DYNAMIC_DRAW);
     glBufferData(GL_ELEMENT_ARRAY_BUFFER, state.transparent_block_elements.size*sizeof(*state.transparent_block_elements.items), state.transparent_block_elements.items, GL_DYNAMIC_DRAW);
     state.transparent_block_vertices_dirty = false;
@@ -3487,24 +3495,11 @@ static void render_transparent_blocks(const m4 &) {
   state.transparent_block_pipeline.render(state.transparent_block_elements.size);
 }
 
-static void flush_quads(Shader shader) {
-  glDisable(GL_DEPTH_TEST);
-  shader.use();
-
-  state.quad_vb.bind();
-
-  // debug: draw the shadowmap instead :3
-  #if 0
-    glBindTexture(GL_TEXTURE_2D, state.shadowmap);
-    push_quad({0.0f, 0.0f}, {0.3f, 0.3f}, {0.0f, 0.0f}, {1.0f, 1.0f});
-  #endif
-
+static void flush_quads(const RenderPipeline &p) {
+  p.vb->bind();
   glBufferData(GL_ARRAY_BUFFER, state.quad_vertices.size*sizeof(*state.quad_vertices.items), state.quad_vertices.items, GL_DYNAMIC_DRAW);
   glBufferData(GL_ELEMENT_ARRAY_BUFFER, state.quad_elements.size*sizeof(*state.quad_elements.items), state.quad_elements.items, GL_DYNAMIC_DRAW);
-
-  glDrawElements(GL_TRIANGLES, state.quad_elements.size, GL_UNSIGNED_INT, 0);
-  state.quad_vb.unbind();
-
+  p.render(state.quad_elements.size);
   state.quad_vertices.size = state.quad_elements.size = 0;
 }
 
@@ -3513,22 +3508,16 @@ static void render_gbuffer() {
   // draw a big quad over the screen with the gbuffer texture
   push_quad({0.0f, 0.0f}, {1.0f, 1.0f}, {0.0f, 0.0f}, {1.0f, 1.0f});
 
-  // bind textures
-  state.gbuffer_color_target.bind(0);
-  state.gbuffer_depth_target.bind(1);
-  state.gbuffer_normal_target.bind(2);
-  state.gbuffer_position_target.bind(3);
+  state.post_processing_pipeline.shader.set("u_near", state.nearz);
+  state.post_processing_pipeline.shader.set("u_far", state.farz);
 
-  state.post_processing_shader.set("u_near", state.nearz);
-  state.post_processing_shader.set("u_far", state.farz);
-
-  flush_quads(state.post_processing_shader);
+  flush_quads(state.post_processing_pipeline);
 }
 
 static void render_opaque_blocks(m4 viewprojection) {
   // resend block vertices to gpu if they changed
   if (state.block_vertices_dirty) {
-    state.opaque_block_pipeline.vb.bind();
+    state.opaque_block_pipeline.vb->bind();
     glBufferData(GL_ARRAY_BUFFER, state.block_vertices.size*sizeof(*state.block_vertices.items), state.block_vertices.items, GL_DYNAMIC_DRAW);
     glBufferData(GL_ELEMENT_ARRAY_BUFFER, state.block_elements.size*sizeof(*state.block_elements.items), state.block_elements.items, GL_DYNAMIC_DRAW);
     state.block_vertices_dirty = false;
@@ -3646,39 +3635,36 @@ static void render_ui() {
   else
     push_text(state.player.on_ground ? "Ground" : "Air", status_pos, 0.05f, ALIGN_RIGHT);
 
-  // texture
-  state.ui_texture.bind(0);
+  // debug: draw the shadowmap instead :3
+  #if 0
+    state.ui_pipeline.textures[0] = state.shadowmap;
+    push_quad({0.0f, 0.0f}, {0.3f, 0.3f}, {0.0f, 0.0f}, {1.0f, 1.0f});
+  #endif
 
-  flush_quads(state.ui_shader);
+  // texture
+  flush_quads(state.ui_pipeline);
 }
 
 static void render_text() {
-  glEnable(GL_BLEND);
-  glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-  glDisable(GL_CULL_FACE);
-
-  state.text_shader.use();
-
   // data
-  state.text_vb.bind();
-  state.text_texture.bind(0);
-  glBufferData(GL_ARRAY_BUFFER, state.text_vertices.size*sizeof(*state.text_vertices.items), state.text_vertices.items, GL_DYNAMIC_DRAW);
+  state.text_pipeline.vb->set_vbo_data(state.text_vertices.items, state.text_vertices.size*sizeof(*state.text_vertices.items));
 
   // shadow
-  state.text_shader.set("utextcolor", v4{0.0f, 0.0f, 0.0f, 0.7f});
-  state.text_shader.set("utextoffset", v2{0.003f, -0.003f});
-  glDrawArrays(GL_TRIANGLES, 0, state.text_vertices.size);
+  state.text_pipeline.shader.set("utextcolor", v4{0.0f, 0.0f, 0.0f, 0.7f});
+  state.text_pipeline.shader.set("utextoffset", v2{0.003f, -0.003f});
+  state.text_pipeline.render(state.text_vertices.size);
 
   // shadow
-  state.text_shader.set("utextcolor", v4{0.0f, 0.0f, 0.0f, 0.5f});
-  state.text_shader.set("utextoffset", v2{-0.003f, 0.003f});
-  glDrawArrays(GL_TRIANGLES, 0, state.text_vertices.size);
+  state.text_pipeline.shader.set("utextcolor", v4{0.0f, 0.0f, 0.0f, 0.5f});
+  state.text_pipeline.shader.set("utextoffset", v2{-0.003f, 0.003f});
+  state.text_pipeline.render(state.text_vertices.size);
 
   // text
-  state.text_shader.set("utextcolor", v4{0.99f, 0.99f, 0.99f, 1.0f});
-  state.text_shader.set("utextoffset", v2{0.0f, 0.0f});
-  glDrawArrays(GL_TRIANGLES, 0, state.text_vertices.size);
-  state.text_vb.unbind();
+  state.text_pipeline.shader.set("utextcolor", v4{0.99f, 0.99f, 0.99f, 1.0f});
+  state.text_pipeline.shader.set("utextoffset", v2{0.0f, 0.0f});
+  state.text_pipeline.render(state.text_vertices.size);
+
+  state.text_vertices.size = 0;
 }
 
 static void block_loader_load_block(Block b) {
@@ -3877,9 +3863,6 @@ mine_main {
     // time
     const float dt = clamp((SDL_GetTicks() - time)/(1000.0f/60.0f), 0.33f, 3.0f);
     time = SDL_GetTicks();
-
-    // reset some rendering
-    reset_text_vertices();
 
     // read input
     read_input();
