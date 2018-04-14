@@ -1444,33 +1444,6 @@ struct BlockLoaderCommand {
   BlockRange range;
 };
 
-struct CubeMap {
-  GLuint id;
-  int size;
-
-  void bind_as_texture() {
-
-  }
-
-  void bind(int texture_index) {
-    glActiveTexture(GL_TEXTURE0 + texture_index);
-    glBindTexture(GL_TEXTURE_CUBE_MAP, this->id);
-  }
-
-  void set_data(int face, GLint format, GLenum type, void *data) {
-    glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + face,
-                 0, GL_RGB, this->size, this->size, 0, format,
-                 type, data);
-  }
-
-  static CubeMap create(int height) {
-    CubeMap c = {};
-    c.size = height;
-    glGenTextures(1, &c.id);
-    return c;
-  }
-};
-
 static int gl_format_to_num_channels(GLenum format) {
   switch (format) {
     case GL_RED:
@@ -1519,8 +1492,13 @@ struct VertexDataSpec {
 struct VertexBuffer {
   GLuint vao;
   GLuint vbo;
+  GLuint ebo;
 
-  void set_data(void *data, int size, GLenum usage = GL_DYNAMIC_DRAW) {
+  bool has_element_buffer() const {
+    return ebo;
+  }
+
+  void set_vbo_data(void *data, int size, GLenum usage = GL_DYNAMIC_DRAW) {
     glBindBuffer(GL_ARRAY_BUFFER, this->vbo);
     glBufferData(GL_ARRAY_BUFFER, size, data, usage);
   }
@@ -1528,19 +1506,27 @@ struct VertexBuffer {
   void bind() const {
     glBindVertexArray(this->vao);
     glBindBuffer(GL_ARRAY_BUFFER, this->vbo);
+    if (this->ebo)
+      glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, this->ebo);
   }
 
   void unbind() const {
     glBindVertexArray(0);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
+    if (this->ebo)
+      glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
   }
 
-  static VertexBuffer create(VertexDataSpec info[], int num_info) {
+  static VertexBuffer create(VertexDataSpec info[], int num_info, bool create_element_buffer) {
     VertexBuffer vb = {};
     glGenVertexArrays(1, &vb.vao);
     glGenBuffers(1, &vb.vbo);
     glBindVertexArray(vb.vao);
     glBindBuffer(GL_ARRAY_BUFFER, vb.vbo);
+    if (create_element_buffer) {
+      glGenBuffers(1, &vb.ebo);
+      glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, vb.ebo);
+    }
 
     for (int i = 0; i < num_info; ++i) {
       VertexDataSpec v = info[i];
@@ -1557,35 +1543,9 @@ struct VertexBuffer {
 
     glBindVertexArray(0);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
+    if (create_element_buffer)
+      glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
     return vb;
-  }
-};
-
-struct VertexElementBuffer {
-  GLuint vao;
-  GLuint vbo;
-  GLuint ebo; // not always used
-
-  void bind() const {
-    glBindVertexArray(this->vao);
-    glBindBuffer(GL_ARRAY_BUFFER, this->vbo);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, this->ebo);
-  }
-
-  void unbind() const {
-    glBindVertexArray(0);
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
-  }
-
-  static VertexElementBuffer create(VertexDataSpec info[], int num_info) {
-    GLuint ebo;
-    glGenBuffers(1, &ebo);
-
-    // piggy back on VertexBuffer
-    VertexBuffer vb = VertexBuffer::create(info, num_info);
-
-    return {vb.vao, vb.vbo, ebo};
   }
 };
 
@@ -1748,6 +1708,28 @@ struct Texture {
   }
 };
 
+struct CubeMap {
+  Texture texture;
+
+  void bind(int texture_index) {
+    texture.bind(texture_index);
+  }
+
+  void set_data(int face, GLint format, GLenum type, void *data) {
+    glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + face,
+                 0, GL_RGB, this->texture.w, this->texture.h, 0, format,
+                 type, data);
+  }
+
+  static CubeMap create(int height) {
+    CubeMap c = {};
+    c.texture.w = c.texture.h = height;
+    c.texture.type = GL_TEXTURE_CUBE_MAP;
+    glGenTextures(1, &c.texture.id);
+    return c;
+  }
+};
+
 struct FrameBuffer {
   #define MAX_COLOR_TARGETS 8
   GLuint id;
@@ -1807,44 +1789,90 @@ struct FrameBuffer {
   }
 };
 
-
-// TODO: add flags like GL_DEPTH_TEST, GL_CULL_FACE, glBlendFunc, and so on
+enum RenderFlag {
+  RENDERFLAG_DEPTH_TEST      = 1 << 0,
+  RENDERFLAG_BLEND           = 1 << 1,
+  RENDERFLAG_CULL_FRONT_FACE = 1 << 2,
+  RENDERFLAG_CULL_BACK_FACE  = 1 << 3,
+};
 struct RenderPipeline {
   Shader shader;
+  RenderFlag render_flags;
 
-  enum {VERTEX_BUFFER, VERTEX_ELEMENT_BUFFER} buffer_type;
-  union {
-    VertexBuffer vb; // buffer_type = VERTEX_BUFFER
-    VertexElementBuffer veb; // buffer_type = VERTEX_ELEMENT_BUFFER
-  };
+  VertexBuffer vb;
 
-  Texture textures[16];
+  Texture *textures[16];
   int num_textures;
 
-  FrameBuffer framebuffer;
+  FrameBuffer *framebuffer;
+
+  void clear() const {
+    this->framebuffer->bind();
+    glClear(GL_COLOR_BUFFER_BIT);
+    if (render_flags | RENDERFLAG_DEPTH_TEST)
+      glClear(GL_DEPTH_BUFFER_BIT);
+  }
+
+  void render(int num_vertices) const {
+    this->framebuffer->bind();
+
+    // use shader
+    gl_ok_or_die;
+    this->shader.use();
+    gl_ok_or_die;
+
+    // bind textures
+    for (int i = 0; i < this->num_textures; ++i)
+      this->textures[i]->bind(i);
+    gl_ok_or_die;
+
+    // TODO: after we've converted everthing to RenderPipeline, uncomment the disables
+    // depth
+    if (this->render_flags & RENDERFLAG_DEPTH_TEST)
+      glEnable(GL_DEPTH_TEST);
+    // else
+      // glDisable(GL_DEPTH_TEST);
+
+    // blend
+    if (this->render_flags & RENDERFLAG_BLEND) {
+      glEnable(GL_BLEND);
+      glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    }
+    // else {
+    //   glDisable(GL_BLEND);
+    // }
+
+    // cull front
+    if (this->render_flags & RENDERFLAG_CULL_FRONT_FACE) {
+      glEnable(GL_CULL_FACE);
+      glCullFace(GL_FRONT);
+    }
+    // else {
+    //   glDisable(GL_CULL_FACE);
+    // }
+
+    // cull back
+    if (this->render_flags & RENDERFLAG_CULL_BACK_FACE) {
+      glEnable(GL_CULL_FACE);
+      glCullFace(GL_BACK);
+    }
+    // else {
+    //   glDisable(GL_CULL_FACE);
+    // }
+
+    gl_ok_or_die;
+
+    // bind VAO and draw
+    this->vb.bind();
+    if (this->vb.has_element_buffer())
+      glDrawElements(GL_TRIANGLES, num_vertices, GL_UNSIGNED_INT, 0);
+    else
+      glDrawArrays(GL_TRIANGLES, 0, num_vertices);
+    gl_ok_or_die;
+  }
 };
 
-void render(const RenderPipeline& rp, int num_quads) {
-  // use shader
-  rp.shader.use();
 
-  // bind textures
-  for (int i = 0; i < rp.num_textures; ++i)
-    rp.textures[i].bind(i);
-
-  // bind VAO and draw
-  switch (rp.buffer_type) {
-    case RenderPipeline::VERTEX_BUFFER:
-      rp.vb.bind();
-      glDrawArrays(GL_TRIANGLES, 0, num_quads*6);
-      break;
-    case RenderPipeline::VERTEX_ELEMENT_BUFFER:
-      rp.veb.bind();
-      glDrawElements(GL_TRIANGLES, num_quads*6, GL_UNSIGNED_INT, 0);
-      break;
-  }
-  gl_ok_or_die;
-}
 
 // cache for world generation stuff that is the same over all Z
 struct WorldXYData {
@@ -1919,8 +1947,7 @@ struct GameState {
     #define NUM_BLOCK_SIDES_IN_TEXTURE 3 // the number of different textures we have per block. at the moment, it is top,side,bottom
     #define BLOCK_TEXTURE_SIZE 16
 
-    VertexElementBuffer block_vb;
-    Shader block_shader;
+    RenderPipeline opaque_block_pipeline;
     Texture block_texture;
 
     Array<BlockVertex> block_vertices;
@@ -1934,8 +1961,8 @@ struct GameState {
     Map<u64, int, 0, UINT32_MAX> block_vertex_pos;
 
     // shadowmapping stuff, see https://learnopengl.com/Advanced-Lighting/Shadows/Shadow-Mapping for a great tutorial on shadowmapping
-    Shader shadowmap_shader;
-    FrameBuffer gl_block_shadowmap_fbo;
+    RenderPipeline shadowmap_pipeline;
+    FrameBuffer shadowmap_framebuffer;
     Texture block_shadowmap;
     #define SHADOWMAP_WIDTH (1024*2)
     #define SHADOWMAP_HEIGHT (1024*2)
@@ -1946,7 +1973,7 @@ struct GameState {
     Shader post_processing_shader;
 
     // same thing as all of the above, but for transparent blocks (since they need to be rendered separately after everything else has rendered in order for them to look correct)
-    VertexElementBuffer transparent_block_vb;
+    VertexBuffer transparent_block_vb;
     Array<BlockVertex> transparent_block_vertices;
     Array<uint> transparent_block_elements;
     Array<int> free_transparent_faces;
@@ -1963,7 +1990,7 @@ struct GameState {
     Array<QuadVertex> quad_vertices;
     Array<uint> quad_elements;
 
-    VertexElementBuffer quad_vb;
+    VertexBuffer quad_vb;
     Shader ui_shader;
     Texture ui_texture;
 
@@ -2763,23 +2790,27 @@ static void push_text(const char *str, v2 pos, float height, TextAlignment align
   }
 }
 
-
 static void block_gl_buffer_create() {
+  state.block_texture = Texture::create_from_file("textures.bmp", GL_TEXTURE_2D, GL_RGB, GL_SRGB_ALPHA);
+
   VertexDataSpec block_vertexspec[] = {
     VERTEXDATA_INT(BlockVertex, pos),
     VERTEXDATA_NORMALIZED_INT(BlockVertex, tex),
     VERTEXDATA_INT(BlockVertex, direction)
   };
-  state.block_vb = VertexElementBuffer::create(block_vertexspec, ARRAY_LEN(block_vertexspec));
+  state.opaque_block_pipeline.shader = Shader::create_from_string(block_vertex_shader, block_fragment_shader);
+  state.opaque_block_pipeline.shader.set("u_fog_near", 100.0f);
+  state.opaque_block_pipeline.shader.set("u_fog_far", 130.0f);
+  state.opaque_block_pipeline.shader.set("u_texture", 0);
+  state.opaque_block_pipeline.textures[state.opaque_block_pipeline.num_textures++] = &state.block_texture;
+  state.opaque_block_pipeline.shader.set("u_shadowmap", 1);
+  state.opaque_block_pipeline.textures[state.opaque_block_pipeline.num_textures++] = &state.block_shadowmap;
+  state.opaque_block_pipeline.shader.set("u_skybox", 2);
+  state.opaque_block_pipeline.textures[state.opaque_block_pipeline.num_textures++] = &state.skybox_texture.texture;
+  state.opaque_block_pipeline.vb = VertexBuffer::create(block_vertexspec, ARRAY_LEN(block_vertexspec), true);
+  state.opaque_block_pipeline.framebuffer = &state.gbuffer;
+  state.opaque_block_pipeline.render_flags = (RenderFlag)(RENDERFLAG_CULL_BACK_FACE, RENDERFLAG_DEPTH_TEST);
 
-  state.block_shader = Shader::create_from_string(block_vertex_shader, block_fragment_shader);
-  state.block_shader.set("u_fog_near", 100.0f);
-  state.block_shader.set("u_fog_far", 130.0f);
-  state.block_shader.set("u_texture", 0);
-  state.block_shader.set("u_shadowmap", 1);
-  state.block_shader.set("u_skybox", 2);
-
-  state.block_texture = Texture::create_from_file("textures.bmp", GL_TEXTURE_2D, GL_RGB, GL_SRGB_ALPHA);
   blocktype_to_texpos(BLOCKTYPE_WATER, &state.water_texture_pos.x, &state.water_texture_pos.y, &state.water_texture_pos.w, &state.water_texture_pos.h);
   if (state.water_texture_pos.w*state.water_texture_pos.h*4 != ARRAY_LEN(state.water_texture_buffer))
     die("Maths went wrong, expected %lu but got %i", ARRAY_LEN(state.water_texture_buffer), state.water_texture_pos.w*state.water_texture_pos.h*4);
@@ -2801,12 +2832,15 @@ static void block_gl_buffer_create() {
   state.post_processing_shader.set("u_position", 3);
 
   // create shadowmap FBO
-  state.shadowmap_shader = Shader::create_from_string(shadowmap_vertex_shader, shadowmap_fragment_shader);
   state.block_shadowmap = Texture::create_empty(GL_TEXTURE_2D, GL_DEPTH_COMPONENT, GL_DEPTH_COMPONENT, SHADOWMAP_WIDTH, SHADOWMAP_HEIGHT, GL_NEAREST, GL_NEAREST);
-  state.gl_block_shadowmap_fbo = FrameBuffer::create(0, 0, &state.block_shadowmap);
+  state.shadowmap_pipeline.shader = Shader::create_from_string(shadowmap_vertex_shader, shadowmap_fragment_shader);
+  state.shadowmap_framebuffer = FrameBuffer::create(0, 0, &state.block_shadowmap);
+  state.shadowmap_pipeline.framebuffer = &state.shadowmap_framebuffer;
+  state.shadowmap_pipeline.vb = state.opaque_block_pipeline.vb;
+  state.shadowmap_pipeline.render_flags = (RenderFlag)(RENDERFLAG_DEPTH_TEST | RENDERFLAG_CULL_FRONT_FACE);
 
   // create transparent block vbo
-  state.transparent_block_vb = VertexElementBuffer::create(block_vertexspec, ARRAY_LEN(block_vertexspec));
+  state.transparent_block_vb = VertexBuffer::create(block_vertexspec, ARRAY_LEN(block_vertexspec), true);
 }
 
 static void skybox_gl_buffer_create() {
@@ -2860,8 +2894,8 @@ static void skybox_gl_buffer_create() {
 
   // create and bind
   VertexDataSpec vspec[] = {VERTEXDATA_FLOAT(SkyboxVertex, pos)};
-  state.skybox_vb = VertexBuffer::create(vspec, ARRAY_LEN(vspec));
-  state.skybox_vb.set_data(vertices, sizeof(vertices), GL_STATIC_DRAW);
+  state.skybox_vb = VertexBuffer::create(vspec, ARRAY_LEN(vspec), false);
+  state.skybox_vb.set_vbo_data(vertices, sizeof(vertices), GL_STATIC_DRAW);
 
   // create shader
   state.skybox_shader = Shader::create_from_string(skybox_vertex_shader, skybox_fragment_shader);
@@ -2870,14 +2904,6 @@ static void skybox_gl_buffer_create() {
   // generate texture
   state.skybox_texture = CubeMap::create(SKYBOX_TEXTURE_SIZE);
   state.skybox_texture.bind(0);
-  // const char *filenames[] = {
-  //   "right.jpg",
-  //   "left.jpg",
-  //   "bottom.jpg",
-  //   "top.jpg",
-  //   "front.jpg",
-  //   "back.jpg",
-  // };
 
   // magic math to generate a pretty skybox
   const float y_offset[] = {0.0f,  0.0f, -0.5f, 0.5f, 0.0f, 1.0f};
@@ -2931,7 +2957,7 @@ static void ui_gl_buffer_create() {
     VERTEXDATA_FLOAT(QuadVertex, pos),
     VERTEXDATA_FLOAT(QuadVertex, tex)
   };
-  state.quad_vb = VertexElementBuffer::create(vspec, ARRAY_LEN(vspec));
+  state.quad_vb = VertexBuffer::create(vspec, ARRAY_LEN(vspec), true);
 
   state.ui_shader = Shader::create_from_string(ui_vertex_shader, ui_fragment_shader);
   state.ui_shader.set("u_texture", 0);
@@ -2945,7 +2971,7 @@ static void text_gl_buffer_create() {
     VERTEXDATA_FLOAT(QuadVertex, tex)
   };
 
-  state.text_vb = VertexBuffer::create(vspec, ARRAY_LEN(vspec));
+  state.text_vb = VertexBuffer::create(vspec, ARRAY_LEN(vspec), false);
 
   state.text_shader = Shader::create_from_string(text_vertex_shader, text_fragment_shader);
   state.text_shader.use();
@@ -3443,7 +3469,7 @@ static void render_transparent_blocks(const m4 &) {
   // glDisable(GL_CULL_FACE);
   glEnable(GL_DEPTH_TEST);
   // glDisable(GL_DEPTH_TEST);
-  state.block_shader.use();
+  state.opaque_block_pipeline.shader.use();
 
   state.transparent_block_vb.bind();
   state.block_texture.bind(0);
@@ -3502,7 +3528,7 @@ static void render_gbuffer() {
 static void render_opaque_blocks(m4 viewprojection) {
   // update data if necessary
   if (state.block_vertices_dirty) {
-    state.block_vb.bind();
+    state.opaque_block_pipeline.vb.bind();
     glBufferData(GL_ARRAY_BUFFER, state.block_vertices.size*sizeof(*state.block_vertices.items), state.block_vertices.items, GL_DYNAMIC_DRAW);
     glBufferData(GL_ELEMENT_ARRAY_BUFFER, state.block_elements.size*sizeof(*state.block_elements.items), state.block_elements.items, GL_DYNAMIC_DRAW);
     state.block_vertices_dirty = false;
@@ -3529,79 +3555,30 @@ static void render_opaque_blocks(m4 viewprojection) {
 
   m4 shadowmap_viewprojection;
   {
-    glViewport(0, 0, SHADOWMAP_WIDTH, SHADOWMAP_HEIGHT);
-    state.gl_block_shadowmap_fbo.bind();
-    glEnable(GL_DEPTH_TEST);
-    glClear(GL_DEPTH_BUFFER_BIT);
-    // glDisable(GL_CULL_FACE);
-    glEnable(GL_CULL_FACE);
-    glCullFace(GL_FRONT);
-
     // calculate camera position and projection matrix
     Camera lightview = {};
-    v3 pos;
-    if (sun_is_visible)
-      pos = state.player.pos - 100 * sun_direction;
-    else
-      pos = state.player.pos - 100 * moon_direction;
+    v3 pos = state.player.pos - 100 * (sun_is_visible ? sun_direction : moon_direction);
     camera_lookat(&lightview, pos, state.player.pos);
     shadowmap_viewprojection = camera_viewortho_matrix(&lightview, pos, 50, 50, 30.0f, 200.0f);
-    state.shadowmap_shader.set("u_viewprojection", shadowmap_viewprojection);
+    state.shadowmap_pipeline.shader.set("u_viewprojection", shadowmap_viewprojection);
 
-    // draw
-    state.block_vb.bind();
-    state.shadowmap_shader.use();
+    state.shadowmap_pipeline.clear();
+    state.shadowmap_pipeline.render(state.block_elements.size);
 
-    glDrawElements(GL_TRIANGLES, state.block_elements.size, GL_UNSIGNED_INT, 0);
-
-    state.block_vb.unbind();
-    FrameBuffer::bind_default();
-
-    glViewport(0, 0, state.screen_width, state.screen_height);
-    glEnable(GL_CULL_FACE);
     glCullFace(GL_BACK);
   }
 
-  #if 0
-  viewprojection = shadowmap_viewprojection;
-  #endif
-
-  state.gbuffer.bind();
-  gl_ok_or_die;
-
-  state.block_shader.use();
-  glEnable(GL_BLEND);
-  glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-  glEnable(GL_CULL_FACE);
-  glEnable(GL_DEPTH_TEST);
-
   // camera
-  state.block_shader.set("u_camerapos", state.camera_pos);
-  state.block_shader.set("u_viewprojection", viewprojection);
-  state.block_shader.set("u_shadowmap_viewprojection", shadowmap_viewprojection);
-
-  state.block_shader.set("u_ambient", state.ambient_light);
-  if (sun_is_visible)
-    state.block_shader.set("u_skylight_dir", sun_direction);
-  else
-    state.block_shader.set("u_skylight_dir", moon_direction);
+  state.opaque_block_pipeline.shader.set("u_camerapos", state.camera_pos);
+  state.opaque_block_pipeline.shader.set("u_viewprojection", viewprojection);
+  state.opaque_block_pipeline.shader.set("u_shadowmap_viewprojection", shadowmap_viewprojection);
+  state.opaque_block_pipeline.shader.set("u_ambient", state.ambient_light);
+  state.opaque_block_pipeline.shader.set("u_skylight_dir", sun_is_visible ? sun_direction : moon_direction);
   float light_strength = sun_is_visible ? 0.5f : 0.03f;
-  state.block_shader.set("u_skylight_color", v3{light_strength, light_strength, light_strength});
+  state.opaque_block_pipeline.shader.set("u_skylight_color", v3{light_strength, light_strength, light_strength});
   gl_ok_or_die;
 
-  // textures
-  state.block_vb.bind();
-  state.block_texture.bind(0);
-  state.block_shadowmap.bind(1);
-  state.skybox_texture.bind(2);
-  gl_ok_or_die;
-
-  // draw
-  glDrawElements(GL_TRIANGLES, state.block_elements.size, GL_UNSIGNED_INT, 0);
-  glBindVertexArray(0);
-  gl_ok_or_die;
-
-  FrameBuffer::bind_default();
+  state.opaque_block_pipeline.render(state.block_elements.size);
   gl_ok_or_die;
 }
 
