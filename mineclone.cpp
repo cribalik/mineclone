@@ -1916,8 +1916,12 @@ struct GameState {
 
   // block graphics data
   struct {
-    // block
     #define NUM_BLOCK_SIDES_IN_TEXTURE 3 // the number of different textures we have per block. at the moment, it is top,side,bottom
+    #define BLOCK_TEXTURE_SIZE 16
+
+    VertexElementBuffer block_vb;
+    Shader block_shader;
+    Texture block_texture;
 
     Array<BlockVertex> block_vertices;
     Array<uint> block_elements;
@@ -1929,30 +1933,26 @@ struct GameState {
     // mapping from block face to the position in the vertex array, to optimize removal of blocks. use get_block_vertex_pos to get 
     Map<u32, int, 0, UINT32_MAX> block_vertex_pos;
 
-    VertexElementBuffer block_vb;
-    Shader block_shader;
-    Texture block_texture;
     // shadowmapping stuff, see https://learnopengl.com/Advanced-Lighting/Shadows/Shadow-Mapping for a great tutorial on shadowmapping
     Shader shadowmap_shader;
     FrameBuffer gl_block_shadowmap_fbo;
     Texture block_shadowmap;
     #define SHADOWMAP_WIDTH (1024*2)
     #define SHADOWMAP_HEIGHT (1024*2)
+
     // post processing stuff (https://learnopengl.com/Advanced-Lighting/Deferred-Shading)
-    // FrameBuffer gbuffer;
-    Texture gbuffer_color_target, gbuffer_depth_target, gbuffer_normal_target, gbuffer_position_target;
     FrameBuffer gbuffer;
+    Texture gbuffer_color_target, gbuffer_depth_target, gbuffer_normal_target, gbuffer_position_target;
     Shader post_processing_shader;
 
-    // same thing as all of the above, but for transparent blocks! (since they need to be rendered separately, because they look weird otherwise)
-    bool transparent_block_vertices_dirty;
+    // same thing as all of the above, but for transparent blocks (since they need to be rendered separately after everything else has rendered in order for them to look correct)
+    VertexElementBuffer transparent_block_vb;
     Array<BlockVertex> transparent_block_vertices;
     Array<uint> transparent_block_elements;
     Array<int> free_transparent_faces;
-    VertexElementBuffer transparent_block_vb;
+    bool transparent_block_vertices_dirty;
 
-    #define BLOCK_TEXTURE_SIZE 16
-    // where in the texture buffer is the water texture. We manipulate the texture every frame so we get moving water :)
+    // where in the texture buffer is the water texture. We change the texture every frame to fake moving water
     struct {int x,y,w,h;} water_texture_pos;
     u8 water_texture_buffer[BLOCK_TEXTURE_SIZE*BLOCK_TEXTURE_SIZE*NUM_BLOCK_SIDES_IN_TEXTURE*4]; // 4 because of rgba
   };
@@ -1960,7 +1960,6 @@ struct GameState {
   // ui graphics data
   struct {
     // ui widgets
-
     Array<QuadVertex> quad_vertices;
     Array<uint> quad_elements;
 
@@ -2003,21 +2002,21 @@ struct GameState {
 
   // player data
   struct {
-    v3 player_hitbox;
-    v3 player_vel;
-    v3 player_pos;
-    bool player_on_ground;
+    v3 hitbox;
+    v3 vel;
+    v3 pos;
+    bool on_ground;
     bool god_mode;
-    bool player_flying;
-  };
+    bool flying;
+  } player;
 
   // inventory stuff
   struct {
     bool render_quickmenu;
-    bool is_inventory_open;
+    bool is_open;
     int selected_item;
-    Item inventory[8];
-  };
+    Item items[8];
+  } inventory;
 };
 static GameState state;
 
@@ -2028,18 +2027,18 @@ static Glyph& glyph_get(char c) {
 static bool add_block_to_inventory(BlockType block_type) {
   const int STACK_SIZE = 64;
   // check if already exists
-  for (int i = 0; i < (int)ARRAY_LEN(state.inventory); ++i) {
-    if (state.inventory[i].type == ITEM_BLOCK && state.inventory[i].block.type == block_type && state.inventory[i].block.num < STACK_SIZE) {
-      ++state.inventory[i].block.num;
+  for (int i = 0; i < (int)ARRAY_LEN(state.inventory.items); ++i) {
+    if (state.inventory.items[i].type == ITEM_BLOCK && state.inventory.items[i].block.type == block_type && state.inventory.items[i].block.num < STACK_SIZE) {
+      ++state.inventory.items[i].block.num;
       return true;
     }
   }
 
   // otherwise find a free one
-  for (int i = 0; i < (int)ARRAY_LEN(state.inventory); ++i) {
-    if (state.inventory[i].type == ITEM_NULL) {
-      state.inventory[i].type = ITEM_BLOCK;
-      state.inventory[i].block = {block_type, 1};
+  for (int i = 0; i < (int)ARRAY_LEN(state.inventory.items); ++i) {
+    if (state.inventory.items[i].type == ITEM_NULL) {
+      state.inventory.items[i].type = ITEM_BLOCK;
+      state.inventory.items[i].block = {block_type, 1};
       return true;
     }
   }
@@ -2050,9 +2049,9 @@ static Block pos_to_block(v3 p) {
   return {(int)floorf(p.x), (int)floorf(p.y), (int)floorf(p.z)};
 }
 
-#define FOR_BLOCKS_IN_RANGE_x for (int x = (int)floorf(state.player_pos.x) - NUM_VISIBLE_BLOCKS_x/2, x_end = (int)floorf(state.player_pos.x) + NUM_VISIBLE_BLOCKS_x/2; x < x_end; ++x)
-#define FOR_BLOCKS_IN_RANGE_y for (int y = (int)floorf(state.player_pos.y) - NUM_VISIBLE_BLOCKS_y/2, y_end = (int)floorf(state.player_pos.y) + NUM_VISIBLE_BLOCKS_y/2; y < y_end; ++y)
-#define FOR_BLOCKS_IN_RANGE_z for (int z = (int)floorf(state.player_pos.z) - NUM_VISIBLE_BLOCKS_z/2, z_end = (int)floorf(state.player_pos.z) + NUM_VISIBLE_BLOCKS_z/2; z < z_end; ++z)
+#define FOR_BLOCKS_IN_RANGE_x for (int x = (int)floorf(state.player.pos.x) - NUM_VISIBLE_BLOCKS_x/2, x_end = (int)floorf(state.player.pos.x) + NUM_VISIBLE_BLOCKS_x/2; x < x_end; ++x)
+#define FOR_BLOCKS_IN_RANGE_y for (int y = (int)floorf(state.player.pos.y) - NUM_VISIBLE_BLOCKS_y/2, y_end = (int)floorf(state.player.pos.y) + NUM_VISIBLE_BLOCKS_y/2; y < y_end; ++y)
+#define FOR_BLOCKS_IN_RANGE_z for (int z = (int)floorf(state.player.pos.z) - NUM_VISIBLE_BLOCKS_z/2, z_end = (int)floorf(state.player.pos.z) + NUM_VISIBLE_BLOCKS_z/2; z < z_end; ++z)
 
 static Block range_get_bottom(Block b) {
   return {b.x - NUM_VISIBLE_BLOCKS_x/2, b.y - NUM_VISIBLE_BLOCKS_y/2, b.z - NUM_VISIBLE_BLOCKS_z/2, };
@@ -2277,7 +2276,7 @@ static void reset_block_vertices() {
 }
 
 static bool is_block_in_range(Block b) {
-  Block p = pos_to_block(state.player_pos);
+  Block p = pos_to_block(state.player.pos);
   return
     b.x - p.x <   NUM_VISIBLE_BLOCKS_x/2 &&
     b.x - p.x >= -NUM_VISIBLE_BLOCKS_x/2 &&
@@ -3171,8 +3170,8 @@ static void update_player(float dt) {
   const float ACCELERATION = 0.03f;
   const float GRAVITY = 0.015f;
   const float JUMPPOWER = 0.21f;
-  v3 v = state.player_vel;
-  if (state.player_flying) {
+  v3 v = state.player.vel;
+  if (state.player.flying) {
     if (state.keyisdown[KEY_FORWARD]) v += dt*camera_forward(&state.camera, ACCELERATION);
     if (state.keyisdown[KEY_BACKWARD]) v += dt*camera_backward(&state.camera, ACCELERATION);
     if (state.keyisdown[KEY_LEFT]) v += dt*camera_strafe_left(&state.camera, ACCELERATION);
@@ -3180,7 +3179,7 @@ static void update_player(float dt) {
     if (state.keyisdown[KEY_FLYUP]) v += dt*camera_up(&state.camera, ACCELERATION);
     if (state.keyisdown[KEY_FLYDOWN]) v += dt*camera_down(&state.camera, ACCELERATION);
     if (state.keypressed[KEY_JUMP])
-      state.player_flying = false;
+      state.player.flying = false;
     // proportional drag (air resistance)
     v.x *= powf(0.88f, dt);
     v.y *= powf(0.88f, dt);
@@ -3192,8 +3191,8 @@ static void update_player(float dt) {
     if (state.keyisdown[KEY_RIGHT]) v += dt*camera_strafe_right(&state.camera, ACCELERATION);
     if (state.keypressed[KEY_JUMP]) {
       v.z = JUMPPOWER;
-      if (!state.player_on_ground)
-        state.player_flying = true;
+      if (!state.player.on_ground)
+        state.player.flying = true;
     }
     v.z += -dt*GRAVITY;
     // proportional drag (air resistance)
@@ -3204,18 +3203,18 @@ static void update_player(float dt) {
     v.x -= sign(v.x) * drag.x;
     v.y -= sign(v.y) * drag.y;
   }
-  state.player_vel = v;
+  state.player.vel = v;
 
   // move camera
-  state.camera_pos = state.player_pos + CAMERA_OFFSET_FROM_PLAYER;
+  state.camera_pos = state.player.pos + CAMERA_OFFSET_FROM_PLAYER;
 
   // collision
-  Vec<Collision> hits = collision(state.player_pos, state.player_pos + state.player_vel*dt, dt, state.player_hitbox, &state.player_pos, &state.player_vel, true);
-  state.player_on_ground = false;
+  Vec<Collision> hits = collision(state.player.pos, state.player.pos + state.player.vel*dt, dt, state.player.hitbox, &state.player.pos, &state.player.vel, true);
+  state.player.on_ground = false;
   For(hits) {
     if (it->normal.z > 0.9f) {
-      state.player_on_ground = true;
-      state.player_flying = false;
+      state.player.on_ground = true;
+      state.player.flying = false;
       break;
     }
   }
@@ -3227,13 +3226,13 @@ static void update_player(float dt) {
     // find the block
     const float RAY_DISTANCE = 5.0f;
     v3 ray = camera_forward_fly(&state.camera, RAY_DISTANCE);
-    v3 p0 = state.player_pos + CAMERA_OFFSET_FROM_PLAYER;
+    v3 p0 = state.player.pos + CAMERA_OFFSET_FROM_PLAYER;
     v3 p1 = p0 + ray;
     Vec<Collision> hits = collision(p0, p1, dt, {0.01f, 0.01f, 0.01f}, 0, 0, false);
     if (hits.size) {
       debug(if (hits.size != 1) die("Multiple collisions when not gliding? Somethings wrong"));
       BlockType t = get_blocktype(hits[0].block);
-      if (state.god_mode || blocktype_is_destructible(t)) {
+      if (state.player.god_mode || blocktype_is_destructible(t)) {
         bool success = add_block_to_inventory(t);
         if (success)
           set_blocktype(hits[0].block, BLOCKTYPE_AIR);
@@ -3249,7 +3248,7 @@ static void update_player(float dt) {
     Direction d;
     const float RAY_DISTANCE = 5.0f;
     v3 ray = camera_forward_fly(&state.camera, RAY_DISTANCE);
-    v3 p0 = state.player_pos + CAMERA_OFFSET_FROM_PLAYER;
+    v3 p0 = state.player.pos + CAMERA_OFFSET_FROM_PLAYER;
     v3 p1 = p0 + ray;
     Vec<Collision> hits = collision(p0, p1, dt, {0.01f, 0.01f, 0.01f}, 0, 0, false);
     if (!hits.size)
@@ -3259,14 +3258,14 @@ static void update_player(float dt) {
 
     d = normal_to_direction(hits.items[0].normal);
     b = get_adjacent_block(hits.items[0].block, d);
-    if (state.inventory[state.selected_item].type != ITEM_BLOCK || state.inventory[state.selected_item].block.num == 0)
+    if (state.inventory.items[state.inventory.selected_item].type != ITEM_BLOCK || state.inventory.items[state.inventory.selected_item].block.num == 0)
       goto skip_blockplace;
 
-    set_blocktype(b, state.inventory[state.selected_item].block.type);
+    set_blocktype(b, state.inventory.items[state.inventory.selected_item].block.type);
 
-    --state.inventory[state.selected_item].block.num;
-    if (state.inventory[state.selected_item].block.num == 0)
-      state.inventory[state.selected_item].type = ITEM_NULL;
+    --state.inventory.items[state.inventory.selected_item].block.num;
+    if (state.inventory.items[state.inventory.selected_item].block.num == 0)
+      state.inventory.items[state.inventory.selected_item].type = ITEM_NULL;
 
     puts("hit!");
     skip_blockplace:;
@@ -3387,14 +3386,14 @@ static void debug_prints(int loopindex, float dt) {
   if (loopindex%20 == 0) {
     if (loopindex%100 == 0)
       printf("fps: %f\n", dt*60.0f);
-    // printf("player pos: %f %f %f\n", state.player_pos.x, state.player_pos.y, state.player_pos.z);
+    // printf("player pos: %f %f %f\n", state.player.pos.x, state.player.pos.y, state.player.pos.z);
     // printf("num_block_vertices: %lu\n", state.num_block_vertices*sizeof(state.block_vertices[0]));
     // printf("num free block faces: %i/%lu\n", state.num_free_faces, ARRAY_LEN(state.free_faces));
 
     // printf("items: ");
-    // for (int i = 0; i < ARRAY_LEN(state.inventory); ++i)
-    //   if (state.inventory[i].type == ITEM_BLOCK)
-    //     printf("%i ", state.inventory[i].block.num);
+    // for (int i = 0; i < ARRAY_LEN(state.inventory.items); ++i)
+    //   if (state.inventory.items[i].type == ITEM_BLOCK)
+    //     printf("%i ", state.inventory.items[i].block.num);
     // putchar('\n');
   }
 }
@@ -3423,8 +3422,8 @@ static void update_water_texture(float dt) {
 }
 
 static void update_inventory() {
-  state.selected_item -= state.scrolled;
-  state.selected_item = clamp(state.selected_item, 0, (int)ARRAY_LEN(state.inventory)-1);
+  state.inventory.selected_item -= state.scrolled;
+  state.inventory.selected_item = clamp(state.inventory.selected_item, 0, (int)ARRAY_LEN(state.inventory.items)-1);
 }
 
 static void sdl_init() {
@@ -3578,10 +3577,10 @@ static void render_opaque_blocks(m4 viewprojection) {
     Camera lightview = {};
     v3 pos;
     if (sun_is_visible)
-      pos = state.player_pos - 100 * sun_direction;
+      pos = state.player.pos - 100 * sun_direction;
     else
-      pos = state.player_pos - 100 * moon_direction;
-    camera_lookat(&lightview, pos, state.player_pos);
+      pos = state.player.pos - 100 * moon_direction;
+    camera_lookat(&lightview, pos, state.player.pos);
     shadowmap_viewprojection = camera_viewortho_matrix(&lightview, pos, 50, 50, 30.0f, 200.0f);
     state.shadowmap_shader.set("u_viewprojection", shadowmap_viewprojection);
 
@@ -3675,13 +3674,13 @@ static void render_skybox(const m4 &view, const m4 &proj) {
 
 static void render_ui() {
   if (state.keypressed[KEY_INVENTORY])
-    state.is_inventory_open = !state.is_inventory_open;
-  if (state.is_inventory_open) {
+    state.inventory.is_open = !state.inventory.is_open;
+  if (state.inventory.is_open) {
     const float inv_margin = 0.15f;
     push_quad({inv_margin, inv_margin}, {1.0f - 2*inv_margin, 1.0f - 2*inv_margin}, {0.0f, 0.0f}, {0.2f, 0.04f});
   }
 
-  if (state.render_quickmenu) {
+  if (state.inventory.render_quickmenu) {
     // draw background
     const float inv_margin = 0.1f;
     const float inv_width = 1.0f - 2*inv_margin;
@@ -3691,15 +3690,15 @@ static void render_ui() {
     // draw boxes
     float box_margin_y = 0.02f;
     float box_size = inv_height - 2*box_margin_y;
-    int ni = ARRAY_LEN(state.inventory);
+    int ni = ARRAY_LEN(state.inventory.items);
     float box_margin_x = (inv_width - ni*box_size)/(ni+1);
     float x = inv_margin + box_margin_x;
     float y = box_margin_y;
-    for (int i = 0; i < (int)ARRAY_LEN(state.inventory); ++i, x += box_margin_x + box_size) {
-      if (state.inventory[i].type != ITEM_BLOCK)
+    for (int i = 0; i < (int)ARRAY_LEN(state.inventory.items); ++i, x += box_margin_x + box_size) {
+      if (state.inventory.items[i].type != ITEM_BLOCK)
         continue;
 
-      BlockType t = state.inventory[i].block.type;
+      BlockType t = state.inventory.items[i].block.type;
       float tx,ty,tw,th;
       blocktype_to_texpos(t, &tx, &ty, &tw, &th);
       tw = tw/3.0f, tx += tw; // get only side
@@ -3707,18 +3706,18 @@ static void render_ui() {
       float xx = x;
       float yy = y;
       float bs = box_size;
-      if (i == state.selected_item)
+      if (i == state.inventory.selected_item)
         xx -= box_margin_y/2, yy -= box_margin_y/2, bs += box_margin_y;
       push_quad({xx, yy}, {bs, bs}, {tx, ty}, {tw, th});
-      push_text(int_to_str(state.inventory[i].block.num), {x + box_size - 0.01f, y + box_size - 0.01f}, 0.05f, ALIGN_CENTER);
+      push_text(int_to_str(state.inventory.items[i].block.num), {x + box_size - 0.01f, y + box_size - 0.01f}, 0.05f, ALIGN_CENTER);
     }
   }
 
   v2 status_pos = {0.95f, 0.95f};
-  if (state.player_flying)
+  if (state.player.flying)
     push_text("Flying", status_pos, 0.05f, ALIGN_RIGHT);
   else
-    push_text(state.player_on_ground ? "Ground" : "Air", status_pos, 0.05f, ALIGN_RIGHT);
+    push_text(state.player.on_ground ? "Ground" : "Air", status_pos, 0.05f, ALIGN_RIGHT);
 
   // texture
   state.ui_texture.bind(0);
@@ -3819,21 +3818,21 @@ static int blockloader_thread(void*) {
 }
 
 static void gamestate_init() {
-  state.player_hitbox = {0.8f, 0.8f, 1.5f};
+  state.player.hitbox = {0.8f, 0.8f, 1.5f};
 
   // TODO: might as well have a much larger value
   state.block_vertex_pos.init(1024);
 
-  // state.god_mode = true;
+  // state.player.god_mode = true;
 
   state.fov = PI/2.0f;
   state.nearz = 0.3f;
   state.farz = len(v3{(float)NUM_VISIBLE_BLOCKS_x, (float)NUM_VISIBLE_BLOCKS_y, (float)NUM_VISIBLE_BLOCKS_z});
-  state.player_pos = {1000.0f, 1000.0f, 18.1f};
-  camera_lookat(&state.camera, state.player_pos, state.player_pos + v3{0.0f, SQRT2, -SQRT2});
+  state.player.pos = {1000.0f, 1000.0f, 18.1f};
+  camera_lookat(&state.camera, state.player.pos, state.player.pos + v3{0.0f, SQRT2, -SQRT2});
   state.block_vertices_dirty = true;
   state.transparent_block_vertices_dirty = true;
-  state.render_quickmenu = true;
+  state.inventory.render_quickmenu = true;
   state.sun_angle = PI/4.0f;
 
   state.block_loader.num_commands_free = SDL_CreateSemaphore(MAX_BLOCK_LOADER_COMMANDS);
@@ -3847,10 +3846,10 @@ static void gamestate_init() {
   generate_block_mesh();
 
   // fill inventory with a bunch of blocks
-  for (int i = 0; i < min(BLOCKTYPES_MAX - 1 - BLOCKTYPE_AIR, (int)ARRAY_LEN(state.inventory)); ++i) {
-    state.inventory[i].type = ITEM_BLOCK;
-    state.inventory[i].block.num = 64;
-    state.inventory[i].block.type = (BlockType)(BLOCKTYPE_AIR + 1 + i);
+  for (int i = 0; i < min(BLOCKTYPES_MAX - 1 - BLOCKTYPE_AIR, (int)ARRAY_LEN(state.inventory.items)); ++i) {
+    state.inventory.items[i].type = ITEM_BLOCK;
+    state.inventory.items[i].block.num = 64;
+    state.inventory.items[i].block.type = (BlockType)(BLOCKTYPE_AIR + 1 + i);
   }
 }
 
@@ -3964,9 +3963,9 @@ mine_main {
     update_water_texture(dt);
 
     // update player
-    v3 before = state.player_pos;
+    v3 before = state.player.pos;
     update_player(dt);
-    v3 after = state.player_pos;
+    v3 after = state.player.pos;
 
     // hide and show blocks that went in and out of scope
     update_blocks(before, after);
