@@ -1738,6 +1738,11 @@ struct FrameBuffer {
   int num_color_targets;
   int w,h;
 
+  void clear() {
+    this->bind();
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+  }
+
   void bind() const {
     glViewport(0, 0, w, h);
     glBindFramebuffer(GL_FRAMEBUFFER, this->id);
@@ -1745,6 +1750,13 @@ struct FrameBuffer {
 
   static void bind_default() {
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
+  }
+
+  static FrameBuffer create_default_framebuffer(int w, int h) {
+    FrameBuffer fb = {};
+    fb.w = w;
+    fb.h = h;
+    return fb;
   }
 
   static FrameBuffer create(Texture color_targets[], int num_color_targets, OPTIONAL Texture *depth_target) {
@@ -1797,7 +1809,7 @@ enum RenderFlag {
 };
 struct RenderPipeline {
   Shader shader;
-  RenderFlag render_flags;
+  u32 render_flags; // see RenderFlag
 
   VertexBuffer vb;
 
@@ -1885,6 +1897,7 @@ struct GameState {
     SDL_Window *window;
     float screen_ratio;
     int screen_width, screen_height;
+    FrameBuffer screen_framebuffer;
   };
 
   // vr stuff
@@ -1963,7 +1976,7 @@ struct GameState {
     // shadowmapping stuff, see https://learnopengl.com/Advanced-Lighting/Shadows/Shadow-Mapping for a great tutorial on shadowmapping
     RenderPipeline shadowmap_pipeline;
     FrameBuffer shadowmap_framebuffer;
-    Texture block_shadowmap;
+    Texture shadowmap;
     #define SHADOWMAP_WIDTH (1024*2)
     #define SHADOWMAP_HEIGHT (1024*2)
 
@@ -1973,7 +1986,7 @@ struct GameState {
     Shader post_processing_shader;
 
     // same thing as all of the above, but for transparent blocks (since they need to be rendered separately after everything else has rendered in order for them to look correct)
-    VertexBuffer transparent_block_vb;
+    RenderPipeline transparent_block_pipeline;
     Array<BlockVertex> transparent_block_vertices;
     Array<uint> transparent_block_elements;
     Array<int> free_transparent_faces;
@@ -2804,24 +2817,22 @@ static void block_gl_buffer_create() {
   state.opaque_block_pipeline.shader.set("u_texture", 0);
   state.opaque_block_pipeline.textures[state.opaque_block_pipeline.num_textures++] = &state.block_texture;
   state.opaque_block_pipeline.shader.set("u_shadowmap", 1);
-  state.opaque_block_pipeline.textures[state.opaque_block_pipeline.num_textures++] = &state.block_shadowmap;
+  state.opaque_block_pipeline.textures[state.opaque_block_pipeline.num_textures++] = &state.shadowmap;
   state.opaque_block_pipeline.shader.set("u_skybox", 2);
   state.opaque_block_pipeline.textures[state.opaque_block_pipeline.num_textures++] = &state.skybox_texture.texture;
   state.opaque_block_pipeline.vb = VertexBuffer::create(block_vertexspec, ARRAY_LEN(block_vertexspec), true);
   state.opaque_block_pipeline.framebuffer = &state.gbuffer;
-  state.opaque_block_pipeline.render_flags = (RenderFlag)(RENDERFLAG_CULL_BACK_FACE, RENDERFLAG_DEPTH_TEST);
+  state.opaque_block_pipeline.render_flags = RENDERFLAG_CULL_BACK_FACE, RENDERFLAG_DEPTH_TEST;
 
   blocktype_to_texpos(BLOCKTYPE_WATER, &state.water_texture_pos.x, &state.water_texture_pos.y, &state.water_texture_pos.w, &state.water_texture_pos.h);
   if (state.water_texture_pos.w*state.water_texture_pos.h*4 != ARRAY_LEN(state.water_texture_buffer))
     die("Maths went wrong, expected %lu but got %i", ARRAY_LEN(state.water_texture_buffer), state.water_texture_pos.w*state.water_texture_pos.h*4);
 
   // create G buffer
-  // @gbuffer
   state.gbuffer_depth_target = Texture::create_empty(GL_TEXTURE_2D, GL_DEPTH_COMPONENT, GL_DEPTH_COMPONENT, state.screen_width, state.screen_height);
   state.gbuffer_color_target = Texture::create_empty(GL_TEXTURE_2D, GL_RGB16F, GL_RGB, state.screen_width, state.screen_height);
   state.gbuffer_normal_target = Texture::create_empty(GL_TEXTURE_2D, GL_RGB16F, GL_RGB, state.screen_width, state.screen_height);
   state.gbuffer_position_target = Texture::create_empty(GL_TEXTURE_2D, GL_RGB16F, GL_RGB, state.screen_width, state.screen_height);
-
   Texture color_targets[] = {state.gbuffer_color_target, state.gbuffer_normal_target, state.gbuffer_position_target};
   state.gbuffer = FrameBuffer::create(color_targets, ARRAY_LEN(color_targets), &state.gbuffer_depth_target);
 
@@ -2832,15 +2843,17 @@ static void block_gl_buffer_create() {
   state.post_processing_shader.set("u_position", 3);
 
   // create shadowmap FBO
-  state.block_shadowmap = Texture::create_empty(GL_TEXTURE_2D, GL_DEPTH_COMPONENT, GL_DEPTH_COMPONENT, SHADOWMAP_WIDTH, SHADOWMAP_HEIGHT, GL_NEAREST, GL_NEAREST);
+  state.shadowmap = Texture::create_empty(GL_TEXTURE_2D, GL_DEPTH_COMPONENT, GL_DEPTH_COMPONENT, SHADOWMAP_WIDTH, SHADOWMAP_HEIGHT, GL_NEAREST, GL_NEAREST);
   state.shadowmap_pipeline.shader = Shader::create_from_string(shadowmap_vertex_shader, shadowmap_fragment_shader);
-  state.shadowmap_framebuffer = FrameBuffer::create(0, 0, &state.block_shadowmap);
+  state.shadowmap_framebuffer = FrameBuffer::create(0, 0, &state.shadowmap);
   state.shadowmap_pipeline.framebuffer = &state.shadowmap_framebuffer;
   state.shadowmap_pipeline.vb = state.opaque_block_pipeline.vb;
-  state.shadowmap_pipeline.render_flags = (RenderFlag)(RENDERFLAG_DEPTH_TEST | RENDERFLAG_CULL_FRONT_FACE);
+  state.shadowmap_pipeline.render_flags = RENDERFLAG_DEPTH_TEST | RENDERFLAG_CULL_FRONT_FACE;
 
   // create transparent block vbo
-  state.transparent_block_vb = VertexBuffer::create(block_vertexspec, ARRAY_LEN(block_vertexspec), true);
+  state.transparent_block_pipeline = state.opaque_block_pipeline;
+  state.transparent_block_pipeline.vb = VertexBuffer::create(block_vertexspec, ARRAY_LEN(block_vertexspec), true);
+  state.transparent_block_pipeline.render_flags |= RENDERFLAG_BLEND;
 }
 
 static void skybox_gl_buffer_create() {
@@ -3461,31 +3474,15 @@ static void sdl_init() {
 }
 
 static void render_transparent_blocks(const m4 &) {
-  state.gbuffer.bind();
-
-  glEnable(GL_BLEND);
-  glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-  glEnable(GL_CULL_FACE);
-  // glDisable(GL_CULL_FACE);
-  glEnable(GL_DEPTH_TEST);
-  // glDisable(GL_DEPTH_TEST);
-  state.opaque_block_pipeline.shader.use();
-
-  state.transparent_block_vb.bind();
-  state.block_texture.bind(0);
-  state.block_shadowmap.bind(1);
-  state.skybox_texture.bind(2);
-
   if (state.transparent_block_vertices_dirty) {
-    // puts("resending block_vertices");
+    state.transparent_block_pipeline.vb.bind();
     glBufferData(GL_ARRAY_BUFFER, state.transparent_block_vertices.size*sizeof(*state.transparent_block_vertices.items), state.transparent_block_vertices.items, GL_DYNAMIC_DRAW);
     glBufferData(GL_ELEMENT_ARRAY_BUFFER, state.transparent_block_elements.size*sizeof(*state.transparent_block_elements.items), state.transparent_block_elements.items, GL_DYNAMIC_DRAW);
     state.transparent_block_vertices_dirty = false;
   }
+  gl_ok_or_die;
 
-  glDrawElements(GL_TRIANGLES, state.transparent_block_elements.size, GL_UNSIGNED_INT, 0);
-  state.transparent_block_vb.unbind();
-  FrameBuffer::bind_default();
+  state.transparent_block_pipeline.render(state.transparent_block_elements.size);
 }
 
 static void flush_quads(Shader shader) {
@@ -3496,7 +3493,7 @@ static void flush_quads(Shader shader) {
 
   // debug: draw the shadowmap instead :3
   #if 0
-    glBindTexture(GL_TEXTURE_2D, state.block_shadowmap);
+    glBindTexture(GL_TEXTURE_2D, state.shadowmap);
     push_quad({0.0f, 0.0f}, {0.3f, 0.3f}, {0.0f, 0.0f}, {1.0f, 1.0f});
   #endif
 
@@ -3510,6 +3507,7 @@ static void flush_quads(Shader shader) {
 }
 
 static void render_gbuffer() {
+  FrameBuffer::bind_default();
   // draw a big quad over the screen with the gbuffer texture
   push_quad({0.0f, 0.0f}, {1.0f, 1.0f}, {0.0f, 0.0f}, {1.0f, 1.0f});
 
@@ -3526,7 +3524,7 @@ static void render_gbuffer() {
 }
 
 static void render_opaque_blocks(m4 viewprojection) {
-  // update data if necessary
+  // resend block vertices to gpu if they changed
   if (state.block_vertices_dirty) {
     state.opaque_block_pipeline.vb.bind();
     glBufferData(GL_ARRAY_BUFFER, state.block_vertices.size*sizeof(*state.block_vertices.items), state.block_vertices.items, GL_DYNAMIC_DRAW);
@@ -3534,7 +3532,7 @@ static void render_opaque_blocks(m4 viewprojection) {
     state.block_vertices_dirty = false;
   }
 
-  // create shadowmap
+  // sun/moon direction
   const v3 sun_direction = {0.0f, -cosf(state.sun_angle), -sinf(state.sun_angle)};
   const v3 moon_direction = {0.0f, -cosf(state.sun_angle + PI), -sinf(state.sun_angle + PI)};
   const bool sun_is_visible = sinf(state.sun_angle) > 0;
@@ -3552,7 +3550,7 @@ static void render_opaque_blocks(m4 viewprojection) {
   };
   state.ambient_light = keyframe_value(light_keyframes, ARRAY_LEN(light_keyframes), state.sun_angle);
 
-
+  // render shadowmap
   m4 shadowmap_viewprojection;
   {
     // calculate camera position and projection matrix
@@ -3562,13 +3560,13 @@ static void render_opaque_blocks(m4 viewprojection) {
     shadowmap_viewprojection = camera_viewortho_matrix(&lightview, pos, 50, 50, 30.0f, 200.0f);
     state.shadowmap_pipeline.shader.set("u_viewprojection", shadowmap_viewprojection);
 
-    state.shadowmap_pipeline.clear();
+    state.shadowmap_pipeline.framebuffer->clear();
     state.shadowmap_pipeline.render(state.block_elements.size);
 
     glCullFace(GL_BACK);
   }
 
-  // camera
+  // render opaque blocks
   state.opaque_block_pipeline.shader.set("u_camerapos", state.camera_pos);
   state.opaque_block_pipeline.shader.set("u_viewprojection", viewprojection);
   state.opaque_block_pipeline.shader.set("u_shadowmap_viewprojection", shadowmap_viewprojection);
@@ -3576,10 +3574,8 @@ static void render_opaque_blocks(m4 viewprojection) {
   state.opaque_block_pipeline.shader.set("u_skylight_dir", sun_is_visible ? sun_direction : moon_direction);
   float light_strength = sun_is_visible ? 0.5f : 0.03f;
   state.opaque_block_pipeline.shader.set("u_skylight_color", v3{light_strength, light_strength, light_strength});
-  gl_ok_or_die;
 
   state.opaque_block_pipeline.render(state.block_elements.size);
-  gl_ok_or_die;
 }
 
 static void render_skybox(const m4 &view, const m4 &proj) {
@@ -3761,6 +3757,8 @@ static int blockloader_thread(void*) {
 static void gamestate_init() {
   state.player.hitbox = {0.8f, 0.8f, 1.5f};
 
+  state.screen_framebuffer = FrameBuffer::create_default_framebuffer(state.screen_width, state.screen_height);
+
   // TODO: might as well have a much larger value
   state.block_vertex_pos.init(1024);
 
@@ -3928,12 +3926,8 @@ mine_main {
 
     // @render
     // clear both screen and gbuffer
-    state.gbuffer.bind();
-    glClearColor(0.3f, 0.3f, 0.6f, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-    FrameBuffer::bind_default();
-    glClearColor(0.0f, 0.8f, 0.6f, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    state.screen_framebuffer.clear();
+    state.gbuffer.clear();
 
     // get camera matrices
     const m4 view = camera_view_matrix(&state.camera, state.camera_pos);
