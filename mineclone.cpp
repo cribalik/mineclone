@@ -2023,9 +2023,8 @@ struct GameState {
 
   // skybox graphics data
   struct {
-    VertexBuffer skybox_vb;
-    Shader skybox_shader;
-    CubeMap skybox_texture;
+    RenderPipeline skybox_pipeline;
+    CubeMap skybox;
     #define SKYBOX_TEXTURE_SIZE 128
     u8 skybox_texture_buffer[SKYBOX_TEXTURE_SIZE * SKYBOX_TEXTURE_SIZE * 3]; // 3 because of rgb
   };
@@ -2819,7 +2818,7 @@ static void block_gl_buffer_create() {
   state.opaque_block_pipeline.shader.set("u_shadowmap", 1);
   state.opaque_block_pipeline.textures[state.opaque_block_pipeline.num_textures++] = &state.shadowmap;
   state.opaque_block_pipeline.shader.set("u_skybox", 2);
-  state.opaque_block_pipeline.textures[state.opaque_block_pipeline.num_textures++] = &state.skybox_texture.texture;
+  state.opaque_block_pipeline.textures[state.opaque_block_pipeline.num_textures++] = &state.skybox.texture;
   state.opaque_block_pipeline.vb = VertexBuffer::create(block_vertexspec, ARRAY_LEN(block_vertexspec), true);
   state.opaque_block_pipeline.framebuffer = &state.gbuffer;
   state.opaque_block_pipeline.render_flags = RENDERFLAG_CULL_BACK_FACE, RENDERFLAG_DEPTH_TEST;
@@ -2907,16 +2906,19 @@ static void skybox_gl_buffer_create() {
 
   // create and bind
   VertexDataSpec vspec[] = {VERTEXDATA_FLOAT(SkyboxVertex, pos)};
-  state.skybox_vb = VertexBuffer::create(vspec, ARRAY_LEN(vspec), false);
-  state.skybox_vb.set_vbo_data(vertices, sizeof(vertices), GL_STATIC_DRAW);
+  state.skybox_pipeline.vb = VertexBuffer::create(vspec, ARRAY_LEN(vspec), false);
+  state.skybox_pipeline.vb.set_vbo_data(vertices, sizeof(vertices), GL_STATIC_DRAW);
 
   // create shader
-  state.skybox_shader = Shader::create_from_string(skybox_vertex_shader, skybox_fragment_shader);
-  state.skybox_shader.use();
+  state.skybox_pipeline.shader = Shader::create_from_string(skybox_vertex_shader, skybox_fragment_shader);
 
   // generate texture
-  state.skybox_texture = CubeMap::create(SKYBOX_TEXTURE_SIZE);
-  state.skybox_texture.bind(0);
+  state.skybox = CubeMap::create(SKYBOX_TEXTURE_SIZE);
+  state.skybox_pipeline.textures[state.skybox_pipeline.num_textures++] = &state.skybox.texture;
+  state.skybox.bind(0);
+
+  state.skybox_pipeline.framebuffer = &state.gbuffer;
+  state.skybox_pipeline.render_flags = RENDERFLAG_DEPTH_TEST;
 
   // magic math to generate a pretty skybox
   const float y_offset[] = {0.0f,  0.0f, -0.5f, 0.5f, 0.0f, 1.0f};
@@ -2952,7 +2954,7 @@ static void skybox_gl_buffer_create() {
       state.skybox_texture_buffer[bi+2] = b;
     }
 
-    state.skybox_texture.set_data(face, GL_RGB, GL_UNSIGNED_BYTE, state.skybox_texture_buffer);
+    state.skybox.set_data(face, GL_RGB, GL_UNSIGNED_BYTE, state.skybox_texture_buffer);
     glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + face,
                  0, GL_RGB, SKYBOX_TEXTURE_SIZE, SKYBOX_TEXTURE_SIZE, 0, GL_RGB,
                  GL_UNSIGNED_BYTE,
@@ -3579,32 +3581,20 @@ static void render_opaque_blocks(m4 viewprojection) {
 }
 
 static void render_skybox(const m4 &view, const m4 &proj) {
-  state.gbuffer.bind();
-
-  glEnable(GL_DEPTH_TEST);
-  // glDisable(GL_DEPTH_TEST);
   glDisable(GL_CULL_FACE);
 
-
   // remove translation from view matrix, since we want skybox to always be around us
-  // rotate to match the sky
   m4 v = view;
   v.d[3] = v.d[7] = v.d[11] = 0.0f;
   // v.d[12] = v.d[13] = v.d[14] = 0.0f;
   v.d[15] = 1.0f;
 
   m4 vp = proj * v;
-  state.skybox_shader.set("u_viewprojection", vp);
-  state.skybox_shader.set("u_ambient", state.ambient_light);
+  state.skybox_pipeline.shader.use();
+  state.skybox_pipeline.shader.set("u_viewprojection", vp);
+  state.skybox_pipeline.shader.set("u_ambient", state.ambient_light);
 
-  state.skybox_shader.use();
-  state.skybox_vb.bind();
-  state.skybox_texture.bind(0);
-
-  glDrawArrays(GL_TRIANGLES, 0, 36);
-
-  glBindVertexArray(0);
-  glBindBuffer(GL_ARRAY_BUFFER, 0);
+  state.skybox_pipeline.render(36);
 
   FrameBuffer::bind_default();
 }
