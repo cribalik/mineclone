@@ -1931,7 +1931,7 @@ struct GameState {
     bool block_vertices_dirty;
 
     // mapping from block face to the position in the vertex array, to optimize removal of blocks. use get_block_vertex_pos to get 
-    Map<u32, int, 0, UINT32_MAX> block_vertex_pos;
+    Map<u64, int, 0, UINT32_MAX> block_vertex_pos;
 
     // shadowmapping stuff, see https://learnopengl.com/Advanced-Lighting/Shadows/Shadow-Mapping for a great tutorial on shadowmapping
     Shader shadowmap_shader;
@@ -2100,20 +2100,20 @@ static BlockType get_blocktype_cache(Block b) {
   return get_blocktype_cache(block_to_blockindex(b));
 }
 
-static u32 block_vertex_pos_index(BlockIndex b, Direction dir) {
-  b.z += NUM_BLOCKS_x/2 + 1;
-  b.y += NUM_BLOCKS_y/2 + 1;
-  b.z += NUM_BLOCKS_z/2 + 1;
+static u64 block_vertex_pos_index(BlockIndex b, Direction dir) {
+  u64 x = (u64)b.x + (u64)NUM_BLOCKS_x/2 + 1;
+  u64 y = (u64)b.y + (u64)NUM_BLOCKS_y/2 + 1;
+  u64 z = (u64)b.z + (u64)NUM_BLOCKS_z/2 + 1;
   return
-    b.z * (NUM_BLOCKS_x+1) * (NUM_BLOCKS_y+1) * (DIRECTION_MAX+1) +
-    b.y * (NUM_BLOCKS_x+1) * (DIRECTION_MAX+1) +
-    b.x * (DIRECTION_MAX+1) +
-    dir;
+    z * (NUM_BLOCKS_x+1) * (NUM_BLOCKS_y+1) * (DIRECTION_MAX+1) +
+    y * (NUM_BLOCKS_x+1) * (DIRECTION_MAX+1) +
+    x * (DIRECTION_MAX+1) +
+    (u64)dir;
 }
 STATIC_ASSERT(NUM_BLOCKS_x*NUM_BLOCKS_y*NUM_BLOCKS_z*DIRECTION_MAX < UINT32_MAX, num_block_faces_fit_in_u32);
 
 static int* get_block_vertex_pos(BlockIndex b, Direction dir) {
-  u32 key = block_vertex_pos_index(b, dir);
+  u64 key = block_vertex_pos_index(b, dir);
   int *value = state.block_vertex_pos.get(key);
   return value;
 }
@@ -2127,7 +2127,7 @@ static void remove_block_vertex_pos(int *value) {
 }
 
 static void set_block_vertex_pos(BlockIndex b, Direction dir, int pos) {
-  u32 key = block_vertex_pos_index(b, dir);
+  u64 key = block_vertex_pos_index(b, dir);
   state.block_vertex_pos.set(key, pos);
 
   assert(*state.block_vertex_pos.get(key) == pos);
@@ -2208,6 +2208,7 @@ static void push_block_face(Block block, BlockType type, Direction dir) {
     array_pushn(block_elements, 6);
   }
   set_block_vertex_pos(bi, dir, v/4);
+  assert(*get_block_vertex_pos(bi, dir) == v/4);
 
   switch (dir) {
     case DIRECTION_UP: {
@@ -2401,7 +2402,7 @@ static void remove_blockface(Block b, BlockType type, Direction d) {
   Array<int> &free_faces = transparent ? state.free_transparent_faces : state.free_faces;
 
   if ((int)*vertex_pos >= block_vertices.size) {
-    debug(die("Something went very wrong"));
+    debug(die("Something went very wrong. vertex_pos was %i, but block_vertices has size %i (transparent: %i)", (int)*vertex_pos, (int)block_vertices.size, (int)transparent));
     return;
   }
 
@@ -2769,74 +2770,40 @@ static void block_gl_buffer_create() {
     VERTEXDATA_NORMALIZED_INT(BlockVertex, tex),
     VERTEXDATA_INT(BlockVertex, direction)
   };
+  state.block_vb = VertexElementBuffer::create(block_vertexspec, ARRAY_LEN(block_vertexspec));
 
-  // create block vbo
-  {
-    state.block_vb = VertexElementBuffer::create(block_vertexspec, ARRAY_LEN(block_vertexspec));
+  state.block_shader = Shader::create_from_string(block_vertex_shader, block_fragment_shader);
+  state.block_shader.set("u_fog_near", 100.0f);
+  state.block_shader.set("u_fog_far", 130.0f);
+  state.block_shader.set("u_texture", 0);
+  state.block_shader.set("u_shadowmap", 1);
+  state.block_shader.set("u_skybox", 2);
 
-    // create shader
-    state.block_shader = Shader::create_from_string(block_vertex_shader, block_fragment_shader);
-
-    // set constant uniforms
-    state.block_shader.set("u_fog_near", 100.0f);
-    state.block_shader.set("u_fog_far", 130.0f);
-
-    // set texture uniforms
-    state.block_shader.set("u_texture", 0);
-    state.block_shader.set("u_shadowmap", 1);
-    state.block_shader.set("u_skybox", 2);
-
-    // load block textures
-    state.block_texture = Texture::create_from_file("textures.bmp", GL_TEXTURE_2D, GL_RGB, GL_SRGB_ALPHA);
-
-    // calculate where the water texture is positioned
-    blocktype_to_texpos(BLOCKTYPE_WATER, &state.water_texture_pos.x, &state.water_texture_pos.y, &state.water_texture_pos.w, &state.water_texture_pos.h);
-    if (state.water_texture_pos.w*state.water_texture_pos.h*4 != ARRAY_LEN(state.water_texture_buffer))
-      die("Maths went wrong, expected %lu but got %i", ARRAY_LEN(state.water_texture_buffer), state.water_texture_pos.w*state.water_texture_pos.h*4);
-  }
+  state.block_texture = Texture::create_from_file("textures.bmp", GL_TEXTURE_2D, GL_RGB, GL_SRGB_ALPHA);
+  blocktype_to_texpos(BLOCKTYPE_WATER, &state.water_texture_pos.x, &state.water_texture_pos.y, &state.water_texture_pos.w, &state.water_texture_pos.h);
+  if (state.water_texture_pos.w*state.water_texture_pos.h*4 != ARRAY_LEN(state.water_texture_buffer))
+    die("Maths went wrong, expected %lu but got %i", ARRAY_LEN(state.water_texture_buffer), state.water_texture_pos.w*state.water_texture_pos.h*4);
 
   // create G buffer
   // @gbuffer
-  {
-    state.gbuffer_depth_target = Texture::create_empty(GL_TEXTURE_2D, GL_DEPTH_COMPONENT, GL_DEPTH_COMPONENT, state.screen_width, state.screen_height);
-    state.gbuffer_color_target = Texture::create_empty(GL_TEXTURE_2D, GL_RGB16F, GL_RGB, state.screen_width, state.screen_height);
-    state.gbuffer_normal_target = Texture::create_empty(GL_TEXTURE_2D, GL_RGB16F, GL_RGB, state.screen_width, state.screen_height);
-    state.gbuffer_position_target = Texture::create_empty(GL_TEXTURE_2D, GL_RGB16F, GL_RGB, state.screen_width, state.screen_height);
+  state.gbuffer_depth_target = Texture::create_empty(GL_TEXTURE_2D, GL_DEPTH_COMPONENT, GL_DEPTH_COMPONENT, state.screen_width, state.screen_height);
+  state.gbuffer_color_target = Texture::create_empty(GL_TEXTURE_2D, GL_RGB16F, GL_RGB, state.screen_width, state.screen_height);
+  state.gbuffer_normal_target = Texture::create_empty(GL_TEXTURE_2D, GL_RGB16F, GL_RGB, state.screen_width, state.screen_height);
+  state.gbuffer_position_target = Texture::create_empty(GL_TEXTURE_2D, GL_RGB16F, GL_RGB, state.screen_width, state.screen_height);
 
-    Texture color_targets[] = {state.gbuffer_color_target, state.gbuffer_normal_target, state.gbuffer_position_target};
-    state.gbuffer = FrameBuffer::create(color_targets, ARRAY_LEN(color_targets), &state.gbuffer_depth_target);
+  Texture color_targets[] = {state.gbuffer_color_target, state.gbuffer_normal_target, state.gbuffer_position_target};
+  state.gbuffer = FrameBuffer::create(color_targets, ARRAY_LEN(color_targets), &state.gbuffer_depth_target);
 
-    // set texture uniforms
-    state.post_processing_shader = Shader::create_from_string(post_processing_vertex_shader, post_processing_fragment_shader);
-    state.post_processing_shader.set("u_color", 0);
-    state.post_processing_shader.set("u_depth", 1);
-    state.post_processing_shader.set("u_normal", 2);
-    state.post_processing_shader.set("u_position", 3);
-
-    FrameBuffer::bind_default();
-    glBindTexture(GL_TEXTURE_2D, 0);
-    gl_ok_or_die;
-  }
+  state.post_processing_shader = Shader::create_from_string(post_processing_vertex_shader, post_processing_fragment_shader);
+  state.post_processing_shader.set("u_color", 0);
+  state.post_processing_shader.set("u_depth", 1);
+  state.post_processing_shader.set("u_normal", 2);
+  state.post_processing_shader.set("u_position", 3);
 
   // create shadowmap FBO
-  {
-    state.shadowmap_shader = Shader::create_from_string(shadowmap_vertex_shader, shadowmap_fragment_shader);
-
-    state.block_shadowmap = Texture::create_empty(GL_TEXTURE_2D, GL_DEPTH_COMPONENT, GL_DEPTH_COMPONENT, SHADOWMAP_WIDTH, SHADOWMAP_HEIGHT, GL_NEAREST, GL_NEAREST);
-    state.gl_block_shadowmap_fbo = FrameBuffer::create(0, 0, &state.block_shadowmap);
-
-    // depth
-    // state.block_shadowmap.bind(0);
-    // glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, state.block_shadowmap.id, 0);
-
-    // glDrawBuffer(GL_NONE);
-    // glReadBuffer(GL_NONE);
-
-    // if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
-    //   die("Framebuffer not complete!");
-
-    FrameBuffer::bind_default();
-  }
+  state.shadowmap_shader = Shader::create_from_string(shadowmap_vertex_shader, shadowmap_fragment_shader);
+  state.block_shadowmap = Texture::create_empty(GL_TEXTURE_2D, GL_DEPTH_COMPONENT, GL_DEPTH_COMPONENT, SHADOWMAP_WIDTH, SHADOWMAP_HEIGHT, GL_NEAREST, GL_NEAREST);
+  state.gl_block_shadowmap_fbo = FrameBuffer::create(0, 0, &state.block_shadowmap);
 
   // create transparent block vbo
   state.transparent_block_vb = VertexElementBuffer::create(block_vertexspec, ARRAY_LEN(block_vertexspec));
@@ -2969,7 +2936,6 @@ static void ui_gl_buffer_create() {
   state.ui_shader = Shader::create_from_string(ui_vertex_shader, ui_fragment_shader);
   state.ui_shader.set("u_texture", 0);
 
-  // load ui textures
   state.ui_texture = state.block_texture;
 }
 
@@ -3919,7 +3885,7 @@ mine_main {
   // get gl3w to fetch opengl function pointers
   gl3wInit();
 
-  // gl buffers, shaders, and uniform locations
+  // gl buffers, shaders, framebuffers
   block_gl_buffer_create();
   ui_gl_buffer_create();
   text_gl_buffer_create();
