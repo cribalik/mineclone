@@ -1701,7 +1701,7 @@ struct Texture {
     return t;
   }
 
-  static Texture create_empty(GLenum type, GLenum texture_format, int w, int h, GLint mag_filter = GL_NEAREST, GLint min_filter = GL_NEAREST) {
+  static Texture create_empty(GLenum type, GLenum internal_format, GLenum data_format, int w, int h, GLint mag_filter = GL_NEAREST, GLint min_filter = GL_NEAREST) {
     Texture t = {};
     t.type = type;
     t.w = w;
@@ -1709,12 +1709,12 @@ struct Texture {
 
     glGenTextures(1, &t.id);
     glBindTexture(t.type, t.id);
+    glTexImage2D(type, 0, internal_format, w, h, 0, data_format, GL_FLOAT, 0);
+
     glTexParameteri(t.type, GL_TEXTURE_WRAP_S, GL_MIRRORED_REPEAT);
     glTexParameteri(t.type, GL_TEXTURE_WRAP_T, GL_MIRRORED_REPEAT);
     glTexParameteri(t.type, GL_TEXTURE_MIN_FILTER, min_filter);
     glTexParameteri(t.type, GL_TEXTURE_MAG_FILTER, mag_filter);
-
-    glTexImage2D(type, 0, texture_format, w, h, 0, texture_format, GL_FLOAT, 0);
 
     return t;
   }
@@ -1748,21 +1748,21 @@ struct Texture {
   }
 };
 
-struct FrameBufferTarget {
-  Texture texture;
-  GLenum attachment_type; // see glFramebufferTexture2D
-};
-
 struct FrameBuffer {
+  #define MAX_COLOR_TARGETS 8
   GLuint id;
   Texture depth_target;
-  Texture color_targets[8];
+  Texture color_targets[MAX_COLOR_TARGETS];
   int num_color_targets;
   int w,h;
 
   void bind() const {
     glViewport(0, 0, w, h);
     glBindFramebuffer(GL_FRAMEBUFFER, this->id);
+  }
+
+  static void bind_default() {
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
   }
 
   static FrameBuffer create(Texture color_targets[], int num_color_targets, OPTIONAL Texture *depth_target) {
@@ -1791,10 +1791,13 @@ struct FrameBuffer {
         if (color_targets[i].w != fb.w || color_targets[i].h != fb.h)
           die("Sizes of all texture targets for framebuffer didn't match, earlier texture had size %i,%i but new texture had size %i,%i", fb.w, fb.h, color_targets[i].w, color_targets[i].h);
 
-        // TODO: do we need this?
-        color_targets[i].bind(0);
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + i, GL_TEXTURE_2D, color_targets[i].id, 0);
       }
+
+      uint outputs[MAX_COLOR_TARGETS];
+      for (int i = 0; i < num_color_targets; ++i)
+        outputs[i] = GL_COLOR_ATTACHMENT0 + i;
+      glDrawBuffers(num_color_targets, outputs);
     }
 
     if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
@@ -1935,9 +1938,10 @@ struct GameState {
     Texture block_shadowmap;
     #define SHADOWMAP_WIDTH (1024*2)
     #define SHADOWMAP_HEIGHT (1024*2)
-    // post processing stuff, like the G buffer (https://learnopengl.com/Advanced-Lighting/Deferred-Shading)
+    // post processing stuff (https://learnopengl.com/Advanced-Lighting/Deferred-Shading)
     // FrameBuffer gbuffer;
-    GLuint gl_gbuffer, gl_gbuffer_color_target, gl_gbuffer_depth_target, gl_gbuffer_normal_target, gl_gbuffer_position_target;
+    Texture gbuffer_color_target, gbuffer_depth_target, gbuffer_normal_target, gbuffer_position_target;
+    FrameBuffer gbuffer;
     Shader post_processing_shader;
 
     // same thing as all of the above, but for transparent blocks! (since they need to be rendered separately, because they look weird otherwise)
@@ -2797,43 +2801,13 @@ static void block_gl_buffer_create() {
   // create G buffer
   // @gbuffer
   {
-    glGenFramebuffers(1, &state.gl_gbuffer);
-    glBindFramebuffer(GL_FRAMEBUFFER, state.gl_gbuffer);
+    state.gbuffer_depth_target = Texture::create_empty(GL_TEXTURE_2D, GL_DEPTH_COMPONENT, GL_DEPTH_COMPONENT, state.screen_width, state.screen_height);
+    state.gbuffer_color_target = Texture::create_empty(GL_TEXTURE_2D, GL_RGB16F, GL_RGB, state.screen_width, state.screen_height);
+    state.gbuffer_normal_target = Texture::create_empty(GL_TEXTURE_2D, GL_RGB16F, GL_RGB, state.screen_width, state.screen_height);
+    state.gbuffer_position_target = Texture::create_empty(GL_TEXTURE_2D, GL_RGB16F, GL_RGB, state.screen_width, state.screen_height);
 
-    // color
-    glGenTextures(1, &state.gl_gbuffer_color_target);
-    glBindTexture(GL_TEXTURE_2D, state.gl_gbuffer_color_target);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB16F, state.screen_width, state.screen_height, 0, GL_RGB, GL_FLOAT, 0);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, state.gl_gbuffer_color_target, 0);
-    // depth
-    glGenTextures(1, &state.gl_gbuffer_depth_target);
-    glBindTexture(GL_TEXTURE_2D, state.gl_gbuffer_depth_target);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT, state.screen_width, state.screen_height, 0, GL_DEPTH_COMPONENT, GL_FLOAT, 0);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, state.gl_gbuffer_depth_target, 0);
-    // normals
-    glGenTextures(1, &state.gl_gbuffer_normal_target);
-    glBindTexture(GL_TEXTURE_2D, state.gl_gbuffer_normal_target);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB16F, state.screen_width, state.screen_height, 0, GL_RGB, GL_FLOAT, 0);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, state.gl_gbuffer_normal_target, 0);
-    // position
-    glGenTextures(1, &state.gl_gbuffer_position_target);
-    glBindTexture(GL_TEXTURE_2D, state.gl_gbuffer_position_target);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB16F, state.screen_width, state.screen_height, 0, GL_RGB, GL_FLOAT, 0);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT2, GL_TEXTURE_2D, state.gl_gbuffer_position_target, 0);
-
-    uint outputs[] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2};
-    glDrawBuffers(ARRAY_LEN(outputs), outputs);
-
-    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
-      die("G buffer not complete!");
+    Texture color_targets[] = {state.gbuffer_color_target, state.gbuffer_normal_target, state.gbuffer_position_target};
+    state.gbuffer = FrameBuffer::create(color_targets, ARRAY_LEN(color_targets), &state.gbuffer_depth_target);
 
     // set texture uniforms
     state.post_processing_shader = Shader::create_from_string(post_processing_vertex_shader, post_processing_fragment_shader);
@@ -2842,7 +2816,7 @@ static void block_gl_buffer_create() {
     state.post_processing_shader.set("u_normal", 2);
     state.post_processing_shader.set("u_position", 3);
 
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    FrameBuffer::bind_default();
     glBindTexture(GL_TEXTURE_2D, 0);
     gl_ok_or_die;
   }
@@ -2851,7 +2825,7 @@ static void block_gl_buffer_create() {
   {
     state.shadowmap_shader = Shader::create_from_string(shadowmap_vertex_shader, shadowmap_fragment_shader);
 
-    state.block_shadowmap = Texture::create_empty(GL_TEXTURE_2D, GL_DEPTH_COMPONENT, SHADOWMAP_WIDTH, SHADOWMAP_HEIGHT, GL_NEAREST, GL_NEAREST);
+    state.block_shadowmap = Texture::create_empty(GL_TEXTURE_2D, GL_DEPTH_COMPONENT, GL_DEPTH_COMPONENT, SHADOWMAP_WIDTH, SHADOWMAP_HEIGHT, GL_NEAREST, GL_NEAREST);
     state.gl_block_shadowmap_fbo = FrameBuffer::create(0, 0, &state.block_shadowmap);
 
     // depth
@@ -2864,7 +2838,7 @@ static void block_gl_buffer_create() {
     // if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
     //   die("Framebuffer not complete!");
 
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    FrameBuffer::bind_default();
   }
 
   // create transparent block vbo
@@ -3498,7 +3472,7 @@ static void sdl_init() {
 }
 
 static void render_transparent_blocks(const m4 &) {
-  glBindFramebuffer(GL_FRAMEBUFFER, state.gl_gbuffer);
+  state.gbuffer.bind();
 
   glEnable(GL_BLEND);
   glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -3522,7 +3496,7 @@ static void render_transparent_blocks(const m4 &) {
 
   glDrawElements(GL_TRIANGLES, state.transparent_block_elements.size, GL_UNSIGNED_INT, 0);
   state.transparent_block_vb.unbind();
-  glBindFramebuffer(GL_FRAMEBUFFER, 0);
+  FrameBuffer::bind_default();
 }
 
 static void flush_quads(Shader shader) {
@@ -3551,14 +3525,10 @@ static void render_gbuffer() {
   push_quad({0.0f, 0.0f}, {1.0f, 1.0f}, {0.0f, 0.0f}, {1.0f, 1.0f});
 
   // bind textures
-  glActiveTexture(GL_TEXTURE0);
-  glBindTexture(GL_TEXTURE_2D, state.gl_gbuffer_color_target);
-  glActiveTexture(GL_TEXTURE1);
-  glBindTexture(GL_TEXTURE_2D, state.gl_gbuffer_depth_target);
-  glActiveTexture(GL_TEXTURE2);
-  glBindTexture(GL_TEXTURE_2D, state.gl_gbuffer_normal_target);
-  glActiveTexture(GL_TEXTURE3);
-  glBindTexture(GL_TEXTURE_2D, state.gl_gbuffer_position_target);
+  state.gbuffer_color_target.bind(0);
+  state.gbuffer_depth_target.bind(1);
+  state.gbuffer_normal_target.bind(2);
+  state.gbuffer_position_target.bind(3);
 
   state.post_processing_shader.set("u_near", state.nearz);
   state.post_processing_shader.set("u_far", state.farz);
@@ -3622,7 +3592,7 @@ static void render_opaque_blocks(m4 viewprojection) {
     glDrawElements(GL_TRIANGLES, state.block_elements.size, GL_UNSIGNED_INT, 0);
 
     state.block_vb.unbind();
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    FrameBuffer::bind_default();
 
     glViewport(0, 0, state.screen_width, state.screen_height);
     glEnable(GL_CULL_FACE);
@@ -3633,7 +3603,7 @@ static void render_opaque_blocks(m4 viewprojection) {
   viewprojection = shadowmap_viewprojection;
   #endif
 
-  glBindFramebuffer(GL_FRAMEBUFFER, state.gl_gbuffer);
+  state.gbuffer.bind();
   gl_ok_or_die;
 
   state.block_shader.use();
@@ -3668,12 +3638,12 @@ static void render_opaque_blocks(m4 viewprojection) {
   glBindVertexArray(0);
   gl_ok_or_die;
 
-  glBindFramebuffer(GL_FRAMEBUFFER, 0);
+  FrameBuffer::bind_default();
   gl_ok_or_die;
 }
 
 static void render_skybox(const m4 &view, const m4 &proj) {
-  glBindFramebuffer(GL_FRAMEBUFFER, state.gl_gbuffer);
+  state.gbuffer.bind();
 
   glEnable(GL_DEPTH_TEST);
   // glDisable(GL_DEPTH_TEST);
@@ -3700,7 +3670,7 @@ static void render_skybox(const m4 &view, const m4 &proj) {
   glBindVertexArray(0);
   glBindBuffer(GL_ARRAY_BUFFER, 0);
 
-  glBindFramebuffer(GL_FRAMEBUFFER, 0);
+  FrameBuffer::bind_default();
 }
 
 static void render_ui() {
@@ -3851,8 +3821,8 @@ static int blockloader_thread(void*) {
 static void gamestate_init() {
   state.player_hitbox = {0.8f, 0.8f, 1.5f};
 
-  // TODO: might as well have a much larger value than 1024
-  state.block_vertex_pos.init(4);
+  // TODO: might as well have a much larger value
+  state.block_vertex_pos.init(1024);
 
   // state.god_mode = true;
 
@@ -4009,10 +3979,10 @@ mine_main {
 
     // @render
     // clear both screen and gbuffer
-    glBindFramebuffer(GL_FRAMEBUFFER, state.gl_gbuffer);
+    state.gbuffer.bind();
     glClearColor(0.3f, 0.3f, 0.6f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    FrameBuffer::bind_default();
     glClearColor(0.0f, 0.8f, 0.6f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
