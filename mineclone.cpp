@@ -2027,9 +2027,9 @@ struct GameState {
   };
 
   // vr stuff
+  bool vr_enabled;
   #ifdef VR_ENABLED
   struct {
-    bool enabled;
     vr::IVRSystem *system;
     vr::IVRCompositor *compositor;
     m4 head_to_left_eye;
@@ -3953,7 +3953,7 @@ static m4 vr_m44_to_m4(const vr::HmdMatrix44_t& mat) {
 }
 
 void vr_init() {
-  state.vr.enabled = true;
+  state.vr_enabled = true;
   // init OpenVR
   {
     vr::HmdError err = vr::VRInitError_None;
@@ -4045,7 +4045,7 @@ static void render_world_vr(const m4 view, const m4 proj) {
 
 static void render(const m4& view, const m4& proj) {
   #ifdef VR_ENABLED
-  if (state.vr.enabled) {
+  if (state.vr_enabled) {
     render_world_vr(view, proj);
     return;
   }
@@ -4119,7 +4119,7 @@ mine_main {
 
     #ifdef VR_ENABLED
     // read vr events
-    if (state.vr.enabled)
+    if (state.vr_enabled)
       read_vr_input();
     #endif
 
