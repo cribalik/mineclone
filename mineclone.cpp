@@ -76,11 +76,9 @@
 #include "stb_truetype.h"
 
 // uncomment to enable vr (only on Windows)
-// #define VR_ENABLED
 #if defined(OS_WINDOWS) && defined(VR_ENABLED)
   #include "OpenVR/openvr.h"
 #endif
-
 
 typedef unsigned int uint;
 typedef uint8_t u8;
@@ -2024,6 +2022,8 @@ struct GameState {
     bool enabled;
     vr::IVRSystem *system;
     vr::IVRCompositor *compositor;
+    m4 head_to_left_eye;
+    m4 head_to_right_eye;
   } vr;
   #endif
 
@@ -2944,10 +2944,11 @@ static void block_gl_buffer_create() {
     die("Maths went wrong, expected %lu but got %i", ARRAY_LEN(state.water_texture_buffer), state.water_texture_pos.w*state.water_texture_pos.h*4);
 
   // create G buffer
-  state.gbuffer_depth_target = Texture::create_empty(GL_TEXTURE_2D, GL_DEPTH_COMPONENT, GL_DEPTH_COMPONENT, state.screen_width, state.screen_height);
-  state.gbuffer_color_target = Texture::create_empty(GL_TEXTURE_2D, GL_RGB16F, GL_RGB, state.screen_width, state.screen_height);
-  state.gbuffer_normal_target = Texture::create_empty(GL_TEXTURE_2D, GL_RGB16F, GL_RGB, state.screen_width, state.screen_height);
-  state.gbuffer_position_target = Texture::create_empty(GL_TEXTURE_2D, GL_RGB16F, GL_RGB, state.screen_width, state.screen_height);
+  int w = state.screen_width*4, h = state.screen_height*4;
+  state.gbuffer_depth_target = Texture::create_empty(GL_TEXTURE_2D, GL_DEPTH_COMPONENT, GL_DEPTH_COMPONENT, w, h);
+  state.gbuffer_color_target = Texture::create_empty(GL_TEXTURE_2D, GL_RGB, GL_RGB, w, h);
+  state.gbuffer_normal_target = Texture::create_empty(GL_TEXTURE_2D, GL_RGB16F, GL_RGB, w, h);
+  state.gbuffer_position_target = Texture::create_empty(GL_TEXTURE_2D, GL_RGB16F, GL_RGB, w, h);
   Texture color_targets[] = {state.gbuffer_color_target, state.gbuffer_normal_target, state.gbuffer_position_target};
   state.gbuffer = FrameBuffer::create(color_targets, ARRAY_LEN(color_targets), &state.gbuffer_depth_target);
 
@@ -2956,6 +2957,8 @@ static void block_gl_buffer_create() {
   state.post_processing_pipeline.shader.set("u_depth", 1);
   state.post_processing_pipeline.shader.set("u_normal", 2);
   state.post_processing_pipeline.shader.set("u_position", 3);
+  state.post_processing_pipeline.shader.set("u_near", state.nearz);
+  state.post_processing_pipeline.shader.set("u_far", state.farz);
 
   state.post_processing_pipeline.textures[0] = &state.gbuffer_color_target;
   state.post_processing_pipeline.textures[1] = &state.gbuffer_depth_target;
@@ -3614,19 +3617,17 @@ static void render_transparent_blocks(const m4 &) {
 
 static void flush_quads(const RenderPipeline &p) {
   p.vb->bind();
+  gl_ok_or_die;
   glBufferData(GL_ARRAY_BUFFER, state.quad_vertices.size*sizeof(*state.quad_vertices.items), state.quad_vertices.items, GL_DYNAMIC_DRAW);
   glBufferData(GL_ELEMENT_ARRAY_BUFFER, state.quad_elements.size*sizeof(*state.quad_elements.items), state.quad_elements.items, GL_DYNAMIC_DRAW);
+  gl_ok_or_die;
   p.render(state.quad_elements.size);
   state.quad_vertices.size = state.quad_elements.size = 0;
 }
 
-static void render_gbuffer() {
-  FrameBuffer::bind_default();
+static void render_gbuffer_to_screen() {
   // draw a big quad over the screen with the gbuffer texture
   push_quad({0.0f, 0.0f}, {1.0f, 1.0f}, {0.0f, 0.0f}, {1.0f, 1.0f});
-
-  state.post_processing_pipeline.shader.set("u_near", state.nearz);
-  state.post_processing_pipeline.shader.set("u_far", state.farz);
 
   flush_quads(state.post_processing_pipeline);
 }
@@ -3899,7 +3900,37 @@ bool has_commandline_option(int argc, const char *argv[], const char *opt) {
 }
 #endif
 
+void render_world_to_gbuffer(const m4 &view, const m4 &proj) {
+  const m4 viewprojection = proj * view;
+  // render opaque blocks to gbuffer
+  render_opaque_blocks(viewprojection);
+
+  // render skybox to gbuffer
+  render_skybox(view, proj);
+
+  // render transparent blocks to gbuffer
+  render_transparent_blocks(viewprojection);
+}
+
 #ifdef VR_ENABLED
+static m4 vr_m34_to_m4(const vr::HmdMatrix34_t& mat) {
+  return m4_invert({
+    mat.m[0][0], mat.m[0][1], mat.m[0][2], mat.m[0][3],
+    mat.m[1][0], mat.m[1][1], mat.m[1][2], mat.m[1][3],
+    mat.m[2][0], mat.m[2][1], mat.m[2][2], mat.m[2][3],
+    0.0f,    0.0f,    0.0f,    1.0f,
+  });
+}
+
+static m4 vr_m44_to_m4(const vr::HmdMatrix44_t& mat) {
+  return {
+    mat.m[0][0], mat.m[0][1], mat.m[0][2], mat.m[0][3],
+    mat.m[1][0], mat.m[1][1], mat.m[1][2], mat.m[1][3], 
+    mat.m[2][0], mat.m[2][1], mat.m[2][2], mat.m[2][3], 
+    mat.m[3][0], mat.m[3][1], mat.m[3][2], mat.m[3][3]
+  };
+}
+
 void vr_init() {
   state.vr.enabled = true;
   // init OpenVR
@@ -3929,44 +3960,12 @@ void vr_init() {
   }
 
   state.vr.compositor->SetTrackingSpace(vr::TrackingUniverseSeated); 
-}
-#endif
 
-void render_world(const m4 &view, const m4 &proj) {
-  const m4 viewprojection = proj * view;
-  // render opaque blocks to gbuffer
-  render_opaque_blocks(viewprojection);
-
-  // render skybox to gbuffer
-  render_skybox(view, proj);
-
-  // render transparent blocks to gbuffer
-  render_transparent_blocks(viewprojection);
-
-  // render the gbuffer texture to screen
-  render_gbuffer();
+  state.vr.head_to_left_eye = vr_m34_to_m4(state.vr.system->GetEyeToHeadTransform(vr::Eye_Left));
+  state.vr.head_to_right_eye = vr_m34_to_m4(state.vr.system->GetEyeToHeadTransform(vr::Eye_Right));
 }
 
-#ifdef VR_ENABLED
-static m4 vr_m34_to_m4(const vr::HmdMatrix34_t& mat) {
-  return m4_invert({
-    mat.m[0][0], mat.m[0][1], mat.m[0][2], mat.m[0][3],
-    mat.m[1][0], mat.m[1][1], mat.m[1][2], mat.m[1][3],
-    mat.m[2][0], mat.m[2][1], mat.m[2][2], mat.m[2][3],
-    0.0f,    0.0f,    0.0f,    1.0f,
-  });
-}
-
-static m4 vr_m44_to_m4(const vr::HmdMatrix44_t& mat) {
-  return {
-    mat.m[0][0], mat.m[1][0], mat.m[2][0], mat.m[3][0],
-    mat.m[0][1], mat.m[1][1], mat.m[2][1], mat.m[3][1], 
-    mat.m[0][2], mat.m[1][2], mat.m[2][2], mat.m[3][2], 
-    mat.m[0][3], mat.m[1][3], mat.m[2][3], mat.m[3][3]
-  };
-}
-
-static void render_world_vr(m4 view, m4 proj) {
+static void render_world_vr(const m4 view, const m4 proj) {
   // wait until hmd position is available
   vr::TrackedDevicePose_t poses[vr::k_unMaxTrackedDeviceCount];
   state.vr.compositor->WaitGetPoses(poses, ARRAY_LEN(poses), 0, 0);
@@ -3977,21 +3976,66 @@ static void render_world_vr(m4 view, m4 proj) {
     return;
   }
 
-  // get view matrix
-  view = vr_m34_to_m4(poses[vr::k_unTrackedDeviceIndex_Hmd].mDeviceToAbsoluteTracking) * view;
+  const m4 pose = vr_m34_to_m4(poses[vr::k_unTrackedDeviceIndex_Hmd].mDeviceToAbsoluteTracking);
 
-  // TODO: add left eye to view
-  // proj = vr_m44_to_m4(state.vr.system->GetProjectionMatrix(vr::Eye_Left, state.nearz, state.farz));
+  vr::Texture_t vr_texture;
+  vr::EVRCompositorError err;
 
-  render_world(view, proj);
-  // vr_submit_texture(state.gbuffer);
+  // left eye
+  {
+    state.gbuffer.clear();
+    m4 lview = pose * state.vr.head_to_left_eye * view;
+    m4 lproj = vr_m44_to_m4(state.vr.system->GetProjectionMatrix(vr::Eye_Left, state.nearz, state.farz));
+    render_world_to_gbuffer(lview, lproj);
+    vr_texture = {(void*)(uintptr_t)state.gbuffer_color_target.id, vr::TextureType_OpenGL, vr::ColorSpace_Linear};
+    err = state.vr.compositor->Submit(vr::Eye_Left, &vr_texture);
+    if (err != vr::VRCompositorError_None)
+      die("Compositor error when submitting left eye to HMD (%i)\n", (int)err);
+    glFlush();
+    push_quad({0.0f, 0.0f}, {0.5f, 1.0f}, {0.0f, 0.0f}, {0.5f, 1.0f});
+    flush_quads(state.post_processing_pipeline);
+  }
 
-  // get_right_eye(&view, &proj);
-  // render_world(view, proj);
-  // vr_submit_texture(state.gbuffer);
+  // right eye
+  {
+    state.gbuffer.clear();
+    m4 rview = pose * state.vr.head_to_right_eye * view;
+    m4 rproj = vr_m44_to_m4(state.vr.system->GetProjectionMatrix(vr::Eye_Right, state.nearz, state.farz));
+    render_world_to_gbuffer(rview, rproj);
+    vr_texture = {(void*)(uintptr_t)state.gbuffer_color_target.id, vr::TextureType_OpenGL, vr::ColorSpace_Linear};
+    err = state.vr.compositor->Submit(vr::Eye_Right, &vr_texture);
+    if (err != vr::VRCompositorError_None)
+      die("Compositor error when submitting right eye to HMD (%i)\n", (int)err);
+    glFlush();
+    push_quad({0.5f, 0.0f}, {1.0f, 1.0f}, {0.5f, 0.0f}, {1.0f, 1.0f});
+    flush_quads(state.post_processing_pipeline);
+  }
+
+  // render_gbuffer_to_screen();
+  SDL_GL_SwapWindow(state.window);
 }
 #endif
 
+static void render(const m4& view, const m4& proj) {
+  #ifdef VR_ENABLED
+  if (state.vr.enabled) {
+    render_world_vr(view, proj);
+    return;
+  }
+  #endif
+
+  render_world_to_gbuffer(view, proj);
+  // render the gbuffer texture to screen
+  render_gbuffer_to_screen();
+  // render the ui (buttons, menus etc.) to screen
+  render_ui();
+  // render the text to screen
+  render_text();
+
+  // swap back buffer
+  SDL_GL_SwapWindow(state.window);
+  gl_ok_or_die;
+}
 
 // on windows, you can't just use main for some reason.
 // instead, you need to use WinMain, or wmain, or wWinMain. pick your poison ;)
@@ -4084,30 +4128,7 @@ mine_main {
     const m4 view = camera_view_matrix(&state.camera, state.camera_pos);
     const m4 proj = camera_projection_matrix(&state.camera, state.fov, state.nearz, state.farz, state.screen_ratio);
 
-    // render basically everything that is not ui
-    #ifdef VR_ENABLED
-
-    if (state.vr.enabled)
-      render_world_vr(view, proj);
-    else {
-      render_world(view, proj);
-    }
-
-    #else
-
-    render_world(view, proj);
-
-    #endif
-
-    // render the ui (buttons, menus etc.) to screen
-    render_ui();
-
-    // render the text to screen
-    render_text();
-
-    // swap back buffer
-    SDL_GL_SwapWindow(state.window);
-    gl_ok_or_die;
+    render(view, proj);
   }
 
   return 0;
