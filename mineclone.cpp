@@ -2111,6 +2111,7 @@ struct GameState {
 
     // post processing stuff (https://learnopengl.com/Advanced-Lighting/Deferred-Shading)
     FrameBuffer gbuffer;
+    int gbuffer_height, gbuffer_width;
     Texture gbuffer_color_target, gbuffer_depth_target, gbuffer_normal_target, gbuffer_position_target;
     RenderPipeline post_processing_pipeline;
 
@@ -2954,7 +2955,12 @@ static void block_gl_buffer_create() {
     die("Maths went wrong, expected %lu but got %i", ARRAY_LEN(state.water_texture_buffer), state.water_texture_pos.w*state.water_texture_pos.h*4);
 
   // create G buffer
-  int w = state.screen_width*4, h = state.screen_height*4;
+  if (!state.gbuffer_width || !state.gbuffer_height) {
+    state.gbuffer_width = state.screen_width;
+    state.gbuffer_height = state.screen_height;
+  }
+  const int w = state.gbuffer_width;
+  const int h = state.gbuffer_height;
   state.gbuffer_depth_target = Texture::create_empty(GL_TEXTURE_2D, GL_DEPTH_COMPONENT, GL_DEPTH_COMPONENT, w, h);
   #ifdef MANUAL_GAMMA
   state.gbuffer_color_target = Texture::create_empty(GL_TEXTURE_2D, GL_RGB16F, GL_RGB, w, h);
@@ -3978,6 +3984,12 @@ void vr_init() {
 
   state.vr.head_to_left_eye = vr_m34_to_m4(state.vr.system->GetEyeToHeadTransform(vr::Eye_Left));
   state.vr.head_to_right_eye = vr_m34_to_m4(state.vr.system->GetEyeToHeadTransform(vr::Eye_Right));
+
+  uint32_t w,h;
+  state.vr.system->GetRecommendedRenderTargetSize(&w, &h);
+  state.gbuffer_width = w;
+  state.gbuffer_height = h;
+  printf("gbuffer dimensions: %i %i\n", state.gbuffer_width, state.gbuffer_height);
 }
 
 static void render_world_vr(const m4 view, const m4 proj) {
@@ -3999,7 +4011,7 @@ static void render_world_vr(const m4 view, const m4 proj) {
   // left eye
   {
     state.gbuffer.clear();
-    m4 lview = pose * state.vr.head_to_left_eye * view;
+    m4 lview = state.vr.head_to_left_eye * pose * view;
     m4 lproj = vr_m44_to_m4(state.vr.system->GetProjectionMatrix(vr::Eye_Left, state.nearz, state.farz));
     render_world_to_gbuffer(lview, lproj);
     vr_texture = {(void*)(uintptr_t)state.gbuffer_color_target.id, vr::TextureType_OpenGL, vr::ColorSpace_Linear};
@@ -4014,7 +4026,7 @@ static void render_world_vr(const m4 view, const m4 proj) {
   // right eye
   {
     state.gbuffer.clear();
-    m4 rview = pose * state.vr.head_to_right_eye * view;
+    m4 rview = state.vr.head_to_right_eye * pose *  view;
     m4 rproj = vr_m44_to_m4(state.vr.system->GetProjectionMatrix(vr::Eye_Right, state.nearz, state.farz));
     render_world_to_gbuffer(rview, rproj);
     vr_texture = {(void*)(uintptr_t)state.gbuffer_color_target.id, vr::TextureType_OpenGL, vr::ColorSpace_Linear};
