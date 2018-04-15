@@ -62,6 +62,12 @@
   #define WIN32_LEAN_AND_MEAN 1
 #endif
 
+// glEnable(GL_FRAMEBUFFER_SRGB) doesn't work on ubuntu intel drivers,
+// so this flag is if we need to do it manually or not :(
+#ifndef OS_WINDOWS
+  #define MANUAL_GAMMA
+#endif
+
 #include <stdarg.h>
 #include "GL/gl3w.h"
 #include "SDL2/SDL.h"
@@ -1153,8 +1159,12 @@ static const char *post_processing_fragment_shader = R"FSHADER(
     // f_color is the output. we are boring for now and just forward the color
     f_color = vec4(color, 1.0f);
 
-    // DON'T remove this! we need to convert back from linear space to srgb (see the description of to_srgbf)
-    f_color = vec4(to_srgb(f_color.xyz), 1.0);
+    // convert to linear space (is already taken care of with glEnable(GL_FRAMEBUFFER_SRGB) and the color texture being GL_SRGB)
+)FSHADER"
+#ifdef MANUAL_GAMMA
+    "f_color = vec4(to_srgb(f_color.xyz), 1.0);\n"
+#endif
+R"FSHADER(
   }
 )FSHADER";
 
@@ -2946,7 +2956,12 @@ static void block_gl_buffer_create() {
   // create G buffer
   int w = state.screen_width*4, h = state.screen_height*4;
   state.gbuffer_depth_target = Texture::create_empty(GL_TEXTURE_2D, GL_DEPTH_COMPONENT, GL_DEPTH_COMPONENT, w, h);
-  state.gbuffer_color_target = Texture::create_empty(GL_TEXTURE_2D, GL_RGB, GL_RGB, w, h);
+  #ifdef MANUAL_GAMMA
+  state.gbuffer_color_target = Texture::create_empty(GL_TEXTURE_2D, GL_RGB16F, GL_RGB, w, h);
+  #else
+  // TODO: have RGB16F here for precision, and later blit it into a GL_SRGB8 image for the VR
+  state.gbuffer_color_target = Texture::create_empty(GL_TEXTURE_2D, GL_SRGB8, GL_RGB, w, h);
+  #endif
   state.gbuffer_normal_target = Texture::create_empty(GL_TEXTURE_2D, GL_RGB16F, GL_RGB, w, h);
   state.gbuffer_position_target = Texture::create_empty(GL_TEXTURE_2D, GL_RGB16F, GL_RGB, w, h);
   Texture color_targets[] = {state.gbuffer_color_target, state.gbuffer_normal_target, state.gbuffer_position_target};
@@ -4065,13 +4080,14 @@ mine_main {
   skybox_gl_buffer_create();
 
   // some gl settings
-  glCullFace(GL_BACK);
   glDepthFunc(GL_LEQUAL);
-  // TODO: we want the hardware to do the sRGB encoding, and not in the shaders,
-  // But this doesn't seem to work on intel drivers on ubuntu,
-  // at least for the default framebuffer :'(
-  // When we change to deferred rendering, check if the intel drivers support that.
-  // glEnable(GL_FRAMEBUFFER_SRGB);
+  // TODO: This doesn't seem to work on intel drivers on Ubuntu,
+  // but we kinda need it to massage OpenVR (which fortunately is only on windows atm.)
+  // So for non-windows platforms we do srgb conversion ourselves (in post_processing_fragment_shader),
+  // otherwise we let OpenGL do it for us
+  #ifndef MANUAL_GAMMA
+  glEnable(GL_FRAMEBUFFER_SRGB);
+  #endif
 
   // initialize game state
   gamestate_init();
