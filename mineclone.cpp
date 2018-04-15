@@ -2027,9 +2027,9 @@ struct GameState {
   };
 
   // vr stuff
+  bool vr_enabled;
   #ifdef VR_ENABLED
   struct {
-    bool enabled;
     vr::IVRSystem *system;
     vr::IVRCompositor *compositor;
     m4 head_to_left_eye;
@@ -2954,7 +2954,11 @@ static void block_gl_buffer_create() {
     die("Maths went wrong, expected %lu but got %i", ARRAY_LEN(state.water_texture_buffer), state.water_texture_pos.w*state.water_texture_pos.h*4);
 
   // create G buffer
-  int w = state.screen_width*4, h = state.screen_height*4;
+  int w = state.screen_width;
+  int h = state.screen_height;
+  // scale up for vr
+  if (state.vr_enabled)
+    w *= 4, h *= 4;
   state.gbuffer_depth_target = Texture::create_empty(GL_TEXTURE_2D, GL_DEPTH_COMPONENT, GL_DEPTH_COMPONENT, w, h);
   #ifdef MANUAL_GAMMA
   state.gbuffer_color_target = Texture::create_empty(GL_TEXTURE_2D, GL_RGB16F, GL_RGB, w, h);
@@ -3947,7 +3951,7 @@ static m4 vr_m44_to_m4(const vr::HmdMatrix44_t& mat) {
 }
 
 void vr_init() {
-  state.vr.enabled = true;
+  state.vr_enabled = true;
   // init OpenVR
   {
     vr::HmdError err = vr::VRInitError_None;
@@ -4033,7 +4037,7 @@ static void render_world_vr(const m4 view, const m4 proj) {
 
 static void render(const m4& view, const m4& proj) {
   #ifdef VR_ENABLED
-  if (state.vr.enabled) {
+  if (state.vr_enabled) {
     render_world_vr(view, proj);
     return;
   }
@@ -4107,7 +4111,7 @@ mine_main {
 
     #ifdef VR_ENABLED
     // read vr events
-    if (state.vr.enabled)
+    if (state.vr_enabled)
       read_vr_input();
     #endif
 
