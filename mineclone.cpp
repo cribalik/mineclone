@@ -916,7 +916,7 @@ static const char *block_vertex_shader = R"VSHADER(
   uniform float u_fog_near;
   uniform float u_fog_far;
   uniform mat4 u_viewprojection;
-  uniform float u_ambient;
+  uniform vec3 u_ambient;
   uniform vec3 u_skylight_dir;
   uniform vec3 u_skylight_color;
   uniform mat4 u_shadowmap_viewprojection;
@@ -1241,7 +1241,7 @@ static const char *skybox_fragment_shader = R"FSHADER(
 
   // uniform
   uniform samplerCube u_skybox;
-  uniform float u_ambient;
+  uniform vec3 u_ambient;
 
   void main() {
     vec3 c = texture(u_skybox, f_tpos).xyz;
@@ -2059,7 +2059,9 @@ struct GameState {
   // daycycle graphics stuff
   struct {
     float sun_angle;
-    float ambient_light;
+    v3 sun_direction;
+    v3 ambient_light;
+    v3 diffuse_light;
   };
 
   // block loader buffers
@@ -2106,6 +2108,7 @@ struct GameState {
     RenderPipeline shadowmap_pipeline;
     FrameBuffer shadowmap_framebuffer;
     Texture shadowmap;
+    m4 shadowmap_viewprojection;
     #define SHADOWMAP_WIDTH (1024*2)
     #define SHADOWMAP_HEIGHT (1024*2)
 
@@ -2126,6 +2129,11 @@ struct GameState {
     // where in the texture buffer is the water texture. We change the texture every frame to fake moving water
     struct {int x,y,w,h;} water_texture_pos;
     u8 water_texture_buffer[BLOCK_TEXTURE_SIZE*BLOCK_TEXTURE_SIZE*NUM_BLOCK_SIDES_IN_TEXTURE*4]; // 4 because of rgba
+  };
+
+  // tool graphics data
+  struct {
+     m4 controller_pose;
   };
 
   // ui graphics data
@@ -2928,7 +2936,8 @@ static void push_text(const char *str, v2 pos, float height, TextAlignment align
   }
 }
 
-static void block_gl_buffer_create() {
+
+static void block_graphics_init() {
   state.block_texture = Texture::create_from_file("textures.bmp", GL_TEXTURE_2D, GL_RGB, GL_SRGB_ALPHA);
 
   VertexDataSpec block_vertexspec[] = {
@@ -2954,6 +2963,24 @@ static void block_gl_buffer_create() {
   if (state.water_texture_pos.w*state.water_texture_pos.h*4 != ARRAY_LEN(state.water_texture_buffer))
     die("Maths went wrong, expected %lu but got %i", ARRAY_LEN(state.water_texture_buffer), state.water_texture_pos.w*state.water_texture_pos.h*4);
 
+  // create transparent block vbo
+  state.transparent_block_pipeline = state.opaque_block_pipeline;
+  state.transparent_block_vb = VertexBuffer::create(block_vertexspec, ARRAY_LEN(block_vertexspec), true);
+  state.transparent_block_pipeline.vb = &state.transparent_block_vb;
+  state.transparent_block_pipeline.render_flags |= RENDERFLAG_BLEND;
+}
+
+static void shadowmap_init() {
+  // create shadowmap FBO
+  state.shadowmap = Texture::create_empty(GL_TEXTURE_2D, GL_DEPTH_COMPONENT, GL_DEPTH_COMPONENT, SHADOWMAP_WIDTH, SHADOWMAP_HEIGHT, GL_NEAREST, GL_NEAREST);
+  state.shadowmap_pipeline.shader = Shader::create_from_string(shadowmap_vertex_shader, shadowmap_fragment_shader);
+  state.shadowmap_framebuffer = FrameBuffer::create(0, 0, &state.shadowmap);
+  state.shadowmap_pipeline.framebuffer = &state.shadowmap_framebuffer;
+  state.shadowmap_pipeline.vb = state.opaque_block_pipeline.vb;
+  state.shadowmap_pipeline.render_flags = RENDERFLAG_DEPTH_TEST | RENDERFLAG_CULL_FRONT_FACE;
+}
+
+static void post_processing_init() {
   // create G buffer
   if (!state.gbuffer_width || !state.gbuffer_height) {
     state.gbuffer_width = state.screen_width;
@@ -2988,23 +3015,9 @@ static void block_gl_buffer_create() {
   state.post_processing_pipeline.num_textures = 4;
   state.post_processing_pipeline.vb = &state.quad_vb;
   state.post_processing_pipeline.framebuffer = &state.screen_framebuffer;
-
-  // create shadowmap FBO
-  state.shadowmap = Texture::create_empty(GL_TEXTURE_2D, GL_DEPTH_COMPONENT, GL_DEPTH_COMPONENT, SHADOWMAP_WIDTH, SHADOWMAP_HEIGHT, GL_NEAREST, GL_NEAREST);
-  state.shadowmap_pipeline.shader = Shader::create_from_string(shadowmap_vertex_shader, shadowmap_fragment_shader);
-  state.shadowmap_framebuffer = FrameBuffer::create(0, 0, &state.shadowmap);
-  state.shadowmap_pipeline.framebuffer = &state.shadowmap_framebuffer;
-  state.shadowmap_pipeline.vb = state.opaque_block_pipeline.vb;
-  state.shadowmap_pipeline.render_flags = RENDERFLAG_DEPTH_TEST | RENDERFLAG_CULL_FRONT_FACE;
-
-  // create transparent block vbo
-  state.transparent_block_pipeline = state.opaque_block_pipeline;
-  state.transparent_block_vb = VertexBuffer::create(block_vertexspec, ARRAY_LEN(block_vertexspec), true);
-  state.transparent_block_pipeline.vb = &state.transparent_block_vb;
-  state.transparent_block_pipeline.render_flags |= RENDERFLAG_BLEND;
 }
 
-static void ui_gl_buffer_create() {
+static void ui_graphics_init() {
   VertexDataSpec vspec[] = {
     VERTEXDATA_FLOAT(QuadVertex, pos),
     VERTEXDATA_FLOAT(QuadVertex, tex)
@@ -3017,7 +3030,7 @@ static void ui_gl_buffer_create() {
   state.ui_pipeline.framebuffer = &state.screen_framebuffer;
 }
 
-static void text_gl_buffer_create() {
+static void text_graphics_init() {
   VertexDataSpec vspec [] = {
     VERTEXDATA_FLOAT(QuadVertex, pos),
     VERTEXDATA_FLOAT(QuadVertex, tex)
@@ -3064,7 +3077,7 @@ static void text_gl_buffer_create() {
   free(bitmap);
 }
 
-static void skybox_gl_buffer_create() {
+static void skybox_init() {
   // skybox vertices
   struct SkyboxVertex {
     v3 pos;
@@ -3653,19 +3666,12 @@ static void render_gbuffer_to_screen() {
   flush_quads(state.post_processing_pipeline);
 }
 
-static void render_opaque_blocks(m4 viewprojection) {
-  // resend block vertices to gpu if they changed
-  if (state.block_vertices_dirty) {
-    state.opaque_block_pipeline.vb->bind();
-    glBufferData(GL_ARRAY_BUFFER, state.block_vertices.size*sizeof(*state.block_vertices.items), state.block_vertices.items, GL_DYNAMIC_DRAW);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, state.block_elements.size*sizeof(*state.block_elements.items), state.block_elements.items, GL_DYNAMIC_DRAW);
-    state.block_vertices_dirty = false;
-  }
-
+static void calculate_directional_light() {
   // sun/moon direction
+  const bool sun_is_visible = sinf(state.sun_angle) > 0;
   const v3 sun_direction = {0.0f, -cosf(state.sun_angle), -sinf(state.sun_angle)};
   const v3 moon_direction = {0.0f, -cosf(state.sun_angle + PI), -sinf(state.sun_angle + PI)};
-  const bool sun_is_visible = sinf(state.sun_angle) > 0;
+  state.sun_direction = sun_is_visible ? sun_direction : moon_direction;
 
   // we want a sin-type curve for sun/moonlight, but we want it to spend more time at the extremes, so we make custom keyframes
   const float highest_light = 0.5f;
@@ -3678,30 +3684,33 @@ static void render_opaque_blocks(m4 viewprojection) {
     2.0f*PI-0.3f, lowest_light,
     2.0f*PI+0.3f, highest_light,
   };
-  state.ambient_light = keyframe_value(light_keyframes, ARRAY_LEN(light_keyframes), state.sun_angle);
+  float ambient_light_strength = keyframe_value(light_keyframes, ARRAY_LEN(light_keyframes), state.sun_angle);
+  state.ambient_light = {ambient_light_strength, ambient_light_strength, ambient_light_strength};
+  float diffuse_light_strength = sun_is_visible ? 0.5f : 0.03f;
+  state.diffuse_light = {diffuse_light_strength, diffuse_light_strength, diffuse_light_strength};
+}
 
+static void render_shadowmap() {
   // render shadowmap
-  m4 shadowmap_viewprojection;
-  {
-    // calculate camera position and projection matrix
-    Camera lightview = {};
-    v3 pos = state.player.pos - 100 * (sun_is_visible ? sun_direction : moon_direction);
-    camera_lookat(&lightview, pos, state.player.pos);
-    shadowmap_viewprojection = camera_viewortho_matrix(&lightview, pos, 50, 50, 30.0f, 200.0f);
-    state.shadowmap_pipeline.shader.set("u_viewprojection", shadowmap_viewprojection);
+  // calculate camera position and projection matrix
+  Camera lightview = {};
+  v3 pos = state.player.pos - 100 * state.sun_direction;
+  camera_lookat(&lightview, pos, state.player.pos);
+  state.shadowmap_viewprojection = camera_viewortho_matrix(&lightview, pos, 50, 50, 30.0f, 200.0f);
+  state.shadowmap_pipeline.shader.set("u_viewprojection", state.shadowmap_viewprojection);
 
-    state.shadowmap_pipeline.framebuffer->clear();
-    state.shadowmap_pipeline.render(state.block_elements.size);
-  }
+  state.shadowmap_pipeline.framebuffer->clear();
+  state.shadowmap_pipeline.render(state.block_elements.size);
+}
 
+static void render_opaque_blocks(m4 viewprojection) {
   // render opaque blocks
   state.opaque_block_pipeline.shader.set("u_camerapos", state.camera_pos);
   state.opaque_block_pipeline.shader.set("u_viewprojection", viewprojection);
-  state.opaque_block_pipeline.shader.set("u_shadowmap_viewprojection", shadowmap_viewprojection);
+  state.opaque_block_pipeline.shader.set("u_shadowmap_viewprojection", state.shadowmap_viewprojection);
   state.opaque_block_pipeline.shader.set("u_ambient", state.ambient_light);
-  state.opaque_block_pipeline.shader.set("u_skylight_dir", sun_is_visible ? sun_direction : moon_direction);
-  float light_strength = sun_is_visible ? 0.5f : 0.03f;
-  state.opaque_block_pipeline.shader.set("u_skylight_color", v3{light_strength, light_strength, light_strength});
+  state.opaque_block_pipeline.shader.set("u_skylight_dir", state.sun_direction);
+  state.opaque_block_pipeline.shader.set("u_skylight_color", state.diffuse_light);
 
   state.opaque_block_pipeline.render(state.block_elements.size);
 }
@@ -3921,13 +3930,35 @@ bool has_commandline_option(int argc, const char *argv[], const char *opt) {
 }
 #endif
 
+static void render_tool(const m4 &view, const m4 &proj) {
+  // TODO: implement
+}
+
 void render_world_to_gbuffer(const m4 &view, const m4 &proj) {
   const m4 viewprojection = proj * view;
+
+  // resend block vertices to gpu if they changed
+  if (state.block_vertices_dirty) {
+    state.opaque_block_vb.bind();
+    glBufferData(GL_ARRAY_BUFFER, state.block_vertices.size*sizeof(*state.block_vertices.items), state.block_vertices.items, GL_DYNAMIC_DRAW);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, state.block_elements.size*sizeof(*state.block_elements.items), state.block_elements.items, GL_DYNAMIC_DRAW);
+    state.block_vertices_dirty = false;
+  }
+
+  // calculate sun/moon position, and direction
+  calculate_directional_light();
+
+  // render shadowmap to gbuffer
+  render_shadowmap();
+
   // render opaque blocks to gbuffer
   render_opaque_blocks(viewprojection);
 
   // render skybox to gbuffer
   render_skybox(view, proj);
+
+  // render the tool you are holding
+  render_tool(view, proj);
 
   // render transparent blocks to gbuffer
   render_transparent_blocks(viewprojection);
@@ -4003,40 +4034,55 @@ static void render_world_vr(const m4 view, const m4 proj) {
     return;
   }
 
-  const m4 pose = vr_m34_to_m4(poses[vr::k_unTrackedDeviceIndex_Hmd].mDeviceToAbsoluteTracking);
+  const m4 hmd_pose = vr_m34_to_m4(poses[vr::k_unTrackedDeviceIndex_Hmd].mDeviceToAbsoluteTracking);
 
-  vr::Texture_t vr_texture;
-  vr::EVRCompositorError err;
+  // find the controller pose
+  for (int i = 0; i < vr::k_unMaxTrackedDeviceCount; ++i) {
+    if (state.vr.system->GetTrackedDeviceClass(i) != vr::TrackedDeviceClass_Controller)
+      continue;
+    if (!poses[i].bPoseIsValid)
+      continue;
+
+    state.controller_pose = vr_m34_to_m4(poses[i].mDeviceToAbsoluteTracking);
+    break;
+  }
 
   // left eye
   {
+    // draw to gbuffer
     state.gbuffer.clear();
-    m4 lview = state.vr.head_to_left_eye * pose * view;
+    m4 lview = state.vr.head_to_left_eye * hmd_pose * view;
     m4 lproj = vr_m44_to_m4(state.vr.system->GetProjectionMatrix(vr::Eye_Left, state.nearz, state.farz));
     render_world_to_gbuffer(lview, lproj);
-    vr_texture = {(void*)(uintptr_t)state.gbuffer_color_target.id, vr::TextureType_OpenGL, vr::ColorSpace_Linear};
-    err = state.vr.compositor->Submit(vr::Eye_Left, &vr_texture);
+
+    // send gbuffer to vr compositor
+    vr::Texture_t vr_texture = {(void*)(uintptr_t)state.gbuffer_color_target.id, vr::TextureType_OpenGL, vr::ColorSpace_Linear};
+    vr::EVRCompositorError err = state.vr.compositor->Submit(vr::Eye_Left, &vr_texture);
     if (err != vr::VRCompositorError_None)
       die("Compositor error when submitting left eye to HMD (%i)\n", (int)err);
     glFlush();
-    push_quad({0.0f, 0.0f}, {0.5f, 1.0f}, {0.0f, 0.0f}, {0.5f, 1.0f});
-    flush_quads(state.post_processing_pipeline);
   }
 
   // right eye
   {
+    // draw to gbuffer
     state.gbuffer.clear();
-    m4 rview = state.vr.head_to_right_eye * pose *  view;
+    m4 rview = state.vr.head_to_right_eye * hmd_pose *  view;
     m4 rproj = vr_m44_to_m4(state.vr.system->GetProjectionMatrix(vr::Eye_Right, state.nearz, state.farz));
     render_world_to_gbuffer(rview, rproj);
-    vr_texture = {(void*)(uintptr_t)state.gbuffer_color_target.id, vr::TextureType_OpenGL, vr::ColorSpace_Linear};
-    err = state.vr.compositor->Submit(vr::Eye_Right, &vr_texture);
+
+    // send gbuffer to vr compositor
+    vr::Texture_t vr_texture = {(void*)(uintptr_t)state.gbuffer_color_target.id, vr::TextureType_OpenGL, vr::ColorSpace_Linear};
+    vr::EVRCompositorError err = state.vr.compositor->Submit(vr::Eye_Right, &vr_texture);
     if (err != vr::VRCompositorError_None)
       die("Compositor error when submitting right eye to HMD (%i)\n", (int)err);
     glFlush();
-    push_quad({0.5f, 0.0f}, {1.0f, 1.0f}, {0.5f, 0.0f}, {1.0f, 1.0f});
-    flush_quads(state.post_processing_pipeline);
+
   }
+  
+  // render companion window
+  push_quad({0.0f, 0.0f}, {1.0f, 1.0f}, {0.0f, 0.0f}, {1.0f, 1.0f});
+  flush_quads(state.post_processing_pipeline);
 
   // render_gbuffer_to_screen();
   SDL_GL_SwapWindow(state.window);
@@ -4086,10 +4132,12 @@ mine_main {
   gl3wInit();
 
   // gl buffers, shaders, framebuffers
-  block_gl_buffer_create();
-  ui_gl_buffer_create();
-  text_gl_buffer_create();
-  skybox_gl_buffer_create();
+  block_graphics_init();
+  shadowmap_init();
+  post_processing_init();
+  ui_graphics_init();
+  text_graphics_init();
+  skybox_init();
 
   // some gl settings
   glDepthFunc(GL_LEQUAL);
