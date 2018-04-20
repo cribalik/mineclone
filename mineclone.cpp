@@ -1124,7 +1124,7 @@ static const char *post_processing_fragment_shader = R"FSHADER(
     float depth = linearize_depth(texture(u_depth, f_tpos).x);
 
     // f_color is the output. we are boring for now and just forward the color
-    f_color = vec4(depth, depth, depth, 1.0f);
+    f_color = vec4(color, 1.0f);
 
     // convert to linear space (is already taken care of with glEnable(GL_FRAMEBUFFER_SRGB) and the color texture being GL_SRGB)
 )FSHADER"
