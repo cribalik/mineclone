@@ -512,17 +512,8 @@ GENERATE_VECTOR_TYPE_4(u8);
 struct r2i {
   int x0,y0,x1,y1;
 };
-
-struct BlockVertexPos {
-  i16 x,y,z;
-};
-struct BlockVertexTexPos {
-  u16 x,y;
-};
-struct BlockVertex {
-  v3_i16 pos;
-  v2_u16 tex;
-  v1_u8 direction;
+struct r2 {
+  float x0,y0,x1,y1;
 };
 
 struct QuadVertex {
@@ -898,9 +889,9 @@ static const char *block_vertex_shader = R"VSHADER(
   #version 330 core
 
   // in
-  layout(location = 0) in ivec3 pos;
+  layout(location = 0) in vec3 pos;
   layout(location = 1) in vec2 tpos;
-  layout(location = 2) in uint dir;
+  layout(location = 2) in vec3 normal;
 
   // out
   out vec2 f_tpos;
@@ -923,30 +914,6 @@ static const char *block_vertex_shader = R"VSHADER(
   uniform samplerCube u_skybox; // so we know what color the fog should be!
 
   void main() {
-
-    vec3 normal;
-    switch(dir) {
-      case 0u: // UP
-        normal = vec3(0, 0, 1);
-        break;
-      case 1u: // X
-        normal = vec3(1, 0, 0);
-        break;
-      case 2u: // Y
-        normal = vec3(0, 1, 0);
-        break;
-      case 3u: // -Y
-        normal = vec3(0, -1, 0);
-        break;
-      case 4u: // -X
-        normal = vec3(-1, 0, 0);
-        break;
-      case 5u: // DOWN
-        normal = vec3(0, 0, -1);
-        break;
-      default:
-        break;
-    }
 
     // calculate where the distance lies between fog_near and fog_far
     vec3 dp = pos - u_camerapos;
@@ -1154,10 +1121,10 @@ static const char *post_processing_fragment_shader = R"FSHADER(
     vec3 color = texture(u_color, f_tpos).xyz;
     vec3 normal = texture(u_normal, f_tpos).xyz;
     vec3 position = texture(u_position, f_tpos).xyz;
-    float depth = linearize_depth(texture(u_depth, f_tpos).x); // depth linearized to range [0,1]
+    float depth = linearize_depth(texture(u_depth, f_tpos).x);
 
     // f_color is the output. we are boring for now and just forward the color
-    f_color = vec4(color, 1.0f);
+    f_color = vec4(depth, depth, depth, 1.0f);
 
     // convert to linear space (is already taken care of with glEnable(GL_FRAMEBUFFER_SRGB) and the color texture being GL_SRGB)
 )FSHADER"
@@ -1311,6 +1278,32 @@ static Direction normal_to_direction(v3 n) {
   if (n.z > 0.9f) return DIRECTION_UP;
   if (n.z < -0.9f) return DIRECTION_DOWN;
   return DIRECTION_UP;
+}
+
+static v3 direction_to_normal(Direction d) {
+  v3 result;
+  switch(d) {
+    case DIRECTION_UP:
+      result = {0.0f, 0.0f, 1.0f};
+      break;
+    case DIRECTION_X:
+      result = {1.0f, 0.0f, 0.0f};
+      break;
+    case DIRECTION_Y:
+      result = {0.0f, 1.0f, 0.0f};
+      break;
+    case DIRECTION_MINUS_Y:
+      result = {0.0f, -1.0f, 0.0f};
+      break;
+    case DIRECTION_MINUS_X:
+      result = {-1.0f, 0.0f, 0.0f};
+      break;
+    case DIRECTION_DOWN:
+      result = {0.0f, 0.0f, -1.0f};
+      break;
+    case DIRECTION_MAX: break;
+  }
+  return result;
 }
 
 // @colony
@@ -1625,12 +1618,25 @@ struct VertexDataSpec {
   #define VERTEXDATA_NORMALIZED_INT(vertex_type, member) VERTEXDATA_CREATE(vertex_type, member, false, true)
 };
 
+struct WorldObjectVertex {
+  v3 pos;
+  v2 tex;
+  v3 normal;
+};
+VertexDataSpec world_object_vertex_spec[] = {
+  VERTEXDATA_FLOAT(WorldObjectVertex, pos),
+  VERTEXDATA_FLOAT(WorldObjectVertex, tex),
+  VERTEXDATA_FLOAT(WorldObjectVertex, normal)
+};
+
 struct VertexBuffer {
   GLuint vao;
   GLuint vbo;
   GLuint ebo;
   int num_vertices;
   int num_elements;
+  VertexDataSpec *spec;
+  int num_specs;
 
   bool has_element_buffer() const {
     return ebo;
@@ -1689,6 +1695,10 @@ struct VertexBuffer {
       glGenBuffers(1, &vb.ebo);
       glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, vb.ebo);
     }
+
+    vb.spec = (VertexDataSpec*)malloc(num_info * sizeof(*info));
+    vb.num_specs = num_info;
+    memcpy(vb.spec, info, num_info*sizeof(*info));
 
     for (int i = 0; i < num_info; ++i) {
       VertexDataSpec v = info[i];
@@ -2122,7 +2132,7 @@ struct GameState {
     RenderPipeline opaque_block_pipeline;
     Texture block_texture;
 
-    Array<BlockVertex> block_vertices;
+    Array<WorldObjectVertex> block_vertices;
     Array<uint> block_elements;
     // a list of positions in the vertex array that are free
     Array<int> free_faces;
@@ -2151,7 +2161,7 @@ struct GameState {
     // same thing as all of the above, but for transparent blocks (since they need to be rendered separately after everything else has rendered in order for them to look correct)
     VertexBuffer transparent_block_vb;
     RenderPipeline transparent_block_pipeline;
-    Array<BlockVertex> transparent_block_vertices;
+    Array<WorldObjectVertex> transparent_block_vertices;
     Array<uint> transparent_block_elements;
     Array<int> free_transparent_faces;
     bool transparent_block_vertices_dirty;
@@ -2351,19 +2361,42 @@ static void blocktype_to_texpos_top(BlockType t, u16 *x0, u16 *y0, u16 *x1, u16 
   *x1 = UINT16_MAX/3;
   *y1 = UINT16_MAX*(BLOCKTYPES_MAX-t)/(BLOCKTYPES_MAX-2);
 }
-
 static void blocktype_to_texpos_side(BlockType t, u16 *x0, u16 *y0, u16 *x1, u16 *y1) {
   *x0 = UINT16_MAX/3;
   *y0 = UINT16_MAX*(BLOCKTYPES_MAX-1-t)/(BLOCKTYPES_MAX-2);
   *x1 = 2*UINT16_MAX/3;
   *y1 = UINT16_MAX*(BLOCKTYPES_MAX-t)/(BLOCKTYPES_MAX-2);
 }
-
 static void blocktype_to_texpos_bottom(BlockType t, u16 *x0, u16 *y0, u16 *x1, u16 *y1) {
   *x0 = 2*UINT16_MAX/3;
   *y0 = UINT16_MAX*(BLOCKTYPES_MAX-1-t)/(BLOCKTYPES_MAX-2);
   *x1 = UINT16_MAX;
   *y1 = UINT16_MAX*(BLOCKTYPES_MAX-t)/(BLOCKTYPES_MAX-2);
+}
+
+static r2 blocktype_to_texpos_top(BlockType t) {
+  return {
+    0.0f,
+    1.0f*(BLOCKTYPES_MAX-1-t)/(BLOCKTYPES_MAX-2),
+    1.0f/3.0f,
+    1.0f*(BLOCKTYPES_MAX-t)/(BLOCKTYPES_MAX-2)
+  };
+}
+static r2 blocktype_to_texpos_side(BlockType t) {
+  return {
+    1.0f/3.0f,
+    1.0f*(BLOCKTYPES_MAX-1-t)/(BLOCKTYPES_MAX-2),
+    2.0f/3.0f,
+    1.0f*(BLOCKTYPES_MAX-t)/(BLOCKTYPES_MAX-2)
+  };
+}
+static r2 blocktype_to_texpos_bottom(BlockType t) {
+  return {
+    2.0f/3.0f,
+    1.0f*(BLOCKTYPES_MAX-1-t)/(BLOCKTYPES_MAX-2),
+    1.0f,
+    1.0f*(BLOCKTYPES_MAX-t)/(BLOCKTYPES_MAX-2)
+  };
 }
 
 static void blocktype_to_texpos(BlockType t, int *x, int *y, int *w, int *h) {
@@ -2384,7 +2417,7 @@ static void push_block_face(Block block, BlockType type, Direction dir) {
   const bool transparent = blocktype_is_transparent(type);
 
   // pick transparent or opaque vertices
-  Array<BlockVertex> &block_vertices = transparent ? state.transparent_block_vertices : state.block_vertices;
+  Array<WorldObjectVertex> &block_vertices = transparent ? state.transparent_block_vertices : state.block_vertices;
   Array<int> &free_faces = transparent ? state.free_transparent_faces : state.free_faces;
   Array<uint> &block_elements = transparent ? state.transparent_block_elements : state.block_elements;
 
@@ -2397,13 +2430,12 @@ static void push_block_face(Block block, BlockType type, Direction dir) {
   if (transparent) state.transparent_block_vertices_dirty = true;
   else             state.block_vertices_dirty = true;
 
-  const BlockVertexPos p =  {(i16)(block.x), (i16)(block.y), (i16)(block.z)};
-  const BlockVertexPos p2 = {(i16)(block.x+1), (i16)(block.y+1), (i16)(block.z+1)};
+  const v3 p =  {(float)block.x, (float)block.y, (float)block.z};
+  const v3 p2 = {(float)(block.x+1), (float)(block.y+1), (float)(block.z+1)};
 
-  BlockVertexTexPos ttop, ttop2,  tside, tside2,  tbot, tbot2;
-  blocktype_to_texpos_top(type, &ttop.x, &ttop.y, &ttop2.x, &ttop2.y);
-  blocktype_to_texpos_side(type, &tside.x, &tside.y, &tside2.x, &tside2.y);
-  blocktype_to_texpos_bottom(type, &tbot.x, &tbot.y, &tbot2.x, &tbot2.y);
+  r2 ttop = blocktype_to_texpos_top(type);
+  r2 tside = blocktype_to_texpos_side(type);
+  r2 tbot = blocktype_to_texpos_bottom(type);
 
   int v, el;
   // check if there are any free vertex slots
@@ -2422,47 +2454,49 @@ static void push_block_face(Block block, BlockType type, Direction dir) {
   set_block_vertex_pos(bi, dir, v/4);
   assert(*get_block_vertex_pos(bi, dir) == v/4);
 
+  const v3 normal = direction_to_normal(dir);
+
   switch (dir) {
     case DIRECTION_UP: {
-      block_vertices[v] =   {p.x,  p.y,  p2.z, ttop.x,  ttop.y,  DIRECTION_UP};
-      block_vertices[v+1] = {p2.x, p.y,  p2.z, ttop2.x, ttop.y,  DIRECTION_UP};
-      block_vertices[v+2] = {p2.x, p2.y, p2.z, ttop2.x, ttop2.y, DIRECTION_UP};
-      block_vertices[v+3] = {p.x,  p2.y, p2.z, ttop.x,  ttop2.y, DIRECTION_UP};
+      block_vertices[v] =   {p.x,  p.y,  p2.z, ttop.x0,  ttop.y0,  normal};
+      block_vertices[v+1] = {p2.x, p.y,  p2.z, ttop.x1, ttop.y0,  normal};
+      block_vertices[v+2] = {p2.x, p2.y, p2.z, ttop.x1, ttop.y1, normal};
+      block_vertices[v+3] = {p.x,  p2.y, p2.z, ttop.x0,  ttop.y1, normal};
     } break;
 
     case DIRECTION_DOWN: {
-      block_vertices[v] =   {p2.x, p.y,  p.z, tbot.x,  tbot.y,  DIRECTION_DOWN};
-      block_vertices[v+1] = {p.x,  p.y,  p.z, tbot2.x, tbot.y,  DIRECTION_DOWN};
-      block_vertices[v+2] = {p.x,  p2.y, p.z, tbot2.x, tbot2.y, DIRECTION_DOWN};
-      block_vertices[v+3] = {p2.x, p2.y, p.z, tbot.x,  tbot2.y, DIRECTION_DOWN};
+      block_vertices[v] =   {p2.x, p.y,  p.z, tbot.x0,  tbot.y0,  normal};
+      block_vertices[v+1] = {p.x,  p.y,  p.z, tbot.x1, tbot.y0,  normal};
+      block_vertices[v+2] = {p.x,  p2.y, p.z, tbot.x1, tbot.y1, normal};
+      block_vertices[v+3] = {p2.x, p2.y, p.z, tbot.x0,  tbot.y1, normal};
     } break;
 
     case DIRECTION_X: {
-      block_vertices[v] =   {p2.x, p.y,  p.z,  tside.x,  tside.y,  DIRECTION_X};
-      block_vertices[v+1] = {p2.x, p2.y, p.z,  tside2.x, tside.y,  DIRECTION_X};
-      block_vertices[v+2] = {p2.x, p2.y, p2.z, tside2.x, tside2.y, DIRECTION_X};
-      block_vertices[v+3] = {p2.x, p.y,  p2.z, tside.x,  tside2.y, DIRECTION_X};
+      block_vertices[v] =   {p2.x, p.y,  p.z,  tside.x0,  tside.y0,  normal};
+      block_vertices[v+1] = {p2.x, p2.y, p.z,  tside.x1, tside.y0,  normal};
+      block_vertices[v+2] = {p2.x, p2.y, p2.z, tside.x1, tside.y1, normal};
+      block_vertices[v+3] = {p2.x, p.y,  p2.z, tside.x0,  tside.y1, normal};
     } break;
 
     case DIRECTION_Y: {
-      block_vertices[v] =   {p2.x, p2.y, p.z,  tside.x,  tside.y,  DIRECTION_Y};
-      block_vertices[v+1] = {p.x,  p2.y, p.z,  tside2.x, tside.y,  DIRECTION_Y};
-      block_vertices[v+2] = {p.x,  p2.y, p2.z, tside2.x, tside2.y, DIRECTION_Y};
-      block_vertices[v+3] = {p2.x, p2.y, p2.z, tside.x,  tside2.y, DIRECTION_Y};
+      block_vertices[v] =   {p2.x, p2.y, p.z,  tside.x0,  tside.y0,  normal};
+      block_vertices[v+1] = {p.x,  p2.y, p.z,  tside.x1, tside.y0,  normal};
+      block_vertices[v+2] = {p.x,  p2.y, p2.z, tside.x1, tside.y1, normal};
+      block_vertices[v+3] = {p2.x, p2.y, p2.z, tside.x0,  tside.y1, normal};
     } break;
 
     case DIRECTION_MINUS_X: {
-      block_vertices[v] =   {p.x, p2.y, p.z,  tside.x,  tside.y,  DIRECTION_MINUS_X};
-      block_vertices[v+1] = {p.x, p.y,  p.z,  tside2.x, tside.y,  DIRECTION_MINUS_X};
-      block_vertices[v+2] = {p.x, p.y,  p2.z, tside2.x, tside2.y, DIRECTION_MINUS_X};
-      block_vertices[v+3] = {p.x, p2.y, p2.z, tside.x,  tside2.y, DIRECTION_MINUS_X};
+      block_vertices[v] =   {p.x, p2.y, p.z,  tside.x0,  tside.y0,  normal};
+      block_vertices[v+1] = {p.x, p.y,  p.z,  tside.x1, tside.y0,  normal};
+      block_vertices[v+2] = {p.x, p.y,  p2.z, tside.x1, tside.y1, normal};
+      block_vertices[v+3] = {p.x, p2.y, p2.z, tside.x0,  tside.y1, normal};
     } break;
 
     case DIRECTION_MINUS_Y: {
-      block_vertices[v] =   {p.x,  p.y, p.z,  tside.x,  tside.y,  DIRECTION_MINUS_Y};
-      block_vertices[v+1] = {p2.x, p.y, p.z,  tside2.x, tside.y,  DIRECTION_MINUS_Y};
-      block_vertices[v+2] = {p2.x, p.y, p2.z, tside2.x, tside2.y, DIRECTION_MINUS_Y};
-      block_vertices[v+3] = {p.x,  p.y, p2.z, tside.x,  tside2.y, DIRECTION_MINUS_Y};
+      block_vertices[v] =   {p.x,  p.y, p.z,  tside.x0,  tside.y0,  normal};
+      block_vertices[v+1] = {p2.x, p.y, p.z,  tside.x1, tside.y0,  normal};
+      block_vertices[v+2] = {p2.x, p.y, p2.z, tside.x1, tside.y1, normal};
+      block_vertices[v+3] = {p.x,  p.y, p2.z, tside.x0,  tside.y1, normal};
     } break;
 
     default: return;
@@ -2610,7 +2644,7 @@ static void remove_blockface(Block b, BlockType type, Direction d) {
     return;
 
   const bool transparent = blocktype_is_transparent(type);
-  Array<BlockVertex> &block_vertices = transparent ? state.transparent_block_vertices : state.block_vertices;
+  Array<WorldObjectVertex> &block_vertices = transparent ? state.transparent_block_vertices : state.block_vertices;
   Array<int> &free_faces = transparent ? state.free_transparent_faces : state.free_faces;
 
   if ((int)*vertex_pos >= block_vertices.size) {
@@ -2971,19 +3005,10 @@ static void push_text(const char *str, v2 pos, float height, TextAlignment align
   }
 }
 
-struct ToolVertex {
-  v3 pos;
-  v3 color;
-};
-
 static void tool_graphics_init() {
-  VertexDataSpec vspec[] = {
-    VERTEXDATA_FLOAT(ToolVertex, pos),
-    VERTEXDATA_FLOAT(ToolVertex, color)
-  };
-  state.tool_vb = VertexBuffer::create(vspec, ARRAY_LEN(vspec), true);
+  state.tool_vb = VertexBuffer::create(world_object_vertex_spec, ARRAY_LEN(world_object_vertex_spec), true);
   gl_ok_or_die;
-  Array<ToolVertex> tool_vertices = {};
+  Array<WorldObjectVertex> tool_vertices = {};
   Array<uint> tool_elements = {};
 
   // open the tools file, and find all pixel positions,
@@ -2994,6 +3019,9 @@ static void tool_graphics_init() {
   if (!data)
     die("Failed to load tools.bmp");
 
+  const float scale = 0.1f;
+  const float size = 1.0;
+
   for (int yi = 0; yi < h; ++yi)
   for (int xi = 0; xi < w; ++xi) {
     int r = data[(yi*w + xi)*3];
@@ -3002,41 +3030,38 @@ static void tool_graphics_init() {
     if (r == 255 && g == 0 && b == 255)
       continue;
 
-    float x = xi + 3.0f;
-    float y = yi;
-    float x2 = x + 0.1;
-    float y2 = y + 0.1;
+    float x = (xi - w/2)*scale;
+    float y = (yi - h/2)*scale;
+    float x2 = x + size*scale;
+    float y2 = y + size*scale;
     float z = 0;
-    float z2 = 0.1;
-    float rf = r/255.0f;
-    float gf = g/255.0f;
-    float bf = b/255.0f;
+    float z2 = size*scale;
 
-    ToolVertex *v = array_pushn(tool_vertices, 6*6);
-    *v++ = {x,  y,  z2, rf, gf, bf};
-    *v++ = {x2, y,  z2, rf, gf, bf};
-    *v++ = {x2, y2, z2, rf, gf, bf};
-    *v++ = {x,  y2, z2, rf, gf, bf};
-    *v++ = {x2, y,  z,  rf, gf, bf};
-    *v++ = {x,  y,  z,  rf, gf, bf};
-    *v++ = {x,  y2, z,  rf, gf, bf};
-    *v++ = {x2, y2, z,  rf, gf, bf};
-    *v++ = {x2, y,  z,  rf, gf, bf};
-    *v++ = {x2, y2, z,  rf, gf, bf};
-    *v++ = {x2, y2, z2, rf, gf, bf};
-    *v++ = {x2, y,  z2, rf, gf, bf};
-    *v++ = {x2, y2, z,  rf, gf, bf};
-    *v++ = {x,  y2, z,  rf, gf, bf};
-    *v++ = {x,  y2, z2, rf, gf, bf};
-    *v++ = {x2, y2, z2, rf, gf, bf};
-    *v++ = {x, y2, z,   rf, gf, bf};
-    *v++ = {x, y,  z,   rf, gf, bf};
-    *v++ = {x, y,  z2,  rf, gf, bf};
-    *v++ = {x, y2, z2,  rf, gf, bf};
-    *v++ = {x,  y, z,   rf, gf, bf};
-    *v++ = {x2, y, z,   rf, gf, bf};
-    *v++ = {x2, y, z2,  rf, gf, bf};
-    *v++ = {x,  y, z2,  rf, gf, bf};
+    WorldObjectVertex *v = array_pushn(tool_vertices, 4*6);
+    *v++ = {x,  y,  z2, {0.1f, 0.1f}, {0.0f, 0.0f, 1.0f}};
+    *v++ = {x2, y,  z2, {0.1f, 0.1f}, {0.0f, 0.0f, 1.0f}};
+    *v++ = {x2, y2, z2, {0.1f, 0.1f}, {0.0f, 0.0f, 1.0f}};
+    *v++ = {x,  y2, z2, {0.1f, 0.1f}, {0.0f, 0.0f, 1.0f}};
+    *v++ = {x2, y,  z,  {0.1f, 0.8f}, {0.0f, 0.0f, -1.0f}};
+    *v++ = {x,  y,  z,  {0.1f, 0.8f}, {0.0f, 0.0f, -1.0f}};
+    *v++ = {x,  y2, z,  {0.1f, 0.8f}, {0.0f, 0.0f, -1.0f}};
+    *v++ = {x2, y2, z,  {0.1f, 0.8f}, {0.0f, 0.0f, -1.0f}};
+    *v++ = {x2, y,  z,  {0.1f, 0.5f}, {1.0f, 0.0f, 0.0f}};
+    *v++ = {x2, y2, z,  {0.1f, 0.5f}, {1.0f, 0.0f, 0.0f}};
+    *v++ = {x2, y2, z2, {0.1f, 0.5f}, {1.0f, 0.0f, 0.0f}};
+    *v++ = {x2, y,  z2, {0.1f, 0.5f}, {1.0f, 0.0f, 0.0f}};
+    *v++ = {x2, y2, z,  {0.1f, 0.5f}, {0.0f, 1.0f, 0.0f}};
+    *v++ = {x,  y2, z,  {0.1f, 0.5f}, {0.0f, 1.0f, 0.0f}};
+    *v++ = {x,  y2, z2, {0.1f, 0.5f}, {0.0f, 1.0f, 0.0f}};
+    *v++ = {x2, y2, z2, {0.1f, 0.5f}, {0.0f, 1.0f, 0.0f}};
+    *v++ = {x, y2, z,   {0.1f, 0.5f}, {-1.0f, 0.0f, 0.0f}};
+    *v++ = {x, y,  z,   {0.1f, 0.5f}, {-1.0f, 0.0f, 0.0f}};
+    *v++ = {x, y,  z2,  {0.1f, 0.5f}, {-1.0f, 0.0f, 0.0f}};
+    *v++ = {x, y2, z2,  {0.1f, 0.5f}, {-1.0f, 0.0f, 0.0f}};
+    *v++ = {x,  y, z,   {0.1f, 0.5f}, {0.0f, -1.0f, 0.0f}};
+    *v++ = {x2, y, z,   {0.1f, 0.5f}, {0.0f, -1.0f, 0.0f}};
+    *v++ = {x2, y, z2,  {0.1f, 0.5f}, {0.0f, -1.0f, 0.0f}};
+    *v++ = {x,  y, z2,  {0.1f, 0.5f}, {0.0f, -1.0f, 0.0f}};
   }
 
   for (int i = 0; i < tool_vertices.size; i += 4) {
@@ -3048,30 +3073,21 @@ static void tool_graphics_init() {
     *e++ = i+2;
     *e++ = i+3;
   }
-  gl_ok_or_die;
   state.tool_vb.set_data(tool_vertices.items, tool_vertices.size, tool_elements.items, tool_elements.size, GL_STATIC_DRAW);
-  gl_ok_or_die;
   array_free(tool_vertices);
   array_free(tool_elements);
   stbi_image_free(data);
-  gl_ok_or_die;
 
   // set up pipeline
   state.tool_pipeline.shader = &state.world_object_shader;
   state.tool_pipeline.render_flags = RENDERFLAG_DEPTH_TEST;
   state.tool_pipeline.vb = &state.tool_vb;
   state.tool_pipeline.framebuffer = &state.gbuffer;
-  gl_ok_or_die;
 }
 
 static void block_graphics_init() {
   state.block_texture = Texture::create_from_file("textures.bmp", GL_TEXTURE_2D, GL_RGB, GL_SRGB_ALPHA);
 
-  VertexDataSpec block_vertexspec[] = {
-    VERTEXDATA_INT(BlockVertex, pos),
-    VERTEXDATA_NORMALIZED_INT(BlockVertex, tex),
-    VERTEXDATA_INT(BlockVertex, direction)
-  };
   state.world_object_shader = Shader::create_from_string(block_vertex_shader, block_fragment_shader);
   state.opaque_block_pipeline.shader = &state.world_object_shader;
   state.opaque_block_pipeline.shader->set("u_fog_near", 100.0f);
@@ -3082,7 +3098,7 @@ static void block_graphics_init() {
   state.opaque_block_pipeline.textures[state.opaque_block_pipeline.num_textures++] = &state.shadowmap;
   state.opaque_block_pipeline.shader->set("u_skybox", 2);
   state.opaque_block_pipeline.textures[state.opaque_block_pipeline.num_textures++] = &state.skybox.texture;
-  state.opaque_block_vb = VertexBuffer::create(block_vertexspec, ARRAY_LEN(block_vertexspec), true);
+  state.opaque_block_vb = VertexBuffer::create(world_object_vertex_spec, ARRAY_LEN(world_object_vertex_spec), true);
   state.opaque_block_pipeline.vb = &state.opaque_block_vb;
   state.opaque_block_pipeline.framebuffer = &state.gbuffer;
   state.opaque_block_pipeline.render_flags = RENDERFLAG_CULL_BACK_FACE | RENDERFLAG_DEPTH_TEST;
@@ -3093,7 +3109,7 @@ static void block_graphics_init() {
 
   // create transparent block vbo
   state.transparent_block_pipeline = state.opaque_block_pipeline;
-  state.transparent_block_vb = VertexBuffer::create(block_vertexspec, ARRAY_LEN(block_vertexspec), true);
+  state.transparent_block_vb = VertexBuffer::create(world_object_vertex_spec, ARRAY_LEN(world_object_vertex_spec), true);
   state.transparent_block_pipeline.vb = &state.transparent_block_vb;
   state.transparent_block_pipeline.render_flags |= RENDERFLAG_BLEND;
 }
@@ -3795,7 +3811,6 @@ static void flush_quads(const RenderPipeline &p) {
 static void render_gbuffer_to_screen() {
   // draw a big quad over the screen with the gbuffer texture
   push_quad({0.0f, 0.0f}, {1.0f, 1.0f}, {0.0f, 0.0f}, {1.0f, 1.0f});
-
   flush_quads(state.post_processing_pipeline);
 }
 
@@ -3846,6 +3861,22 @@ static void render_opaque_blocks(m4 viewprojection) {
   state.opaque_block_pipeline.shader->set("u_skylight_color", state.diffuse_light);
 
   state.opaque_block_pipeline.render(state.block_elements.size);
+}
+
+static void render_tool(const m4& proj) {
+  static float a;
+  a += 0.03f;
+  m4 v = camera_view_matrix(&state.camera, {-1.0f, -1.0f, sinf(a)});
+  m4 vp = proj * v;
+
+  state.tool_pipeline.shader->set("u_camerapos", state.camera_pos);
+  state.tool_pipeline.shader->set("u_viewprojection", vp);
+  state.tool_pipeline.shader->set("u_shadowmap_viewprojection", state.shadowmap_viewprojection);
+  state.tool_pipeline.shader->set("u_ambient", state.ambient_light);
+  state.tool_pipeline.shader->set("u_skylight_dir", state.sun_direction);
+  state.tool_pipeline.shader->set("u_skylight_color", state.diffuse_light);
+
+  state.tool_pipeline.render();
 }
 
 static void render_skybox(const m4 &view, const m4 &proj) {
@@ -4036,15 +4067,17 @@ static void gamestate_init() {
   if (!state.block_loader.num_commands)
     sdl_die("Failed to initialize semaphores");
 
-  reset_block_vertices();
-  generate_block_mesh();
-
   // fill inventory with a bunch of blocks
   for (int i = 0; i < min(BLOCKTYPES_MAX - 1 - BLOCKTYPE_AIR, (int)ARRAY_LEN(state.inventory.items)); ++i) {
     state.inventory.items[i].type = ITEM_BLOCK;
     state.inventory.items[i].block.num = 64;
     state.inventory.items[i].block.type = (BlockType)(BLOCKTYPE_AIR + 1 + i);
   }
+}
+
+static void world_init() {
+  reset_block_vertices();
+  generate_block_mesh();
 }
 
 #ifdef OS_WINDOWS
@@ -4062,18 +4095,6 @@ bool has_commandline_option(int argc, const char *argv[], const char *opt) {
   return false;
 }
 #endif
-
-static void render_tool(const m4 &viewprojection) {
-  // TODO: we need to add the player position to the offset of the view matrix (i.e. add the model transform to the view matrix, a step we've skipped so far :)
-  state.tool_pipeline.shader->set("u_camerapos", state.camera_pos);
-  state.tool_pipeline.shader->set("u_viewprojection", viewprojection);
-  state.tool_pipeline.shader->set("u_shadowmap_viewprojection", state.shadowmap_viewprojection);
-  state.tool_pipeline.shader->set("u_ambient", state.ambient_light);
-  state.tool_pipeline.shader->set("u_skylight_dir", state.sun_direction);
-  state.tool_pipeline.shader->set("u_skylight_color", state.diffuse_light);
-  printf("%i\n", state.tool_pipeline.vb->num_items());
-  state.tool_pipeline.render();
-}
 
 void render_world_to_gbuffer(const m4 &view, const m4 &proj) {
   const m4 viewprojection = proj * view;
@@ -4095,11 +4116,11 @@ void render_world_to_gbuffer(const m4 &view, const m4 &proj) {
   // render opaque blocks to gbuffer
   render_opaque_blocks(viewprojection);
 
+  // render the tool you are holding
+  // render_tool(proj);
+
   // render skybox to gbuffer
   render_skybox(view, proj);
-
-  // render the tool you are holding
-  render_tool(viewprojection);
 
   // render transparent blocks to gbuffer
   render_transparent_blocks(viewprojection);
@@ -4272,6 +4293,8 @@ mine_main {
   // get gl3w to fetch opengl function pointers
   gl3wInit();
 
+  gamestate_init();
+
   // gl buffers, shaders, framebuffers
   tool_graphics_init();
   block_graphics_init();
@@ -4292,7 +4315,7 @@ mine_main {
   #endif
 
   // initialize game state
-  gamestate_init();
+  world_init();
 
   // create the thread in charge of loading blocks
   SDL_CreateThread(blockloader_thread, "block loader", 0);
