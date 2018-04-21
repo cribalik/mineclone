@@ -1,5 +1,7 @@
 // TODO:
 //
+// * load .obj files (http://www.opengl-tutorial.org/beginners-tutorials/tutorial-7-model-loading)
+//
 // * mipmap the texture atlas (http://download.nvidia.com/developer/NVTextureSuite/Atlas_Tools/Texture_Atlas_Whitepaper.pdf)
 //
 // * reduce number of vertices by merging blocks of the same type
@@ -3904,6 +3906,7 @@ static void render_opaque_blocks(m4 viewprojection) {
 static void render_tool(const m4& proj) {
   static float a;
   a += 0.07f;
+  // TODO: properly create a model matrix instead of this hack
   m4 v = camera_view_matrix(&state.camera, {-1.0f, -1.0f, sinf(a)*0.3f});
   m4 vp = proj * v;
 
