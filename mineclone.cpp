@@ -17,8 +17,6 @@
 //
 // * give the shadowmap close to player higher precision (like a fishbowl kind of thing?)
 //
-// * movement through water
-//
 // * bloom (https://learnopengl.com/Advanced-Lighting/Bloom)
 //
 // * ambient occlusion (https://learnopengl.com/Advanced-Lighting/SSAO)
@@ -1096,7 +1094,9 @@ static const char *post_processing_fragment_shader = R"FSHADER(
 
   // functions
 
-  // depth is nonlinear and weird due to how projection is done, se want to linearize it so it's a nice value in [0,1]
+  // depth is nonlinear and weird due to how projection is done,
+  // we want to linearize it so it's a nice linear value between [0,1],
+  // 0 being the near plane, and 1 being the far plane
   // see https://learnopengl.com/Advanced-OpenGL/Depth-testing
   float linearize_depth(float depth) {
     float z = 2.0 * depth - 1.0;
