@@ -250,9 +250,9 @@ static v3i operator+(v3i a, v3i b) {
 
 typedef v3i Block;
 struct BlockIndex {
-  int x: 16;
-  int y: 16;
-  int z: 16;
+  int x;
+  int y;
+  int z;
 };
 
 static bool is_invalid(Block b) {
@@ -886,8 +886,8 @@ static m4 camera_viewortho_matrix(const Camera *camera, v3 pos, float width, flo
 }
 
 
-// @block_vertex_shader
-static const char *block_vertex_shader = R"VSHADER(
+// @world_object_vertex_shader
+static const char *world_object_vertex_shader = R"VSHADER(
   #version 330 core
 
   // in
@@ -941,8 +941,8 @@ static const char *block_vertex_shader = R"VSHADER(
   }
   )VSHADER";
 
-// @block_fragment_shader
-static const char *block_fragment_shader = R"FSHADER(
+// @world_object_fragment_shader
+static const char *world_object_fragment_shader = R"FSHADER(
   #version 330 core
 
   // in
@@ -2732,6 +2732,8 @@ static void remove_block(Block b, BlockType t) {
 }
 
 static void set_blocktype(Block b, BlockType new_type) {
+  // this code might manipulate blocks in the world, so we need to lock on state.blocks_lock
+  // so we don't collide with the blockloader thread :)
   SDL_AtomicLock(&state.block_loader.lock);
 
   assert(new_type != BLOCKTYPE_NULL);
@@ -3045,29 +3047,29 @@ static void tool_graphics_init() {
 
     WorldObjectVertex *v = array_pushn(tool_vertices, 4*6);
     *v++ = {x,  y,  z2, {0.1f, 0.1f}, {0.0f, 0.0f, 1.0f}};
-    *v++ = {x2, y,  z2, {0.1f, 0.1f}, {0.0f, 0.0f, 1.0f}};
-    *v++ = {x2, y2, z2, {0.1f, 0.1f}, {0.0f, 0.0f, 1.0f}};
-    *v++ = {x,  y2, z2, {0.1f, 0.1f}, {0.0f, 0.0f, 1.0f}};
-    *v++ = {x2, y,  z,  {0.1f, 0.8f}, {0.0f, 0.0f, -1.0f}};
-    *v++ = {x,  y,  z,  {0.1f, 0.8f}, {0.0f, 0.0f, -1.0f}};
-    *v++ = {x,  y2, z,  {0.1f, 0.8f}, {0.0f, 0.0f, -1.0f}};
-    *v++ = {x2, y2, z,  {0.1f, 0.8f}, {0.0f, 0.0f, -1.0f}};
-    *v++ = {x2, y,  z,  {0.1f, 0.5f}, {1.0f, 0.0f, 0.0f}};
-    *v++ = {x2, y2, z,  {0.1f, 0.5f}, {1.0f, 0.0f, 0.0f}};
-    *v++ = {x2, y2, z2, {0.1f, 0.5f}, {1.0f, 0.0f, 0.0f}};
-    *v++ = {x2, y,  z2, {0.1f, 0.5f}, {1.0f, 0.0f, 0.0f}};
-    *v++ = {x2, y2, z,  {0.1f, 0.5f}, {0.0f, 1.0f, 0.0f}};
-    *v++ = {x,  y2, z,  {0.1f, 0.5f}, {0.0f, 1.0f, 0.0f}};
-    *v++ = {x,  y2, z2, {0.1f, 0.5f}, {0.0f, 1.0f, 0.0f}};
-    *v++ = {x2, y2, z2, {0.1f, 0.5f}, {0.0f, 1.0f, 0.0f}};
-    *v++ = {x, y2, z,   {0.1f, 0.5f}, {-1.0f, 0.0f, 0.0f}};
-    *v++ = {x, y,  z,   {0.1f, 0.5f}, {-1.0f, 0.0f, 0.0f}};
-    *v++ = {x, y,  z2,  {0.1f, 0.5f}, {-1.0f, 0.0f, 0.0f}};
-    *v++ = {x, y2, z2,  {0.1f, 0.5f}, {-1.0f, 0.0f, 0.0f}};
-    *v++ = {x,  y, z,   {0.1f, 0.5f}, {0.0f, -1.0f, 0.0f}};
-    *v++ = {x2, y, z,   {0.1f, 0.5f}, {0.0f, -1.0f, 0.0f}};
-    *v++ = {x2, y, z2,  {0.1f, 0.5f}, {0.0f, -1.0f, 0.0f}};
-    *v++ = {x,  y, z2,  {0.1f, 0.5f}, {0.0f, -1.0f, 0.0f}};
+    *v++ = {x2, y,  z2, {0.2f, 0.1f}, {0.0f, 0.0f, 1.0f}};
+    *v++ = {x2, y2, z2, {0.2f, 0.2f}, {0.0f, 0.0f, 1.0f}};
+    *v++ = {x,  y2, z2, {0.1f, 0.2f}, {0.0f, 0.0f, 1.0f}};
+    *v++ = {x2, y,  z,  {0.8f, 0.8f}, {0.0f, 0.0f, -1.0f}};
+    *v++ = {x,  y,  z,  {0.9f, 0.8f}, {0.0f, 0.0f, -1.0f}};
+    *v++ = {x,  y2, z,  {0.9f, 0.9f}, {0.0f, 0.0f, -1.0f}};
+    *v++ = {x2, y2, z,  {0.8f, 0.9f}, {0.0f, 0.0f, -1.0f}};
+    *v++ = {x2, y,  z,  {0.5f, 0.5f}, {1.0f, 0.0f, 0.0f}};
+    *v++ = {x2, y2, z,  {0.6f, 0.5f}, {1.0f, 0.0f, 0.0f}};
+    *v++ = {x2, y2, z2, {0.6f, 0.6f}, {1.0f, 0.0f, 0.0f}};
+    *v++ = {x2, y,  z2, {0.5f, 0.6f}, {1.0f, 0.0f, 0.0f}};
+    *v++ = {x2, y2, z,  {0.2f, 0.2f}, {0.0f, 1.0f, 0.0f}};
+    *v++ = {x,  y2, z,  {0.3f, 0.2f}, {0.0f, 1.0f, 0.0f}};
+    *v++ = {x,  y2, z2, {0.3f, 0.3f}, {0.0f, 1.0f, 0.0f}};
+    *v++ = {x2, y2, z2, {0.2f, 0.3f}, {0.0f, 1.0f, 0.0f}};
+    *v++ = {x, y2, z,   {0.5f, 0.5f}, {-1.0f, 0.0f, 0.0f}};
+    *v++ = {x, y,  z,   {0.6f, 0.5f}, {-1.0f, 0.0f, 0.0f}};
+    *v++ = {x, y,  z2,  {0.6f, 0.6f}, {-1.0f, 0.0f, 0.0f}};
+    *v++ = {x, y2, z2,  {0.5f, 0.6f}, {-1.0f, 0.0f, 0.0f}};
+    *v++ = {x,  y, z,   {0.7f, 0.7f}, {0.0f, -1.0f, 0.0f}};
+    *v++ = {x2, y, z,   {0.8f, 0.7f}, {0.0f, -1.0f, 0.0f}};
+    *v++ = {x2, y, z2,  {0.8f, 0.8f}, {0.0f, -1.0f, 0.0f}};
+    *v++ = {x,  y, z2,  {0.7f, 0.8f}, {0.0f, -1.0f, 0.0f}};
   }
 
   for (int i = 0; i < tool_vertices.size; i += 4) {
@@ -3080,21 +3082,23 @@ static void tool_graphics_init() {
     *e++ = i+3;
   }
   state.tool_vb.set_data(tool_vertices.items, tool_vertices.size, tool_elements.items, tool_elements.size, GL_STATIC_DRAW);
+  assert(state.tool_vb.num_items() == tool_elements.size);
+  assert(state.tool_vb.num_vertices == tool_vertices.size);
+  assert(state.tool_vb.num_elements == tool_elements.size);
+
   array_free(tool_vertices);
   array_free(tool_elements);
   stbi_image_free(data);
 
   // set up pipeline
-  state.tool_pipeline.shader = &state.world_object_shader;
-  state.tool_pipeline.render_flags = RENDERFLAG_DEPTH_TEST;
+  state.tool_pipeline = state.opaque_block_pipeline;
   state.tool_pipeline.vb = &state.tool_vb;
-  state.tool_pipeline.framebuffer = &state.gbuffer;
 }
 
 static void block_graphics_init() {
   state.block_texture = Texture::create_from_file("textures.bmp", GL_TEXTURE_2D, GL_RGB, GL_SRGB_ALPHA);
 
-  state.world_object_shader = Shader::create_from_string(block_vertex_shader, block_fragment_shader);
+  state.world_object_shader = Shader::create_from_string(world_object_vertex_shader, world_object_fragment_shader);
   state.opaque_block_pipeline.shader = &state.world_object_shader;
   state.opaque_block_pipeline.shader->set("u_fog_near", 100.0f);
   state.opaque_block_pipeline.shader->set("u_fog_far", 130.0f);
@@ -3501,7 +3505,7 @@ static void update_player(float dt) {
   bool in_water = get_blocktype(pos_to_block(state.player.pos)) == BLOCKTYPE_WATER;
 
   // move player, accountng for drag and stuff, or if the player is flying
-  // ACC = MAX - DRAG*MAX + FRIC
+  // ACC = (1-DRAG)*MAX + FRIC
   // DRAG = (MAX + FRIC - ACC)/MAX
   // FRIC = ACC - MAX + DRAG*MAX
   const float FRICTION = in_water ? 0.003f : 0.001f;
@@ -3510,11 +3514,12 @@ static void update_player(float dt) {
   const float FALL_ACCELERATION = in_water ? 0.004f : 0.015f;
   const float JUMPPOWER = 0.21f;
 
-  const float MAX_FALL_SPEED = in_water ? 0.02f : 10.0f;
+  const float MAX_FALL_SPEED = in_water ? 0.03f : 10.0f;
   const float MAX_MOVE_SPEED = in_water ? 0.09f : 0.14f;
 
   const float DRAG = (MAX_MOVE_SPEED + FRICTION - MOVE_ACCELERATION)/MAX_MOVE_SPEED;
   const float FALL_DRAG = (MAX_FALL_SPEED + FALL_FRICTION - FALL_ACCELERATION)/MAX_FALL_SPEED;
+  printf("%f\n", FALL_DRAG);
 
   // const float CONST_Z_DRAG = in_water ? 0.7f : 0.0f;
 
@@ -3544,8 +3549,6 @@ static void update_player(float dt) {
         state.player.flying = true;
     }
     v.z += -dt*FALL_ACCELERATION;
-    // if (in_water)
-      // v.z += dt*BUOYANCY;
     // proportional drag (air resistance)
     v.x *= powf(DRAG, dt);
     v.y *= powf(DRAG, dt);
@@ -3571,8 +3574,6 @@ static void update_player(float dt) {
     }
   }
 
-  // this code might manipulate blocks in the world, so we need to lock on state.blocks_lock
-  // so we don't collide with the blockloader thread :)
   // mouse clicked - remove block
   if (state.mouse_clicked) {
     // find the block
@@ -3822,15 +3823,14 @@ static void sdl_init() {
   if (!glcontext) die("Failed to create context: %s", SDL_GetError());
 }
 
-static void render_transparent_blocks(const m4 &) {
+static void render_transparent_blocks(const m4 &viewprojection) {
   if (state.transparent_block_vertices_dirty) {
-    state.transparent_block_pipeline.vb->bind();
-    glBufferData(GL_ARRAY_BUFFER, state.transparent_block_vertices.size*sizeof(*state.transparent_block_vertices.items), state.transparent_block_vertices.items, GL_DYNAMIC_DRAW);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, state.transparent_block_elements.size*sizeof(*state.transparent_block_elements.items), state.transparent_block_elements.items, GL_DYNAMIC_DRAW);
+    state.transparent_block_pipeline.vb->set_data(state.transparent_block_vertices.items, state.transparent_block_vertices.size, state.transparent_block_elements.items, state.transparent_block_elements.size);
     state.transparent_block_vertices_dirty = false;
   }
   gl_ok_or_die;
 
+  state.transparent_block_pipeline.shader->set("u_viewprojection", viewprojection);
   state.transparent_block_pipeline.render(state.transparent_block_elements.size);
 }
 
@@ -3874,6 +3874,14 @@ static void calculate_directional_light() {
   state.diffuse_light = {diffuse_light_strength, diffuse_light_strength, diffuse_light_strength};
 }
 
+static void setup_world_object_shader() {
+  state.opaque_block_pipeline.shader->set("u_camerapos", state.camera_pos);
+  state.opaque_block_pipeline.shader->set("u_shadowmap_viewprojection", state.shadowmap_viewprojection);
+  state.opaque_block_pipeline.shader->set("u_ambient", state.ambient_light);
+  state.opaque_block_pipeline.shader->set("u_skylight_dir", state.sun_direction);
+  state.opaque_block_pipeline.shader->set("u_skylight_color", state.diffuse_light);
+}
+
 static void render_shadowmap() {
   // render shadowmap
   // calculate camera position and projection matrix
@@ -3889,39 +3897,26 @@ static void render_shadowmap() {
 
 static void render_opaque_blocks(m4 viewprojection) {
   // render opaque blocks
-  state.opaque_block_pipeline.shader->set("u_camerapos", state.camera_pos);
   state.opaque_block_pipeline.shader->set("u_viewprojection", viewprojection);
-  state.opaque_block_pipeline.shader->set("u_shadowmap_viewprojection", state.shadowmap_viewprojection);
-  state.opaque_block_pipeline.shader->set("u_ambient", state.ambient_light);
-  state.opaque_block_pipeline.shader->set("u_skylight_dir", state.sun_direction);
-  state.opaque_block_pipeline.shader->set("u_skylight_color", state.diffuse_light);
-
   state.opaque_block_pipeline.render(state.block_elements.size);
 }
 
 static void render_tool(const m4& proj) {
   static float a;
-  a += 0.03f;
-  m4 v = camera_view_matrix(&state.camera, {-1.0f, -1.0f, sinf(a)});
+  a += 0.07f;
+  m4 v = camera_view_matrix(&state.camera, {-1.0f, -1.0f, sinf(a)*0.3f});
   m4 vp = proj * v;
 
-  state.tool_pipeline.shader->set("u_camerapos", state.camera_pos);
+  state.tool_pipeline.shader->set("u_camerapos", v3{0.0f, 0.0f, 0.0f});
   state.tool_pipeline.shader->set("u_viewprojection", vp);
-  state.tool_pipeline.shader->set("u_shadowmap_viewprojection", state.shadowmap_viewprojection);
-  state.tool_pipeline.shader->set("u_ambient", state.ambient_light);
-  state.tool_pipeline.shader->set("u_skylight_dir", state.sun_direction);
-  state.tool_pipeline.shader->set("u_skylight_color", state.diffuse_light);
-
   state.tool_pipeline.render();
+  state.tool_pipeline.shader->set("u_camerapos", state.camera_pos);
 }
 
 static void render_skybox(const m4 &view, const m4 &proj) {
-  glDisable(GL_CULL_FACE);
-
   // remove translation from view matrix, since we want skybox to always be around us
   m4 v = view;
   v.d[3] = v.d[7] = v.d[11] = 0.0f;
-  // v.d[12] = v.d[13] = v.d[14] = 0.0f;
   v.d[15] = 1.0f;
 
   m4 vp = proj * v;
@@ -3930,8 +3925,6 @@ static void render_skybox(const m4 &view, const m4 &proj) {
   state.skybox_pipeline.shader->set("u_ambient", state.ambient_light);
 
   state.skybox_pipeline.render(36);
-
-  FrameBuffer::bind_default();
 }
 
 static void render_ui() {
@@ -4038,15 +4031,6 @@ static void generate_block_mesh() {
 
   reset_block_vertices();
 
-  #if 0
-  FOR_BLOCKS_IN_RANGE_x
-  FOR_BLOCKS_IN_RANGE_y
-  FOR_BLOCKS_IN_RANGE_z {
-    Block b = {x,y,z};
-    set_blocktype_cache(b, calc_blocktype(b));
-  }
-  #endif
-
   // render block faces that face transparent blocks
   FOR_BLOCKS_IN_RANGE_x
   FOR_BLOCKS_IN_RANGE_y
@@ -4132,19 +4116,20 @@ bool has_commandline_option(int argc, const char *argv[], const char *opt) {
 }
 #endif
 
-void render_world_to_gbuffer(const m4 &view, const m4 &proj) {
+static void render_world_to_gbuffer(const m4 &view, const m4 &proj) {
   const m4 viewprojection = proj * view;
 
   // resend block vertices to gpu if they changed
   if (state.block_vertices_dirty) {
-    state.opaque_block_vb.bind();
-    glBufferData(GL_ARRAY_BUFFER, state.block_vertices.size*sizeof(*state.block_vertices.items), state.block_vertices.items, GL_DYNAMIC_DRAW);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, state.block_elements.size*sizeof(*state.block_elements.items), state.block_elements.items, GL_DYNAMIC_DRAW);
+    state.opaque_block_vb.set_data(state.block_vertices.items, state.block_vertices.size, state.block_elements.items, state.block_elements.size);
     state.block_vertices_dirty = false;
   }
 
   // calculate sun/moon position, and direction
   calculate_directional_light();
+
+  // set static uniforms in world object shader
+  setup_world_object_shader();
 
   // render shadowmap to gbuffer
   render_shadowmap();
@@ -4153,7 +4138,7 @@ void render_world_to_gbuffer(const m4 &view, const m4 &proj) {
   render_opaque_blocks(viewprojection);
 
   // render the tool you are holding
-  // render_tool(proj);
+  render_tool(proj);
 
   // render skybox to gbuffer
   render_skybox(view, proj);
@@ -4332,8 +4317,8 @@ mine_main {
   gamestate_init();
 
   // gl buffers, shaders, framebuffers
-  tool_graphics_init();
   block_graphics_init();
+  tool_graphics_init();
   shadowmap_init();
   post_processing_init();
   ui_graphics_init();
