@@ -6,9 +6,11 @@
 //
 // * Fix jittering shadows by moving light in texel-sized increments (https://msdn.microsoft.com/en-us/library/ee416324(v=vs.85).aspx)
 //
-// * optimize loading blocks & persist block changes to disk:
-//   - Get rid of the blocktype cache for the entire world, and only use it when loading blocks and generating mesh, since it is really only needed then.
-//   - divide block mesh vertices into multiple buffer objects?
+// * Improve block representation:
+//   - persist block changes to disk
+//   - Compress blocktype cache (RLE would probably work really well)
+//   - Keep a table-style cache temporarily for speed when loading blocks
+//   - divide block mesh vertices into multiple buffer objects
 //   - good datastructure for storing block changes
 //
 // * fix perlin noise at negative coordinates
@@ -1407,6 +1409,7 @@ struct Map {
 
   void remove(Value *value) {
     Slot *s = (Slot*) ((u8*)value - offsetof(Slot, value));
+    assert(s >= slots && s < slots + num_slots);
     s->key = tombstone;
   }
 
@@ -1453,6 +1456,7 @@ private:
   }
 
   Slot* try_extend(int new_num_slots) {
+    // alloc new memory
     printf("extending hashmap to %i slots\n", new_num_slots);
     Slot *new_slots = (Slot*)malloc(new_num_slots * sizeof(*new_slots));
 
@@ -1472,7 +1476,6 @@ private:
   }
 
   void extend() {
-    // alloc new memory
     int new_num_slots = num_slots*2;
     Slot *new_slots;
 
@@ -2838,11 +2841,14 @@ static bool collision_plane(v3 x0, v3 x1, v3 p0, v3 p1, v3 p2, float *t_out, v3 
   return true;
 }
 
+static bool default_collision_passthrough(Block b) {
+  return get_blocktype(b) == BLOCKTYPE_AIR;
+}
 struct Collision {
   Block block;
   v3 normal;
 };
-static Vec<Collision> collision(v3 p0, v3 p1, float dt, v3 size, OPTIONAL v3 *p_out, OPTIONAL v3 *vel_out, bool glide) {
+static Vec<Collision> collision(v3 p0, v3 p1, float dt, v3 size, OPTIONAL v3 *p_out, OPTIONAL v3 *vel_out, bool glide, bool (*passthrough)(Block) = default_collision_passthrough) {
   const int MAX_ITERATIONS = 20;
   static Collision hits[MAX_ITERATIONS];
   int num_hits = 0;
@@ -2866,7 +2872,7 @@ static Vec<Collision> collision(v3 p0, v3 p1, float dt, v3 size, OPTIONAL v3 *p_
     for (int x = b0.x; x <= b1.x; ++x)
     for (int y = b0.y; y <= b1.y; ++y)
     for (int z = b0.z; z <= b1.z; ++z) {
-      if (get_blocktype({x,y,z}) == BLOCKTYPE_AIR)
+      if (passthrough({x,y,z}))
         continue;
 
       float t = 2.0f;
@@ -3231,47 +3237,47 @@ static void skybox_init() {
     v3 pos;
   };
   SkyboxVertex vertices[] = {
-      -1.0f,  1.0f, -1.0f,
-      -1.0f, -1.0f, -1.0f,
-       1.0f, -1.0f, -1.0f,
-       1.0f, -1.0f, -1.0f,
-       1.0f,  1.0f, -1.0f,
-      -1.0f,  1.0f, -1.0f,
+    -1.0f,  1.0f, -1.0f,
+    -1.0f, -1.0f, -1.0f,
+     1.0f, -1.0f, -1.0f,
+     1.0f, -1.0f, -1.0f,
+     1.0f,  1.0f, -1.0f,
+    -1.0f,  1.0f, -1.0f,
 
-      -1.0f, -1.0f,  1.0f,
-      -1.0f, -1.0f, -1.0f,
-      -1.0f,  1.0f, -1.0f,
-      -1.0f,  1.0f, -1.0f,
-      -1.0f,  1.0f,  1.0f,
-      -1.0f, -1.0f,  1.0f,
+    -1.0f, -1.0f,  1.0f,
+    -1.0f, -1.0f, -1.0f,
+    -1.0f,  1.0f, -1.0f,
+    -1.0f,  1.0f, -1.0f,
+    -1.0f,  1.0f,  1.0f,
+    -1.0f, -1.0f,  1.0f,
 
-       1.0f, -1.0f, -1.0f,
-       1.0f, -1.0f,  1.0f,
-       1.0f,  1.0f,  1.0f,
-       1.0f,  1.0f,  1.0f,
-       1.0f,  1.0f, -1.0f,
-       1.0f, -1.0f, -1.0f,
+     1.0f, -1.0f, -1.0f,
+     1.0f, -1.0f,  1.0f,
+     1.0f,  1.0f,  1.0f,
+     1.0f,  1.0f,  1.0f,
+     1.0f,  1.0f, -1.0f,
+     1.0f, -1.0f, -1.0f,
 
-      -1.0f, -1.0f,  1.0f,
-      -1.0f,  1.0f,  1.0f,
-       1.0f,  1.0f,  1.0f,
-       1.0f,  1.0f,  1.0f,
-       1.0f, -1.0f,  1.0f,
-      -1.0f, -1.0f,  1.0f,
+    -1.0f, -1.0f,  1.0f,
+    -1.0f,  1.0f,  1.0f,
+     1.0f,  1.0f,  1.0f,
+     1.0f,  1.0f,  1.0f,
+     1.0f, -1.0f,  1.0f,
+    -1.0f, -1.0f,  1.0f,
 
-      -1.0f,  1.0f, -1.0f,
-       1.0f,  1.0f, -1.0f,
-       1.0f,  1.0f,  1.0f,
-       1.0f,  1.0f,  1.0f,
-      -1.0f,  1.0f,  1.0f,
-      -1.0f,  1.0f, -1.0f,
+    -1.0f,  1.0f, -1.0f,
+     1.0f,  1.0f, -1.0f,
+     1.0f,  1.0f,  1.0f,
+     1.0f,  1.0f,  1.0f,
+    -1.0f,  1.0f,  1.0f,
+    -1.0f,  1.0f, -1.0f,
 
-      -1.0f, -1.0f, -1.0f,
-      -1.0f, -1.0f,  1.0f,
-       1.0f, -1.0f, -1.0f,
-       1.0f, -1.0f, -1.0f,
-      -1.0f, -1.0f,  1.0f,
-       1.0f, -1.0f,  1.0f
+    -1.0f, -1.0f, -1.0f,
+    -1.0f, -1.0f,  1.0f,
+     1.0f, -1.0f, -1.0f,
+     1.0f, -1.0f, -1.0f,
+    -1.0f, -1.0f,  1.0f,
+     1.0f, -1.0f,  1.0f
   };
 
   // create and bind
@@ -3474,6 +3480,16 @@ static void read_vr_input() {
 }
 #endif
 
+static bool player_collision_passthrough(Block b) {
+  switch (get_blocktype(b)) {
+    case BLOCKTYPE_AIR:
+    case BLOCKTYPE_WATER:
+      return true;
+    default:
+      return false;
+  }
+}
+
 static void update_player(float dt) {
 
   // turn player depending on mouse movement
@@ -3482,18 +3498,35 @@ static void update_player(float dt) {
   if (state.mouse_dx) camera_turn(&state.camera, state.mouse_dx * turn_sensitivity * dt);
   if (state.mouse_dy) camera_pitch(&state.camera, -state.mouse_dy * pitch_sensitivity * dt);
 
+  bool in_water = get_blocktype(pos_to_block(state.player.pos)) == BLOCKTYPE_WATER;
+
   // move player, accountng for drag and stuff, or if the player is flying
-  const float ACCELERATION = 0.03f;
-  const float GRAVITY = 0.015f;
+  // ACC = MAX - DRAG*MAX + FRIC
+  // DRAG = (MAX + FRIC - ACC)/MAX
+  // FRIC = ACC - MAX + DRAG*MAX
+  const float FRICTION = in_water ? 0.003f : 0.001f;
+  const float FALL_FRICTION = in_water ? 0.003f : 0.001f;
+  const float MOVE_ACCELERATION = 0.03f;
+  const float FALL_ACCELERATION = in_water ? 0.004f : 0.015f;
   const float JUMPPOWER = 0.21f;
+
+  const float MAX_FALL_SPEED = in_water ? 0.02f : 10.0f;
+  const float MAX_MOVE_SPEED = in_water ? 0.09f : 0.14f;
+
+  const float DRAG = (MAX_MOVE_SPEED + FRICTION - MOVE_ACCELERATION)/MAX_MOVE_SPEED;
+  const float FALL_DRAG = (MAX_FALL_SPEED + FALL_FRICTION - FALL_ACCELERATION)/MAX_FALL_SPEED;
+
+  // const float CONST_Z_DRAG = in_water ? 0.7f : 0.0f;
+
   v3 v = state.player.vel;
+
   if (state.player.flying) {
-    if (state.keyisdown[KEY_FORWARD]) v += dt*camera_forward(&state.camera, ACCELERATION);
-    if (state.keyisdown[KEY_BACKWARD]) v += dt*camera_backward(&state.camera, ACCELERATION);
-    if (state.keyisdown[KEY_LEFT]) v += dt*camera_strafe_left(&state.camera, ACCELERATION);
-    if (state.keyisdown[KEY_RIGHT]) v += dt*camera_strafe_right(&state.camera, ACCELERATION);
-    if (state.keyisdown[KEY_FLYUP]) v += dt*camera_up(&state.camera, ACCELERATION);
-    if (state.keyisdown[KEY_FLYDOWN]) v += dt*camera_down(&state.camera, ACCELERATION);
+    if (state.keyisdown[KEY_FORWARD]) v += dt*camera_forward(&state.camera, MOVE_ACCELERATION);
+    if (state.keyisdown[KEY_BACKWARD]) v += dt*camera_backward(&state.camera, MOVE_ACCELERATION);
+    if (state.keyisdown[KEY_LEFT]) v += dt*camera_strafe_left(&state.camera, MOVE_ACCELERATION);
+    if (state.keyisdown[KEY_RIGHT]) v += dt*camera_strafe_right(&state.camera, MOVE_ACCELERATION);
+    if (state.keyisdown[KEY_FLYUP]) v += dt*camera_up(&state.camera, MOVE_ACCELERATION);
+    if (state.keyisdown[KEY_FLYDOWN]) v += dt*camera_down(&state.camera, MOVE_ACCELERATION);
     if (state.keypressed[KEY_JUMP])
       state.player.flying = false;
     // proportional drag (air resistance)
@@ -3501,23 +3534,26 @@ static void update_player(float dt) {
     v.y *= powf(0.88f, dt);
     v.z *= powf(0.88f, dt);
   } else {
-    if (state.keyisdown[KEY_FORWARD]) v += dt*camera_forward(&state.camera, ACCELERATION);
-    if (state.keyisdown[KEY_BACKWARD]) v += dt*camera_backward(&state.camera, ACCELERATION);
-    if (state.keyisdown[KEY_LEFT]) v += dt*camera_strafe_left(&state.camera, ACCELERATION);
-    if (state.keyisdown[KEY_RIGHT]) v += dt*camera_strafe_right(&state.camera, ACCELERATION);
+    if (state.keyisdown[KEY_FORWARD]) v += dt*camera_forward(&state.camera, MOVE_ACCELERATION);
+    if (state.keyisdown[KEY_BACKWARD]) v += dt*camera_backward(&state.camera, MOVE_ACCELERATION);
+    if (state.keyisdown[KEY_LEFT]) v += dt*camera_strafe_left(&state.camera, MOVE_ACCELERATION);
+    if (state.keyisdown[KEY_RIGHT]) v += dt*camera_strafe_right(&state.camera, MOVE_ACCELERATION);
     if (state.keypressed[KEY_JUMP]) {
       v.z = JUMPPOWER;
       if (!state.player.on_ground)
         state.player.flying = true;
     }
-    v.z += -dt*GRAVITY;
+    v.z += -dt*FALL_ACCELERATION;
+    // if (in_water)
+      // v.z += dt*BUOYANCY;
     // proportional drag (air resistance)
-    v.x *= powf(0.8f, dt);
-    v.y *= powf(0.8f, dt);
+    v.x *= powf(DRAG, dt);
+    v.y *= powf(DRAG, dt);
+    v.z *= powf(FALL_DRAG, dt);
     // constant drag (friction against ground kinda)
-    v2 drag = {at_most(0.001f, fabsf(v.x)), at_most(0.001f, fabsf(v.y))};
-    v.x -= sign(v.x) * drag.x;
-    v.y -= sign(v.y) * drag.y;
+    v.x -= sign(v.x) * at_most(FRICTION, fabsf(v.x));
+    v.y -= sign(v.y) * at_most(FRICTION, fabsf(v.y));
+    // v.z -= sign(v.z) * at_most(CONST_Z_DRAG, fabsf(v.z));
   }
   state.player.vel = v;
 
@@ -3525,7 +3561,7 @@ static void update_player(float dt) {
   state.camera_pos = state.player.pos + CAMERA_OFFSET_FROM_PLAYER;
 
   // collision
-  Vec<Collision> hits = collision(state.player.pos, state.player.pos + state.player.vel*dt, dt, state.player.hitbox, &state.player.pos, &state.player.vel, true);
+  Vec<Collision> hits = collision(state.player.pos, state.player.pos + state.player.vel*dt, dt, state.player.hitbox, &state.player.pos, &state.player.vel, true, player_collision_passthrough);
   state.player.on_ground = false;
   For(hits) {
     if (it->normal.z > 0.9f) {
@@ -3544,7 +3580,7 @@ static void update_player(float dt) {
     v3 ray = camera_forward_fly(&state.camera, RAY_DISTANCE);
     v3 p0 = state.player.pos + CAMERA_OFFSET_FROM_PLAYER;
     v3 p1 = p0 + ray;
-    Vec<Collision> hits = collision(p0, p1, dt, {0.01f, 0.01f, 0.01f}, 0, 0, false);
+    Vec<Collision> hits = collision(p0, p1, dt, {0.01f, 0.01f, 0.01f}, 0, 0, false, player_collision_passthrough);
     if (hits.size) {
       debug(if (hits.size != 1) die("Multiple collisions when not gliding? Somethings wrong"));
       BlockType t = get_blocktype(hits[0].block);
